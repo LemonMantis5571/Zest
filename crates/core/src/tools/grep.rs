@@ -147,8 +147,8 @@ impl Tool for Grep {
         self.prepare_call(input)
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String> {
-        self.run_search(input).await
+    async fn run(&self, input: Value) -> std::result::Result<super::ToolOutcome, String> {
+        self.run_search(input).await.map(super::ToolOutcome::text)
     }
 }
 
@@ -358,7 +358,8 @@ mod tests {
         let out = tool
             .run(json!({ "pattern": "println!", "glob": "*.rs" }))
             .await
-            .unwrap();
+            .unwrap()
+            .body;
         assert!(out.contains("src/main.rs:2:"), "{out}");
         assert!(!out.contains("README.md"), "{out}");
     }
@@ -370,7 +371,8 @@ mod tests {
         let out = tool
             .run(json!({ "pattern": "helper", "path": "src/lib.rs" }))
             .await
-            .unwrap();
+            .unwrap()
+            .body;
         assert!(out.contains("src/lib.rs:1:"), "{out}");
         assert!(!out.contains("main.rs"), "{out}");
     }
@@ -402,7 +404,8 @@ mod tests {
         let out = tool
             .run(json!({ "pattern": "SECRET_TOKEN" }))
             .await
-            .unwrap();
+            .unwrap()
+            .body;
         assert!(out.contains("ok.txt"), "{out}");
         assert!(!out.contains(".env"), "{out}");
     }
@@ -420,7 +423,8 @@ mod tests {
         let out = tool
             .run(json!({ "pattern": "SECRET", "path": ".env" }))
             .await
-            .unwrap();
+            .unwrap()
+            .body;
         assert!(out.contains(".env"), "{out}");
     }
 

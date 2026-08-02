@@ -231,6 +231,7 @@ export function reduceChatEvent(
               status: event.isError ? "error" : "done",
               summary: event.summary,
               approvalId: undefined,
+              metadata: event.metadata ?? t.metadata,
             };
           }),
         })),

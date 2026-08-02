@@ -51,12 +51,18 @@ Step "cargo clippy (strict)" {
 }
 
 Step "cargo test" {
-  cargo test --workspace
+  # --lib: avoid executing Tauri bin test harnesses (WDAC/App Control can block them).
+  cargo test --workspace --lib
 }
 
 Step "binding drift (ts-rs)" {
   cargo test -p zest-desktop --features export-bindings --lib export_bindings
-  git diff --exit-code -- "crates/desktop/ui/src/lib/generated/ChatEvent.ts" "crates/desktop/ui/src/lib/generated/SessionInfo.ts"
+  git diff --exit-code -- `
+    "crates/desktop/ui/src/lib/generated/ChatEvent.ts" `
+    "crates/desktop/ui/src/lib/generated/SessionInfo.ts" `
+    "crates/desktop/ui/src/lib/generated/ProviderView.ts" `
+    "crates/desktop/ui/src/lib/generated/ModelCapability.ts" `
+    "crates/desktop/ui/src/lib/generated/ToolMetaView.ts"
 }
 
 Step "npm audit" {

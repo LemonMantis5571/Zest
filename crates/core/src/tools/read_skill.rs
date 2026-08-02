@@ -43,7 +43,7 @@ impl Tool for ReadSkill {
         })
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String> {
+    async fn run(&self, input: Value) -> std::result::Result<super::ToolOutcome, String> {
         let name = input
             .get("name")
             .and_then(|v| v.as_str())
@@ -57,12 +57,12 @@ impl Tool for ReadSkill {
             .map_err(|_| "skill registry lock poisoned".to_string())?;
 
         match skills.get(name) {
-            Some(skill) => Ok(format!(
+            Some(skill) => Ok(super::ToolOutcome::text(format!(
                 "# Skill: {}\n\n{}\n\n{}",
                 skill.name,
                 skill.description,
                 skill.body.trim()
-            )),
+            ))),
             None => {
                 let known: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
                 if known.is_empty() {
@@ -96,7 +96,7 @@ mod tests {
             .unwrap(),
         );
         let tool = ReadSkill::new(Arc::new(RwLock::new(set)));
-        let out = tool.run(json!({ "name": "demo" })).await.unwrap();
+        let out = tool.run(json!({ "name": "demo" })).await.unwrap().body;
         assert!(out.contains("Body here."));
     }
 
