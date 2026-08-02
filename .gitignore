@@ -1,4 +1,53 @@
-/target
+# --- Build artifacts ---
+/target/
 **/*.rs.bk
+*.tsbuildinfo
+
+# --- Secrets / local env ---
 .env
-.env.local
+.env.*
+!.env.example
+
+# --- Project-local Zest state (do not commit chat history or personal prompts) ---
+.zest/threads/
+.zest/last-thread-id
+.zest/system.md
+.zest/doctor*
+.zest/*.json
+# Keep .zest/skills/ shareable when present (not ignored).
+
+# --- Gateway binaries (download locally; see README) ---
+/tools/
+!/tools/.gitkeep
+
+# --- Node (npm workspaces at repo root) ---
+node_modules/
+crates/desktop/ui/dist/
+crates/desktop/ui/.vite/
+
+# --- Tauri generated ---
+crates/desktop/gen/
+crates/desktop/src-tauri/target/
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# --- Agent skill installs (optional local copies) ---
+.agents/
+.claude/
+.cursor/skills/
+.windsurf/
+
+# --- Scratch / local experiments ---
+/tmp/
+*.log
+*.tmp
+.cache/
