@@ -4,6 +4,11 @@ Track notable changes here.
 
 ## 2026-08-02
 
+- Milestone 1 (usage/routing UX): Rust-authoritative `ProviderView` + session
+  `models`/`defaultModel`; `usage_snapshot` with Measured by Zest / Provider
+  reported / Not reported; delegation `ToolMetadata` side-channel and thread
+  format v2; Settings Usage section; invalid delegated-model skip; opt-in
+  `zest doctor --live --dual`.
 - Milestone 0 (Stable Windows Alpha): provider-immutable threads + project-scoped sticky
   prefs map; typed thread load outcomes (refuse newer formats); centralized atomic
   persistence; async `CancelToken` with HTTP abort, `message_stop` requirement, idle/

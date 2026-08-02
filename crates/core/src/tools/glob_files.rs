@@ -50,7 +50,7 @@ impl Tool for GlobFiles {
         })
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String> {
+    async fn run(&self, input: Value) -> std::result::Result<super::ToolOutcome, String> {
         let pattern = input
             .get("pattern")
             .and_then(Value::as_str)
@@ -77,7 +77,7 @@ impl Tool for GlobFiles {
             .await
             .map_err(|e| format!("glob task failed: {e}"))??;
 
-        format_matches(matches)
+        format_matches(matches).map(super::ToolOutcome::text)
     }
 }
 
@@ -128,7 +128,11 @@ mod tests {
     async fn finds_rust_files() {
         let dir = scratch("rs");
         let tool = GlobFiles::new(&dir).unwrap();
-        let out = tool.run(json!({ "pattern": "**/*.rs" })).await.unwrap();
+        let out = tool
+            .run(json!({ "pattern": "**/*.rs" }))
+            .await
+            .unwrap()
+            .body;
         assert!(out.contains("src/main.rs"), "{out}");
         assert!(out.contains("src/lib.rs"), "{out}");
         assert!(!out.contains("README.md"), "{out}");
@@ -138,7 +142,7 @@ mod tests {
     async fn bare_extension_pattern_matches_anywhere() {
         let dir = scratch("bare");
         let tool = GlobFiles::new(&dir).unwrap();
-        let out = tool.run(json!({ "pattern": "*.md" })).await.unwrap();
+        let out = tool.run(json!({ "pattern": "*.md" })).await.unwrap().body;
         assert!(out.contains("README.md"), "{out}");
     }
 
@@ -158,7 +162,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("target")).unwrap();
         std::fs::write(dir.join("target/out.rs"), "").unwrap();
         let tool = GlobFiles::new(&dir).unwrap();
-        let out = tool.run(json!({ "pattern": "**/*" })).await.unwrap();
+        let out = tool.run(json!({ "pattern": "**/*" })).await.unwrap().body;
         assert!(!out.contains(".env\n") && !out.ends_with(".env"), "{out}");
         assert!(out.contains(".env.example"), "{out}");
         assert!(!out.contains("target/"), "{out}");

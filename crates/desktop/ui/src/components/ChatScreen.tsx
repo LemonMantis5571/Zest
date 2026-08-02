@@ -24,7 +24,7 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
 import { Spinner } from "@/components/ui/spinner";
-import { providerSupportsModelPicker, type EffortId } from "@/lib/models";
+import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import type { ChatMessage, SessionInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -76,7 +76,7 @@ export function ChatScreen({
   optionsDisabled = false,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const showPicker = providerSupportsModelPicker(session.provider);
+  const showPicker = sessionSupportsModelPicker(session.models);
 
   function closeSettings() {
     setSettingsOpen(false);
@@ -269,6 +269,8 @@ export function ChatScreen({
           value={draft}
           model={model}
           effort={effort}
+          models={session.models}
+          defaultModel={session.defaultModel}
           meta={`${session.label} · ${shortRoot(session.root)}`}
           sending={sending}
           showModelPicker={showPicker}

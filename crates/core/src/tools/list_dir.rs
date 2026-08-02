@@ -48,7 +48,7 @@ impl Tool for ListDir {
         })
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String> {
+    async fn run(&self, input: Value) -> std::result::Result<super::ToolOutcome, String> {
         let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
 
         let resolved = self.root.resolve(path)?;
@@ -84,7 +84,7 @@ impl Tool for ListDir {
         if truncated {
             out.push_str(&format!("\n\n[truncated at {MAX_ENTRIES} entries]"));
         }
-        Ok(out)
+        Ok(super::ToolOutcome::text(out))
     }
 }
 
@@ -108,7 +108,7 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
 
         let tool = ListDir::new(&dir).unwrap();
-        let out = tool.run(json!({})).await.unwrap();
+        let out = tool.run(json!({})).await.unwrap().body;
         assert_eq!(out, "a.txt\nb.txt\nsub/");
     }
 
@@ -118,7 +118,7 @@ mod tests {
         std::fs::write(dir.join(".env"), "x").unwrap();
         std::fs::write(dir.join("visible.txt"), "x").unwrap();
         let tool = ListDir::new(&dir).unwrap();
-        let out = tool.run(json!({})).await.unwrap();
+        let out = tool.run(json!({})).await.unwrap().body;
         assert!(out.contains("visible.txt"), "{out}");
         assert!(!out.contains(".env"), "{out}");
     }

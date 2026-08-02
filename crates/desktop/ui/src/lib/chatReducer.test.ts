@@ -140,6 +140,41 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(tools[0].diff, "+x");
   });
 
+  it("keeps delegation provenance metadata on tool cards", () => {
+    const state = reduceAll([
+      {
+        kind: "tool_call_start",
+        ...ID,
+        message_id: "a1",
+        name: "delegate",
+        id: "t-del",
+      },
+      {
+        kind: "tool_call_result",
+        ...ID,
+        message_id: "a1",
+        name: "delegate",
+        id: "t-del",
+        summary: "Delegated to codex · gpt-5.6-sol",
+        isError: false,
+        metadata: {
+          kind: "delegation",
+          provider_id: "codex",
+          model: "gpt-5.6-sol",
+          routing_kind: "mechanical",
+          skipped: [{ providerId: "claude", reason: "not loaded" }],
+          usage_delta: { requests: 1n, inputTokens: 10n, outputTokens: 5n },
+        },
+      },
+    ]);
+    const tool = assistant(state).tools[0];
+    assert.equal(tool.metadata?.kind, "delegation");
+    if (tool.metadata?.kind === "delegation") {
+      assert.equal(tool.metadata.provider_id, "codex");
+      assert.equal(tool.metadata.skipped?.[0]?.reason, "not loaded");
+    }
+  });
+
   it("creates a tool card from approval_needed when start was missed", () => {
     const state = reduceAll([
       {

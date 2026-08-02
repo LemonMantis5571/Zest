@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use zest_core::{
     detect_all, AuthStatus, Config, Ledger, ProviderConfig, Routing, RuntimeBuilder, StreamEvent,
-    Target, Thread, ThreadStore, DEFAULT_MODEL,
+    Target, Thread, ThreadStore, ToolMetadata, DEFAULT_MODEL, DELEGATE_TOOL,
 };
 
 const SYSTEM: &str = "\
@@ -30,12 +30,18 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("doctor") => {
-            let live = std::env::args().skip(2).any(|a| a == "--live");
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let live = args.iter().any(|a| a == "--live");
+            let dual = args.iter().any(|a| a == "--dual");
             if !live {
                 print_doctor_help();
                 std::process::exit(2);
             }
-            run_doctor_live().await?;
+            if dual {
+                run_doctor_dual().await?;
+            } else {
+                run_doctor_live().await?;
+            }
             return Ok(());
         }
         _ => {}
@@ -113,16 +119,22 @@ async fn main() -> anyhow::Result<()> {
 fn print_doctor_help() {
     eprintln!(
         "\
-zest doctor --live
+zest doctor --live [--dual]
 
-Opt-in live acceptance check for Stable Windows Alpha. Spends real quota.
+Opt-in live acceptance checks. Spends real quota.
 
-Runs one read-only tool turn against README.md in the current directory and
-verifies streaming events, tool completion, usage-ledger delta, and thread
-persistence. Write tools and delegation are disabled for this command.
+  --live
+      One read-only tool turn against README.md. Verifies streaming, tool
+      completion, usage-ledger delta, and thread persistence. Write tools and
+      delegation are disabled.
 
-Requires a working provider (see zest.toml / ZEST_GATEWAY_KEY) and a README.md
-in the workspace root.
+  --live --dual
+      Requires two loaded providers. Proves parent pinning, delegated worker
+      routing, structured provenance metadata, separate ledger attribution, and
+      restored persistence. Read-only tools only.
+
+Requires a working provider config (see zest.toml / ZEST_GATEWAY_KEY) and a
+README.md in the workspace root.
 
 This is manual on purpose — do not wire it into CI.
 "
@@ -280,6 +292,213 @@ async fn run_doctor_live() -> anyhow::Result<()> {
     );
     println!("  persistence ........... ok (thread {})", loaded.thread.id);
     println!("\n\x1b[32mdoctor --live passed\x1b[0m");
+    Ok(())
+}
+
+/// Dual-provider live check: parent pinned, delegate worker, provenance, ledger split.
+async fn run_doctor_dual() -> anyhow::Result<()> {
+    let root = std::env::current_dir()?;
+    let readme = root.join("README.md");
+    if !readme.is_file() {
+        anyhow::bail!("doctor --live --dual needs README.md in {}", root.display());
+    }
+
+    println!("zest doctor --live --dual");
+    println!("workspace: {}", root.display());
+    println!("note: spends quota on parent + worker; read-only tools only\n");
+
+    let config = match gateway_override() {
+        Some(config) => config,
+        None => Config::find(&root)?,
+    };
+    for issue in config.lint() {
+        eprintln!("\x1b[33mwarning:\x1b[0m {issue}");
+    }
+
+    let ledger_path = root.join(".zest").join("doctor-dual-usage.json");
+    let _ = std::fs::remove_file(&ledger_path);
+    let ledger = Arc::new(Mutex::new(Ledger::load_from(&ledger_path)));
+
+    let runtime = RuntimeBuilder::new(&root)
+        .with_config(config)
+        .with_system(
+            "You are running zest doctor --live --dual. You MUST call the delegate \
+             tool exactly once with kind \"mechanical\" (or omit kind if no rules) \
+             and task: \"Read README.md with read_file (path exactly README.md) and \
+             reply with one short sentence containing the word zest.\" Do not call \
+             other tools yourself. After delegate returns, reply with one short \
+             sentence confirming the worker result.",
+        )
+        .with_ledger(ledger.clone())
+        .enable_delegate(true)
+        .register_write_tools(false)
+        .build()?;
+
+    if runtime.registry.len() < 2 {
+        anyhow::bail!(
+            "doctor --dual needs at least two loaded providers (found {}). \
+             Configure a second provider in zest.toml.",
+            runtime.registry.len()
+        );
+    }
+    if !runtime.agent.tool_names().contains(&DELEGATE_TOOL) {
+        anyhow::bail!("doctor --dual failed: delegate tool was not registered");
+    }
+
+    let parent_id = runtime.provider_id.clone();
+    println!(
+        "parent {} · model {} · effort {} · providers {}",
+        parent_id,
+        runtime.model,
+        runtime.effort,
+        runtime.registry.len()
+    );
+
+    let mut agent = runtime.agent;
+    let mut saw_delegate_start = false;
+    let mut saw_delegate_meta = false;
+    let mut worker_provider: Option<String> = None;
+    let mut tool_error: Option<String> = None;
+
+    let mut on_event = |ev: StreamEvent<'_>| match ev {
+        StreamEvent::Text(t) | StreamEvent::Thinking(t) => {
+            if !t.is_empty() {
+                print!("{t}");
+                let _ = std::io::stdout().flush();
+            }
+        }
+        StreamEvent::ToolCallStart { name, .. } => {
+            println!("\n→ {name}");
+            if name == DELEGATE_TOOL {
+                saw_delegate_start = true;
+            }
+        }
+        StreamEvent::ToolCallResult {
+            name,
+            summary,
+            is_error,
+            metadata,
+            ..
+        } => {
+            if is_error {
+                println!("✗ {name} {summary}");
+                tool_error = Some(format!("{name}: {summary}"));
+            } else {
+                println!("✓ {name}");
+            }
+            if name == DELEGATE_TOOL {
+                match metadata {
+                    Some(ToolMetadata::Delegation {
+                        provider_id, model, ..
+                    }) => {
+                        saw_delegate_meta = true;
+                        worker_provider = Some(provider_id.clone());
+                        println!("  provenance: {provider_id} · {model}");
+                    }
+                    None => {
+                        tool_error = Some("delegate returned without provenance metadata".into());
+                    }
+                }
+            }
+        }
+        StreamEvent::ApprovalNeeded { tool_name, .. } => {
+            tool_error = Some(format!("unexpected approval for {tool_name}"));
+        }
+    };
+
+    agent
+        .send(
+            "Delegate a mechanical README read, then confirm briefly.",
+            &mut on_event,
+        )
+        .await?;
+    println!("\n");
+
+    if let Some(err) = tool_error {
+        anyhow::bail!("doctor dual failure: {err}");
+    }
+    if !saw_delegate_start {
+        anyhow::bail!("doctor --dual failed: model never called delegate");
+    }
+    if !saw_delegate_meta {
+        anyhow::bail!("doctor --dual failed: missing structured delegation provenance");
+    }
+    let worker_id = worker_provider
+        .ok_or_else(|| anyhow::anyhow!("doctor --dual failed: no worker provider id"))?;
+    if worker_id == parent_id {
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m worker used the same provider as parent (`{parent_id}`); \
+             routing may lack a distinct second account"
+        );
+    }
+
+    let (parent_usage, worker_usage) = {
+        let mut guard = ledger.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        guard.reload_from_disk();
+        (
+            guard.get(&parent_id).cloned(),
+            guard.get(&worker_id).cloned(),
+        )
+    };
+    let parent_reqs = parent_usage.as_ref().map(|u| u.requests).unwrap_or(0);
+    let worker_reqs = worker_usage.as_ref().map(|u| u.requests).unwrap_or(0);
+    if parent_reqs == 0 {
+        anyhow::bail!("doctor --dual failed: parent ledger has no spend");
+    }
+    if worker_reqs == 0 {
+        anyhow::bail!("doctor --dual failed: worker ledger has no spend");
+    }
+
+    let store = ThreadStore::open(&root)?;
+    let mut thread = Thread::new().with_provider(&parent_id);
+    thread.title = Some("doctor --live --dual".into());
+    thread.agent_messages = agent.messages.clone();
+    // Project a synthetic delegate card so v2 metadata round-trips.
+    thread.apply_assistant_start("a-doctor");
+    thread.apply_tool_start("a-doctor", "tool-delegate", DELEGATE_TOOL);
+    thread.apply_tool_result(
+        "a-doctor",
+        "tool-delegate",
+        DELEGATE_TOOL,
+        &format!("Delegated to {worker_id}"),
+        false,
+        Some(ToolMetadata::Delegation {
+            provider_id: worker_id.clone(),
+            model: "doctor".into(),
+            routing_kind: Some("mechanical".into()),
+            skipped: vec![],
+            usage_delta: Default::default(),
+        }),
+    );
+    thread.apply_done("a-doctor");
+    store.save(&thread)?;
+    let loaded = store.load_with_recovery(&thread.id)?;
+    if loaded.thread.version < 2 {
+        anyhow::bail!("doctor --dual failed: thread not at format v2");
+    }
+    let has_meta = loaded.thread.messages.iter().any(|m| match m {
+        zest_core::StoredMessage::Assistant { tools, .. } => tools.iter().any(|t| {
+            matches!(
+                &t.metadata,
+                Some(ToolMetadata::Delegation { provider_id, .. }) if provider_id == &worker_id
+            )
+        }),
+        _ => false,
+    });
+    if !has_meta {
+        anyhow::bail!("doctor --dual failed: delegation metadata not restored from disk");
+    }
+    if loaded.thread.provider_id.as_deref() != Some(parent_id.as_str()) {
+        anyhow::bail!("doctor --dual failed: parent provider_id not restored");
+    }
+
+    println!("checks:");
+    println!("  parent pinned ......... ok ({parent_id})");
+    println!("  delegate provenance ... ok → {worker_id}");
+    println!("  ledger parent ......... ok ({parent_reqs} req)");
+    println!("  ledger worker ......... ok ({worker_reqs} req)");
+    println!("  persistence v2 ........ ok (thread {})", loaded.thread.id);
+    println!("\n\x1b[32mdoctor --live --dual passed\x1b[0m");
     Ok(())
 }
 

@@ -108,6 +108,7 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
                 : t.summary,
           path: t.path,
           diff: t.diff,
+          metadata: t.metadata,
         };
       }),
       error: msg.error,

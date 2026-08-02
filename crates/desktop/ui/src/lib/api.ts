@@ -7,10 +7,15 @@ import type {
   ProviderRow,
   SessionInfo,
   ThreadSummary,
+  UsageSnapshot,
 } from "./types";
 
 export function listProviders() {
   return invoke<ProviderRow[]>("list_providers");
+}
+
+export function usageSnapshot() {
+  return invoke<UsageSnapshot>("usage_snapshot");
 }
 
 export function lastProvider() {
