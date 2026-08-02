@@ -1,0 +1,171 @@
+use std::path::Path;
+
+use async_trait::async_trait;
+use globset::{Glob, GlobSetBuilder};
+use serde_json::{json, Value};
+
+use super::project::ProjectRoot;
+use super::walk::walk_files;
+use super::Tool;
+
+const MAX_MATCHES: usize = 200;
+
+/// Find files by glob pattern, confined to a project root.
+pub struct GlobFiles {
+    root: ProjectRoot,
+}
+
+impl GlobFiles {
+    pub fn new(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        Ok(Self {
+            root: ProjectRoot::new(root)?,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for GlobFiles {
+    fn name(&self) -> &str {
+        "glob"
+    }
+
+    fn description(&self) -> &str {
+        "Find file paths under the project root matching a glob pattern \
+         (e.g. `**/*.rs`, `src/**/*.toml`). Returns paths relative to the \
+         project root, sorted. Respects `.gitignore` and skips `.git`, \
+         `.zest`, `target`, and `node_modules`. Does not read file contents."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern relative to the project root, e.g. **/*.rs"
+                }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn run(&self, input: Value) -> std::result::Result<String, String> {
+        let pattern = input
+            .get("pattern")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing required field `pattern`".to_string())?;
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return Err("pattern must not be empty".to_string());
+        }
+
+        let mut builder = GlobSetBuilder::new();
+        builder
+            .add(Glob::new(pattern).map_err(|e| format!("invalid glob pattern: {e}"))?);
+        // Also accept patterns that omit the recursive prefix when the model
+        // writes `*.rs` meaning "anywhere".
+        if !pattern.contains('/') && !pattern.contains('\\') && !pattern.starts_with("**/") {
+            let anywhere = format!("**/{pattern}");
+            builder
+                .add(Glob::new(&anywhere).map_err(|e| format!("invalid glob pattern: {e}"))?);
+        }
+        let set = builder
+            .build()
+            .map_err(|e| format!("invalid glob pattern: {e}"))?;
+
+        let root = self.root.clone();
+        let matches = tokio::task::spawn_blocking(move || collect_matches(&root, &set))
+            .await
+            .map_err(|e| format!("glob task failed: {e}"))??;
+
+        format_matches(matches)
+    }
+}
+
+fn collect_matches(
+    root: &ProjectRoot,
+    set: &globset::GlobSet,
+) -> Result<Vec<String>, String> {
+    let mut matches = Vec::new();
+
+    for resolved in walk_files(root, root.as_path()) {
+        let rel = root.relativize(&resolved);
+        if set.is_match(&rel) || set.is_match(Path::new(&rel)) {
+            matches.push(rel);
+            if matches.len() >= MAX_MATCHES {
+                break;
+            }
+        }
+    }
+
+    matches.sort();
+    Ok(matches)
+}
+
+fn format_matches(matches: Vec<String>) -> Result<String, String> {
+    let truncated = matches.len() >= MAX_MATCHES;
+    if matches.is_empty() {
+        return Ok("(no matches)".to_string());
+    }
+    let mut out = matches.join("\n");
+    if truncated {
+        out.push_str(&format!("\n\n[truncated at {MAX_MATCHES} matches]"));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zest-glob-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        std::fs::write(dir.join("README.md"), "hi").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn finds_rust_files() {
+        let dir = scratch("rs");
+        let tool = GlobFiles::new(&dir).unwrap();
+        let out = tool.run(json!({ "pattern": "**/*.rs" })).await.unwrap();
+        assert!(out.contains("src/main.rs"), "{out}");
+        assert!(out.contains("src/lib.rs"), "{out}");
+        assert!(!out.contains("README.md"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn bare_extension_pattern_matches_anywhere() {
+        let dir = scratch("bare");
+        let tool = GlobFiles::new(&dir).unwrap();
+        let out = tool.run(json!({ "pattern": "*.md" })).await.unwrap();
+        assert!(out.contains("README.md"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_pattern() {
+        let dir = scratch("empty");
+        let tool = GlobFiles::new(&dir).unwrap();
+        let err = tool.run(json!({ "pattern": "  " })).await.unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn omits_sensitive_and_ignored() {
+        let dir = scratch("omit");
+        std::fs::write(dir.join(".env"), "x").unwrap();
+        std::fs::write(dir.join(".env.example"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/out.rs"), "").unwrap();
+        let tool = GlobFiles::new(&dir).unwrap();
+        let out = tool.run(json!({ "pattern": "**/*" })).await.unwrap();
+        assert!(!out.contains(".env\n") && !out.ends_with(".env"), "{out}");
+        assert!(out.contains(".env.example"), "{out}");
+        assert!(!out.contains("target/"), "{out}");
+    }
+}

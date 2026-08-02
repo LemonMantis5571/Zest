@@ -50,6 +50,13 @@ pub enum ProviderConfig {
         api_key_env: Option<String>,
         /// Required: a gateway has no sensible default model of its own.
         model: String,
+        /// Optional allow-list. When empty/omitted, only `model` is accepted.
+        #[serde(default)]
+        models: Vec<String>,
+        /// Optional effort allow-list for every listed model. When empty/omitted,
+        /// the standard effort set (`low`…`max`) is used.
+        #[serde(default)]
+        efforts: Vec<String>,
     },
 }
 
@@ -223,10 +230,16 @@ model = "gpt-5.3-codex"
         ));
         match &config.providers["codex"] {
             ProviderConfig::Gateway {
-                base_url, model, ..
+                base_url,
+                model,
+                models,
+                efforts,
+                ..
             } => {
                 assert_eq!(base_url, "http://127.0.0.1:8317");
                 assert_eq!(model, "gpt-5.3-codex");
+                assert!(models.is_empty());
+                assert!(efforts.is_empty());
             }
             other => panic!("expected a gateway, got {other:?}"),
         }
@@ -305,6 +318,33 @@ base_url = "http://127.0.0.1:8317"
         )
         .unwrap_err();
         assert!(err.to_string().contains("model"), "{err}");
+    }
+
+    #[test]
+    fn gateway_may_list_supported_models_and_efforts() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-sol"
+models = ["gpt-5.6-sol", "gpt-5.6-terra"]
+efforts = ["low", "high", "max"]
+"#,
+        )
+        .expect("valid");
+        match &config.providers["codex"] {
+            ProviderConfig::Gateway {
+                models, efforts, ..
+            } => {
+                assert_eq!(models, &["gpt-5.6-sol".to_string(), "gpt-5.6-terra".to_string()]);
+                assert_eq!(
+                    efforts,
+                    &["low".to_string(), "high".to_string(), "max".to_string()]
+                );
+            }
+            other => panic!("expected gateway, got {other:?}"),
+        }
     }
 
     #[test]
