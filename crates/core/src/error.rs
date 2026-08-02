@@ -22,6 +22,10 @@ pub enum HarnessError {
     #[error("turn stopped: {0}")]
     StoppedEarly(String),
 
+    /// User (or session controller) cancelled the in-flight turn.
+    #[error("turn cancelled")]
+    Cancelled,
+
     #[error("{0}")]
     Other(String),
 }

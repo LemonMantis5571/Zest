@@ -21,6 +21,110 @@ use crate::anthropic::types::{Message, ToolDef, Usage};
 use crate::auth::AuthStatus;
 use crate::error::Result;
 
+/// Efforts every provider understands today (Anthropic + CLIProxyAPI mapping).
+pub const STANDARD_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// One selectable model and the efforts it accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSpec {
+    pub id: String,
+    /// When non-empty, only these efforts are valid for this model.
+    pub efforts: Vec<String>,
+}
+
+/// Static catalogue a provider exposes for pickers and session validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDescriptor {
+    pub id: String,
+    pub default_model: String,
+    pub models: Vec<ModelSpec>,
+}
+
+/// Normalize UI / env effort aliases to the wire form.
+pub fn normalize_effort(effort: &str) -> String {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "low" | "medium" | "high" | "xhigh" | "max" => effort.trim().to_ascii_lowercase(),
+        "extra" | "extra high" | "extra_high" => "xhigh".into(),
+        "med" => "medium".into(),
+        _ => "high".into(),
+    }
+}
+
+/// Built-in Codex catalogue used when `zest.toml` omits `models` for provider `codex`.
+///
+/// Mirrors the desktop picker (`CODEX_MODELS` in the UI). Keep these in sync.
+pub const CODEX_KNOWN_MODELS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+];
+
+/// Build a catalogue from an optional allow-list.
+///
+/// When `models` is empty, only `default_model` is accepted (generic gateways).
+/// Prefer [`catalogue_for_provider`] for known provider ids. When `efforts` is
+/// empty, [`STANDARD_EFFORTS`] is used.
+pub fn catalogue_from_lists(
+    default_model: &str,
+    models: &[String],
+    efforts: &[String],
+) -> Vec<ModelSpec> {
+    let efforts: Vec<String> = if efforts.is_empty() {
+        STANDARD_EFFORTS.iter().map(|s| (*s).to_string()).collect()
+    } else {
+        efforts.to_vec()
+    };
+    let mut ids: Vec<String> = if models.is_empty() {
+        vec![default_model.to_string()]
+    } else {
+        models.to_vec()
+    };
+    if !ids.iter().any(|m| m == default_model) {
+        ids.insert(0, default_model.to_string());
+    }
+    ids.into_iter()
+        .map(|id| ModelSpec {
+            id,
+            efforts: efforts.clone(),
+        })
+        .collect()
+}
+
+/// Like [`catalogue_from_lists`], but provider `codex` gets [`CODEX_KNOWN_MODELS`]
+/// when the config omit `models` — so sticky/UI picks (Sol/Terra/Luna) validate.
+pub fn catalogue_for_provider(
+    provider_id: &str,
+    default_model: &str,
+    models: &[String],
+    efforts: &[String],
+) -> Vec<ModelSpec> {
+    if models.is_empty() && provider_id == "codex" {
+        let builtin: Vec<String> = CODEX_KNOWN_MODELS.iter().map(|s| (*s).to_string()).collect();
+        return catalogue_from_lists(default_model, &builtin, efforts);
+    }
+    catalogue_from_lists(default_model, models, efforts)
+}
+
+fn validate_against(models: &[ModelSpec], provider_id: &str, model: &str, effort: &str) -> std::result::Result<(), String> {
+    let spec = models.iter().find(|m| m.id == model).ok_or_else(|| {
+        let known: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+        format!(
+            "model `{model}` is not supported by provider `{provider_id}` (known: {})",
+            known.join(", ")
+        )
+    })?;
+    if !spec.efforts.is_empty() && !spec.efforts.iter().any(|e| e == effort) {
+        return Err(format!(
+            "effort `{effort}` is not supported for model `{model}` on provider `{provider_id}` (known: {})",
+            spec.efforts.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// One model turn, described without reference to any provider's wire format.
 ///
 /// `effort` and `thinking` are *requests*, not commands. A provider maps them
@@ -43,7 +147,25 @@ pub struct TurnRequest {
 pub enum StreamEvent<'a> {
     Text(&'a str),
     Thinking(&'a str),
-    ToolCallStart { name: &'a str },
+    ToolCallStart { name: &'a str, id: &'a str },
+    /// Emitted after a local tool finishes. `summary` is a short preview of the body.
+    ToolCallResult {
+        name: &'a str,
+        id: &'a str,
+        summary: &'a str,
+        is_error: bool,
+    },
+    /// A gated tool is waiting on the user (write/exec). Owned strings so the
+    /// preview can outlive the tool-call stack frame.
+    ApprovalNeeded {
+        approval_id: String,
+        tool_name: String,
+        tool_call_id: String,
+        risk: crate::tools::approval::ToolRisk,
+        path: String,
+        summary: String,
+        diff: String,
+    },
 }
 
 /// Throughput headroom as reported by the provider.
@@ -97,6 +219,27 @@ pub trait Provider: Send + Sync {
 
     fn default_model(&self) -> &str;
 
+    /// Models this provider accepts, with per-model effort allow-lists.
+    ///
+    /// Default: only [`Self::default_model`] with [`STANDARD_EFFORTS`].
+    fn models(&self) -> Vec<ModelSpec> {
+        catalogue_from_lists(self.default_model(), &[], &[])
+    }
+
+    /// Picker / validation view of this provider.
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: self.id().to_string(),
+            default_model: self.default_model().to_string(),
+            models: self.models(),
+        }
+    }
+
+    /// Reject unknown model / effort pairs before a turn spends quota.
+    fn validate_selection(&self, model: &str, effort: &str) -> std::result::Result<(), String> {
+        validate_against(&self.models(), self.id(), model, effort)
+    }
+
     /// Whether this provider can be used right now. Rendered by the launch
     /// picker, and consulted before routing a task here.
     fn auth_status(&self) -> AuthStatus;
@@ -108,4 +251,41 @@ pub trait Provider: Send + Sync {
         req: &TurnRequest,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_models_list_accepts_only_default() {
+        let cat = catalogue_from_lists("gpt-5.6-sol", &[], &[]);
+        assert_eq!(cat.len(), 1);
+        assert_eq!(cat[0].id, "gpt-5.6-sol");
+        assert!(cat[0].efforts.contains(&"high".into()));
+    }
+
+    #[test]
+    fn models_list_includes_default_if_missing() {
+        let models = vec!["gpt-5.4".into()];
+        let cat = catalogue_from_lists("gpt-5.6-sol", &models, &["low".into()]);
+        assert_eq!(cat[0].id, "gpt-5.6-sol");
+        assert_eq!(cat[1].id, "gpt-5.4");
+        assert_eq!(cat[0].efforts, vec!["low".to_string()]);
+    }
+
+    #[test]
+    fn codex_builtin_catalogue_includes_luna() {
+        let cat = catalogue_for_provider("codex", "gpt-5.6-sol", &[], &[]);
+        assert!(cat.iter().any(|m| m.id == "gpt-5.6-luna"));
+        assert!(cat.iter().any(|m| m.id == "gpt-5.6-terra"));
+        assert!(cat.iter().any(|m| m.id == "gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn other_gateway_empty_models_stays_default_only() {
+        let cat = catalogue_for_provider("other", "gpt-5.6-sol", &[], &[]);
+        assert_eq!(cat.len(), 1);
+        assert_eq!(cat[0].id, "gpt-5.6-sol");
+    }
 }
