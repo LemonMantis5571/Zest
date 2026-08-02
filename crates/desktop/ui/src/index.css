@@ -108,6 +108,14 @@
     line-height: 1.5;
     letter-spacing: -0.05px;
     margin: 0;
+    /* WebView was inheriting the indigo accent as a thick blue caret. */
+    caret-color: var(--foreground);
+  }
+
+  input,
+  textarea,
+  [contenteditable="true"] {
+    caret-color: var(--foreground);
   }
 }
 

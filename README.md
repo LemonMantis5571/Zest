@@ -4,16 +4,14 @@
 
 [![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
 
-Zest is the Claude Code / Codex shape: filesystem tools, permissions, sessions. It is **not** a chatbot platform.
-
-> Not [LimeBot](https://github.com/LemonMantis5571/LimeBot-OS). LimeBot is a long-running personal assistant (Python, Discord/Telegram/etc.). Zest borrows design lessons only — no shared code or runtime.
+Zest reads and edits your project with tools, streams replies, and asks before writing files — a local coding agent you run in a repo.
 
 | | |
 |---|---|
-| **Status** | Stable Windows **alpha** — reliability first |
+| **Status** | Stable Windows **alpha** |
 | **Live path** | Codex via [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (local gateway) |
-| **UI** | Tauri desktop + React/shadcn webview |
-| **CLI** | `zest` — same agent loop, terminal front-end |
+| **UI** | Desktop app (Tauri) |
+| **CLI** | `zest` — same agent in the terminal |
 
 ---
 
@@ -223,18 +221,15 @@ skip live doctor — do not invent a green result.
 
 ---
 
-## Design constraints (short)
+## Notes
 
-- Agent path is **Rust** — Node is build/dev for the webview only.
-- Providers are first-class; gateway vs native is an implementation detail.
-- Parent chat is **provider-pinned**; multi-provider work uses `delegate` workers.
-- No bash/exec until an OS sandbox exists.
-- Subscription headroom is estimated when providers don’t expose a remaining quota API — never labeled as a live reading.
-
-Details: `memory/decisions.md`.
+- The agent runs in **Rust**. Node is only used to build the desktop UI.
+- One chat stays on one provider; other accounts are used through delegated workers when configured.
+- Shell/exec tools are not enabled yet.
+- Usage in Settings shows what Zest used — not your full subscription remaining.
 
 ---
 
 ## License
 
-See repository license when published. Local-only alpha; gateway OAuth ToS risk is accepted by the operator — see `memory/decisions.md`.
+Local-only alpha. See the repository license when published.

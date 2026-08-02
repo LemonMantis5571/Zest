@@ -508,6 +508,25 @@ fn workspace_root() -> Result<PathBuf, String> {
     cwd.canonicalize().or(Ok(cwd))
 }
 
+/// Strip the Windows `\\?\` extended-path prefix for UI display.
+///
+/// `canonicalize()` on Windows returns paths like `\\?\D:\Code\zest`. That form
+/// is correct for the filesystem APIs but looks broken in Settings copy.
+fn display_path(path: &std::path::Path) -> String {
+    let raw = path.display().to_string();
+    display_path_str(&raw)
+}
+
+fn display_path_str(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 fn open_store(root: &std::path::Path) -> Result<ThreadStore, String> {
     ThreadStore::open(root).map_err(|e| e.to_string())
 }
@@ -612,7 +631,7 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
         label: session.provider_label.clone(),
         model: session.model.clone(),
         effort: session.effort.clone(),
-        root: session.root.display().to_string(),
+        root: display_path(&session.root),
         thread_id: session.thread_id.clone(),
         default_model,
         models,
@@ -1295,12 +1314,7 @@ fn system_prompt_info(session: &Session) -> Result<SystemPromptInfo, String> {
         base: session.base_system.clone(),
         custom,
         composed_preview,
-        custom_path: session
-            .root
-            .join(".zest")
-            .join("system.md")
-            .display()
-            .to_string(),
+        custom_path: display_path(&session.root.join(".zest").join("system.md")),
     })
 }
 
@@ -1401,6 +1415,16 @@ mod characterization {
         assert_eq!(normalize_effort("extra_high"), "xhigh");
         assert_eq!(normalize_effort("nonsense"), "high");
         assert_eq!(normalize_effort("max"), "max");
+    }
+
+    #[test]
+    fn display_path_strips_windows_extended_prefix() {
+        assert_eq!(display_path_str(r"\\?\D:\Code\zest"), r"D:\Code\zest");
+        assert_eq!(
+            display_path_str(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+        assert_eq!(display_path_str(r"D:\Code\zest"), r"D:\Code\zest");
     }
 
     #[test]
