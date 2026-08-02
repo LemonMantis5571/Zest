@@ -2,22 +2,15 @@ import { useState } from "react";
 import {
   CheckIcon,
   CopyIcon,
-  FilePenLineIcon,
   MenuIcon,
   SquarePenIcon,
-  WrenchIcon,
 } from "lucide-react";
 
 import { BrandMark } from "@/components/BrandMark";
 import { Composer } from "@/components/Composer";
+import { Markdown } from "@/components/Markdown";
 import { SettingsPanel } from "@/components/SettingsPanel";
-import {
-  Attachment,
-  AttachmentContent,
-  AttachmentDescription,
-  AttachmentMedia,
-  AttachmentTitle,
-} from "@/components/ui/attachment";
+import { ToolCallRow } from "@/components/ToolCallRow";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
@@ -32,8 +25,15 @@ import {
 } from "@/components/ui/message-scroller";
 import { Spinner } from "@/components/ui/spinner";
 import { providerSupportsModelPicker, type EffortId } from "@/lib/models";
-import type { ChatMessage, SessionInfo, ToolPart } from "@/lib/types";
+import type { ChatMessage, SessionInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+function shortRoot(root: string): string {
+  const normalized = root.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 2) return root;
+  return parts.slice(-2).join("/");
+}
 
 type Props = {
   session: SessionInfo;
@@ -44,6 +44,7 @@ type Props = {
   effort: EffortId;
   onDraftChange: (value: string) => void;
   onSend: () => void;
+  onStop?: () => void;
   onNewChat: () => void;
   onChangeProvider: () => void;
   onReconnect: () => void;
@@ -64,6 +65,7 @@ export function ChatScreen({
   effort,
   onDraftChange,
   onSend,
+  onStop,
   onNewChat,
   onChangeProvider,
   onReconnect,
@@ -89,8 +91,11 @@ export function ChatScreen({
           </div>
           <div className="leading-tight">
             <div className="text-sm font-semibold tracking-[-0.2px]">Zest</div>
-            <div className="text-[11px] text-muted-foreground">
-              {session.label} · Local
+            <div
+              className="max-w-[42ch] truncate text-[11px] text-muted-foreground"
+              title={session.root}
+            >
+              {session.label} · {shortRoot(session.root)}
             </div>
           </div>
         </div>
@@ -167,13 +172,17 @@ export function ChatScreen({
                             Zest
                           </div>
 
-                          {msg.tools.map((tool) => (
-                            <ToolCard
-                              key={tool.id}
-                              tool={tool}
-                              onResolveApproval={onResolveApproval}
-                            />
-                          ))}
+                          {msg.tools.length > 0 ? (
+                            <div className="flex w-full max-w-full flex-col gap-1.5">
+                              {msg.tools.map((tool) => (
+                                <ToolCallRow
+                                  key={tool.id}
+                                  tool={tool}
+                                  onResolveApproval={onResolveApproval}
+                                />
+                              ))}
+                            </div>
+                          ) : null}
 
                           {msg.thinking ? (
                             <Marker
@@ -186,19 +195,21 @@ export function ChatScreen({
                               <MarkerContent
                                 className={
                                   msg.streaming && !msg.text
-                                    ? "shimmer-text whitespace-pre-wrap"
-                                    : "whitespace-pre-wrap text-muted-foreground"
+                                    ? "shimmer-text"
+                                    : "text-muted-foreground"
                                 }
                               >
-                                {msg.thinking}
+                                <Markdown className="text-xs [&_p]:mb-1.5 [&_p]:leading-relaxed">
+                                  {msg.thinking}
+                                </Markdown>
                               </MarkerContent>
                             </Marker>
                           ) : null}
 
                           {msg.text ? (
                             <div className="group/assistant relative">
-                              <div className="whitespace-pre-wrap text-[15px] leading-[1.65] text-foreground">
-                                {msg.text}
+                              <div className="relative">
+                                <Markdown>{msg.text}</Markdown>
                                 {msg.streaming ? (
                                   <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-primary align-text-bottom" />
                                 ) : null}
@@ -258,12 +269,13 @@ export function ChatScreen({
           value={draft}
           model={model}
           effort={effort}
-          meta={`${session.label} · Local`}
+          meta={`${session.label} · ${shortRoot(session.root)}`}
           sending={sending}
           showModelPicker={showPicker}
           optionsDisabled={optionsDisabled}
           onChange={onDraftChange}
           onSubmit={onSend}
+          onStop={onStop}
           onModelChange={onModelChange}
           onEffortChange={onEffortChange}
         />
@@ -294,106 +306,6 @@ export function ChatScreen({
         }}
       />
     </section>
-  );
-}
-
-function ToolCard({
-  tool,
-  onResolveApproval,
-}: {
-  tool: ToolPart;
-  onResolveApproval: (approvalId: string, allow: boolean) => Promise<void>;
-}) {
-  const awaiting = tool.status === "awaiting_approval";
-  const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
-
-  async function resolve(allow: boolean) {
-    if (!tool.approvalId || busy !== null) return;
-    setBusy(allow ? "allow" : "deny");
-    try {
-      await onResolveApproval(tool.approvalId, allow);
-    } catch {
-      // App restores the approval card; clear local busy so Allow/Deny work again.
-      setBusy(null);
-    }
-  }
-
-  if (awaiting) {
-    return (
-      <div className="w-full max-w-full overflow-hidden rounded-xl border border-border/80 bg-card/90">
-        <div className="flex items-start gap-2.5 border-b border-border/60 px-3 py-2.5">
-          <div className="mt-0.5 grid size-8 place-items-center rounded-lg bg-muted text-foreground">
-            <FilePenLineIcon className="size-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-medium text-foreground">
-              Allow {tool.name}?
-            </div>
-            <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-              {tool.path || tool.summary || "Write to project file"}
-            </div>
-          </div>
-        </div>
-        {tool.diff ? (
-          <pre className="max-h-48 overflow-auto border-b border-border/60 bg-[var(--chat-canvas)] px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
-            {tool.diff}
-          </pre>
-        ) : null}
-        <div className="flex items-center justify-end gap-2 px-3 py-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => {
-              void resolve(false);
-            }}
-          >
-            {busy === "deny" ? "Denying…" : "Deny"}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => {
-              void resolve(true);
-            }}
-          >
-            {busy === "allow" ? "Allowing…" : "Allow once"}
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <Attachment
-      state={
-        tool.status === "running"
-          ? "processing"
-          : tool.status === "error"
-            ? "error"
-            : "done"
-      }
-      size="sm"
-      className="max-w-full border-border/80 bg-card/80"
-    >
-      <AttachmentMedia>
-        {tool.status === "running" ? <Spinner /> : <WrenchIcon />}
-      </AttachmentMedia>
-      <AttachmentContent>
-        <AttachmentTitle
-          className={tool.status === "running" ? "shimmer-text" : undefined}
-        >
-          {tool.name}
-        </AttachmentTitle>
-        {tool.summary ? (
-          <AttachmentDescription className="line-clamp-2 font-mono text-[11px]">
-            {tool.summary}
-          </AttachmentDescription>
-        ) : null}
-      </AttachmentContent>
-    </Attachment>
   );
 }
 

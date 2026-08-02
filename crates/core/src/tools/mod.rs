@@ -106,7 +106,10 @@ impl ToolRegistry {
     }
 
     pub fn risk(&self, name: &str) -> Option<ToolRisk> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.risk())
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.risk())
     }
 
     pub fn prepare(&self, name: &str, input: Value) -> Result<PreparedToolCall, String> {

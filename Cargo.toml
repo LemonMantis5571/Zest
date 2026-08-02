@@ -7,6 +7,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[workspace.lints.rust]
+linker_messages = "allow"
+
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"

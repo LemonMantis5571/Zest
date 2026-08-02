@@ -49,10 +49,7 @@ impl Tool for ListDir {
     }
 
     async fn run(&self, input: Value) -> std::result::Result<String, String> {
-        let path = input
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or(".");
+        let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
 
         let resolved = self.root.resolve(path)?;
         let meta = tokio::fs::metadata(&resolved)
@@ -135,10 +132,7 @@ mod tests {
         let err = tool.run(json!({ "path": "f.txt" })).await.unwrap_err();
         assert!(err.contains("not a directory"), "{err}");
 
-        let err = tool
-            .run(json!({ "path": ".." }))
-            .await
-            .unwrap_err();
+        let err = tool.run(json!({ "path": ".." })).await.unwrap_err();
         assert!(
             err.contains("outside the project root") || err.contains("cannot resolve"),
             "{err}"

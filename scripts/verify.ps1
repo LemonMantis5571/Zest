@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+# ASCII-safe Stable Windows Alpha verify gate (PowerShell 5.1).
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
@@ -25,6 +26,22 @@ Step "toolchain check" {
   }
 }
 
+Step "npm ci" {
+  npm ci --no-fund --no-audit
+}
+
+Step "ui test" {
+  npm run ui:test
+}
+
+Step "ui lint (strict)" {
+  npm run ui:lint
+}
+
+Step "ui build" {
+  npm run ui:build
+}
+
 Step "cargo fmt --check" {
   cargo fmt --all -- --check
 }
@@ -37,25 +54,22 @@ Step "cargo test" {
   cargo test --workspace
 }
 
-Step "npm install (workspaces)" {
-  npm install --no-fund --no-audit
+Step "binding drift (ts-rs)" {
+  cargo test -p zest-desktop --features export-bindings --lib export_bindings
+  git diff --exit-code -- "crates/desktop/ui/src/lib/generated/ChatEvent.ts" "crates/desktop/ui/src/lib/generated/SessionInfo.ts"
 }
 
-Step "ui lint" {
-  npm run ui:lint
+Step "npm audit" {
+  npm audit --omit=dev
 }
 
-Step "ui build" {
-  npm run ui:build
-}
-
-Step "cargo deny / audit (best-effort)" {
-  if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
-    cargo deny check
-  } elseif (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
+Step "RustSec (cargo audit)" {
+  if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
     cargo audit
+  } elseif (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
+    cargo deny check advisories
   } else {
-    Write-Host "cargo-deny/audit not installed — skipping (install for full alpha gate)"
+    throw "cargo-audit (or cargo-deny) is required for the RustSec gate. Install: cargo install cargo-audit --locked"
   }
 }
 
@@ -66,3 +80,5 @@ Step "git diff --check" {
 
 Write-Host ""
 Write-Host "verify.ps1 passed" -ForegroundColor Green
+Write-Host "Live doctor is opt-in: cargo run -p zest -- doctor --live"
+Write-Host "(requires gateway/creds; do not fake success without them)"

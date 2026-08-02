@@ -60,6 +60,7 @@ export type ThreadSummary = {
   createdAt: number;
   updatedAt: number;
   title?: string;
+  providerId?: string;
   messageCount: number;
 };
 

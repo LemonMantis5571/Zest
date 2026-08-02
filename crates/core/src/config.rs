@@ -337,7 +337,10 @@ efforts = ["low", "high", "max"]
             ProviderConfig::Gateway {
                 models, efforts, ..
             } => {
-                assert_eq!(models, &["gpt-5.6-sol".to_string(), "gpt-5.6-terra".to_string()]);
+                assert_eq!(
+                    models,
+                    &["gpt-5.6-sol".to_string(), "gpt-5.6-terra".to_string()]
+                );
                 assert_eq!(
                     efforts,
                     &["low".to_string(), "high".to_string(), "max".to_string()]

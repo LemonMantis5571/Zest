@@ -26,6 +26,14 @@ pub enum HarnessError {
     #[error("turn cancelled")]
     Cancelled,
 
+    /// SSE ended without `message_stop` — the turn is not transactional.
+    #[error("stream ended before message_stop")]
+    PrematureEof,
+
+    /// No bytes / events for longer than the idle budget.
+    #[error("stream idle timeout")]
+    StreamIdleTimeout,
+
     #[error("{0}")]
     Other(String),
 }

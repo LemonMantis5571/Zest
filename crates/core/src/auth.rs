@@ -189,8 +189,7 @@ pub fn detect_claude() -> AuthStatus {
     match well_formed_json(&dir.join(".credentials.json")) {
         Some(true) => AuthStatus::Ready { account: None },
         _ => AuthStatus::Unknown {
-            reason: "Claude is installed but stores credentials outside a readable file"
-                .into(),
+            reason: "Claude is installed but stores credentials outside a readable file".into(),
         },
     }
 }
@@ -225,7 +224,11 @@ pub fn detect_antigravity() -> AuthStatus {
 pub fn detect_byok() -> AuthStatus {
     let present = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
         .iter()
-        .any(|k| std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false));
+        .any(|k| {
+            std::env::var(k)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        });
 
     if present {
         AuthStatus::Ready { account: None }
@@ -266,7 +269,8 @@ pub fn resolve_login(provider_id: &str) -> Option<LoginSpawn> {
                         "-codex-login".into(),
                     ],
                     browser_title: "Sign in with ChatGPT",
-                    browser_body: "Finish in your browser. This window will update when you’re done.",
+                    browser_body:
+                        "Finish in your browser. This window will update when you’re done.",
                 });
             }
             Some(LoginSpawn {
@@ -292,8 +296,7 @@ pub fn resolve_login(provider_id: &str) -> Option<LoginSpawn> {
 pub fn start_login(provider_id: &str) -> std::result::Result<LoginSpawn, String> {
     let spawn = resolve_login(provider_id).ok_or_else(|| match provider_id {
         "antigravity" => {
-            "Antigravity has no CLI login Zest can launch — sign in from the Antigravity app"
-                .into()
+            "Antigravity has no CLI login Zest can launch — sign in from the Antigravity app".into()
         }
         "byok" => "API key providers are configured via environment variables, not a login".into(),
         other => format!("no login command for provider `{other}`"),
@@ -408,7 +411,10 @@ mod tests {
 
     #[test]
     fn missing_credential_file_is_absent_not_malformed() {
-        assert_eq!(well_formed_json(Path::new("./definitely-not-here.json")), None);
+        assert_eq!(
+            well_formed_json(Path::new("./definitely-not-here.json")),
+            None
+        );
     }
 
     #[test]

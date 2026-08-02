@@ -13,6 +13,7 @@
     "ui:dev": "npm run dev -w ui",
     "ui:build": "npm run build -w ui",
     "ui:lint": "npm run lint -w ui",
+    "ui:test": "npm run test -w ui",
     "desktop:dev": "npm run dev -w zest-desktop",
     "desktop:build": "npm run build -w zest-desktop",
     "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify.ps1"

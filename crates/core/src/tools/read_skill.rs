@@ -81,7 +81,7 @@ impl Tool for ReadSkill {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{parse_skill_markdown, SkillSource, SkillSet};
+    use crate::skills::{parse_skill_markdown, SkillSet, SkillSource};
     use std::path::Path;
 
     #[tokio::test]
@@ -96,10 +96,7 @@ mod tests {
             .unwrap(),
         );
         let tool = ReadSkill::new(Arc::new(RwLock::new(set)));
-        let out = tool
-            .run(json!({ "name": "demo" }))
-            .await
-            .unwrap();
+        let out = tool.run(json!({ "name": "demo" })).await.unwrap();
         assert!(out.contains("Body here."));
     }
 

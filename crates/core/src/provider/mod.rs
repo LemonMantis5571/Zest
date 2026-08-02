@@ -102,13 +102,21 @@ pub fn catalogue_for_provider(
     efforts: &[String],
 ) -> Vec<ModelSpec> {
     if models.is_empty() && provider_id == "codex" {
-        let builtin: Vec<String> = CODEX_KNOWN_MODELS.iter().map(|s| (*s).to_string()).collect();
+        let builtin: Vec<String> = CODEX_KNOWN_MODELS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
         return catalogue_from_lists(default_model, &builtin, efforts);
     }
     catalogue_from_lists(default_model, models, efforts)
 }
 
-fn validate_against(models: &[ModelSpec], provider_id: &str, model: &str, effort: &str) -> std::result::Result<(), String> {
+fn validate_against(
+    models: &[ModelSpec],
+    provider_id: &str,
+    model: &str,
+    effort: &str,
+) -> std::result::Result<(), String> {
     let spec = models.iter().find(|m| m.id == model).ok_or_else(|| {
         let known: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
         format!(
@@ -139,6 +147,9 @@ pub struct TurnRequest {
     pub max_tokens: u32,
     pub effort: Option<String>,
     pub thinking: bool,
+    /// When set, the provider races the HTTP/SSE work against this token and
+    /// aborts the body on cancel (drop).
+    pub cancel: Option<crate::cancel::CancelToken>,
 }
 
 /// Incremental output, for rendering. Everything here is also present in the
@@ -147,7 +158,10 @@ pub struct TurnRequest {
 pub enum StreamEvent<'a> {
     Text(&'a str),
     Thinking(&'a str),
-    ToolCallStart { name: &'a str, id: &'a str },
+    ToolCallStart {
+        name: &'a str,
+        id: &'a str,
+    },
     /// Emitted after a local tool finishes. `summary` is a short preview of the body.
     ToolCallResult {
         name: &'a str,

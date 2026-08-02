@@ -12,19 +12,23 @@
 //! committed when the turn reaches a complete terminal state. Errors and
 //! cancellation leave `Agent::messages` unchanged so wire history never contains
 //! a half-built assistant/tool turn. UI transcript is the front-end's job.
+//!
+//! Sensitive tool results are redacted when committed to durable wire history
+//! while the live in-memory turn still sees the real body for the model.
 
 use std::sync::{Arc, Mutex};
 
 use crate::anthropic::types::{tool_result, tool_uses, Message};
-use crate::cancel::CancelFlag;
+use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::provider::{Provider, StreamEvent, TurnRequest};
 use crate::thread::new_id;
-use crate::tools::approval::{
-    ApprovalDecision, ApprovalRequest, Approver, DenyApprover,
-};
+use crate::tools::approval::{ApprovalDecision, ApprovalRequest, Approver, DenyApprover, ToolRisk};
 use crate::tools::ToolRegistry;
 use crate::usage::Ledger;
+
+const REDACTED_SENSITIVE_RESULT: &str =
+    "[redacted: sensitive tool result omitted from persisted history]";
 
 pub struct Agent {
     provider: Arc<dyn Provider>,
@@ -42,6 +46,8 @@ pub struct Agent {
     pub effort: String,
     pub system: Option<String>,
     pub messages: Vec<Message>,
+    /// Tool-use ids whose results must be redacted when persisting wire history.
+    sensitive_tool_ids: Vec<String>,
 }
 
 impl Agent {
@@ -57,6 +63,7 @@ impl Agent {
             effort: "high".to_string(),
             system: None,
             messages: Vec::new(),
+            sensitive_tool_ids: Vec::new(),
         }
     }
 
@@ -84,6 +91,7 @@ impl Agent {
 
     pub fn clear_messages(&mut self) {
         self.messages.clear();
+        self.sensitive_tool_ids.clear();
     }
 
     /// Which provider this agent spends against. Keyed on by the usage ledger.
@@ -106,6 +114,12 @@ impl Agent {
         self.provider.descriptor()
     }
 
+    /// Wire history safe for durable persistence (sensitive tool bodies redacted).
+    /// Live [`Self::messages`] keeps the real bodies for the in-session model.
+    pub fn messages_for_persist(&self) -> Vec<Message> {
+        redact_sensitive_staged(self.messages.clone(), &self.sensitive_tool_ids)
+    }
+
     /// Send one user message and run to completion, executing tools as asked.
     ///
     /// Wire history is committed only after a complete terminal turn. Pass
@@ -122,10 +136,13 @@ impl Agent {
         &mut self,
         user_input: &str,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
-        cancel: Option<&CancelFlag>,
+        cancel: Option<&CancelToken>,
     ) -> Result<()> {
         let mut staged = self.messages.clone();
         staged.push(Message::user_text(user_input));
+        // Track which tool_use ids were sensitive so tool_result redaction can
+        // strip them from durable history while live memory keeps the body.
+        let mut turn_sensitive: Vec<String> = Vec::new();
 
         loop {
             Self::check_cancel(cancel)?;
@@ -138,6 +155,7 @@ impl Agent {
                 max_tokens: self.max_tokens,
                 effort: Some(self.effort.clone()),
                 thinking: true,
+                cancel: cancel.cloned(),
             };
 
             let completion = match self.provider.stream_turn(&request, &mut *on_event).await {
@@ -148,15 +166,15 @@ impl Agent {
                 }
             };
 
-            Self::check_cancel(cancel)?;
-
-            // Bill it before anything else can fail. A poisoned lock is skipped
-            // rather than propagated — accounting must not abort a paid-for turn.
+            // Bill completed paid responses before a late cancel can discard the
+            // staged wire history. Accounting must never abort a paid-for turn.
             if let Some(ledger) = &self.ledger {
                 if let Ok(mut ledger) = ledger.lock() {
                     ledger.record(self.provider.id(), &completion);
                 }
             }
+
+            Self::check_cancel(cancel)?;
 
             // Echo the assistant turn back verbatim — thinking signatures and
             // tool_use blocks both have to survive intact.
@@ -164,6 +182,8 @@ impl Agent {
 
             match completion.stop_reason.as_deref() {
                 Some("end_turn") | None => {
+                    self.sensitive_tool_ids.extend(turn_sensitive);
+                    // Live memory keeps real tool bodies; persist path redacts.
                     self.messages = staged;
                     return Ok(());
                 }
@@ -179,20 +199,26 @@ impl Agent {
                     let mut results = Vec::with_capacity(calls.len());
                     for call in calls {
                         Self::check_cancel(cancel)?;
-                        let (body, is_error) =
+                        let (body, is_error, risk) =
                             self.execute_tool_call(&call, on_event, cancel).await;
                         if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-                            // Tool may have returned a deny body after cancel woke
-                            // the approver; still do not commit staged history.
                             return Err(HarnessError::Cancelled);
                         }
-                        let summary = summarize_tool_body(&body);
+                        if risk == ToolRisk::Sensitive {
+                            turn_sensitive.push(call.id.clone());
+                        }
+                        let summary = if risk == ToolRisk::Sensitive {
+                            "sensitive content (hidden)".to_string()
+                        } else {
+                            summarize_tool_body(&body)
+                        };
                         on_event(StreamEvent::ToolCallResult {
                             name: &call.name,
                             id: &call.id,
                             summary: &summary,
                             is_error,
                         });
+                        // Live staged history keeps the real body for the model.
                         results.push(tool_result(&call.id, &body, is_error));
                     }
 
@@ -225,7 +251,7 @@ impl Agent {
         }
     }
 
-    fn check_cancel(cancel: Option<&CancelFlag>) -> Result<()> {
+    fn check_cancel(cancel: Option<&CancelToken>) -> Result<()> {
         if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
             Err(HarnessError::Cancelled)
         } else {
@@ -237,10 +263,14 @@ impl Agent {
         &self,
         call: &crate::anthropic::types::ToolUse,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
-        cancel: Option<&CancelFlag>,
-    ) -> (String, bool) {
+        cancel: Option<&CancelToken>,
+    ) -> (String, bool, ToolRisk) {
         if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-            return ("turn cancelled before tool ran".into(), true);
+            return (
+                "turn cancelled before tool ran".into(),
+                true,
+                ToolRisk::Read,
+            );
         }
 
         // Prepare once before approval so preview, path, and pre-image fingerprint
@@ -251,13 +281,21 @@ impl Agent {
                 return (
                     format!("cannot prepare `{}`: {message}", call.name),
                     true,
+                    ToolRisk::Read,
                 );
             }
         };
 
         let risk = prepared.risk;
         if risk.requires_approval() {
-            let preview = prepared.preview.clone();
+            let mut preview = prepared.preview.clone();
+            // Hide sensitive diffs/summaries from durable UI cards.
+            if risk == ToolRisk::Sensitive {
+                preview.diff.clear();
+                if preview.summary.is_empty() {
+                    preview.summary = format!("Access sensitive path {}", preview.path);
+                }
+            }
             let approval_id = new_id("approval");
             // Register the waiter before the UI sees the event.
             self.approver.prepare(&approval_id).await;
@@ -281,27 +319,45 @@ impl Agent {
                 preview,
             };
 
-            match self.approver.decide(&request).await {
+            let decision = tokio::select! {
+                biased;
+                _ = wait_cancel(cancel) => ApprovalDecision::Deny,
+                d = self.approver.decide(&request) => d,
+            };
+
+            match decision {
                 ApprovalDecision::AllowOnce => {}
                 ApprovalDecision::Deny => {
+                    if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
+                        return ("turn cancelled during approval".into(), true, risk);
+                    }
                     return (
                         format!(
                             "user denied permission to run `{}` ({summary_for_deny})",
                             call.name
                         ),
                         true,
+                        risk,
                     );
                 }
             }
 
             if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-                return ("turn cancelled during approval".into(), true);
+                return ("turn cancelled during approval".into(), true, risk);
             }
         }
 
-        match self.tools.execute_prepared(prepared).await {
-            Ok(output) => (output, false),
-            Err(message) => (message, true),
+        let exec = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => {
+                return ("turn cancelled before tool finished".into(), true, risk);
+            }
+            result = self.tools.execute_prepared(prepared) => result,
+        };
+
+        match exec {
+            Ok(output) => (output, false, risk),
+            Err(message) => (message, true, risk),
         }
     }
 }
@@ -321,6 +377,32 @@ fn summarize_tool_body(body: &str) -> String {
     }
     let truncated: String = flat.chars().take(MAX.saturating_sub(1)).collect();
     format!("{truncated}…")
+}
+
+fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> Vec<Message> {
+    if sensitive_ids.is_empty() {
+        return messages;
+    }
+    let mut out = messages;
+    for msg in &mut out {
+        if msg.role != "user" {
+            continue;
+        }
+        for block in &mut msg.content {
+            let is_result = block.get("type").and_then(|t| t.as_str()) == Some("tool_result");
+            if !is_result {
+                continue;
+            }
+            let id = block
+                .get("tool_use_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if sensitive_ids.iter().any(|s| s == id) {
+                block["content"] = serde_json::Value::String(REDACTED_SENSITIVE_RESULT.into());
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -403,14 +485,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_flag_aborts_before_provider_call() {
+    async fn cancel_token_aborts_before_provider_call() {
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
             calls: AtomicUsize::new(0),
             fail_after: None,
             stop: "end_turn",
         });
         let mut agent = Agent::new(provider, ToolRegistry::new());
-        let cancel = CancelFlag::new();
+        let cancel = CancelToken::new();
         cancel.cancel();
         let mut sink = |_ev: StreamEvent<'_>| {};
         let err = agent
