@@ -7,11 +7,17 @@ description = "Agent loop, model client, and tool layer for the Zest coding harn
 
 [dependencies]
 async-trait.workspace = true
+blake3.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
+globset.workspace = true
+ignore.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
+walkdir.workspace = true
