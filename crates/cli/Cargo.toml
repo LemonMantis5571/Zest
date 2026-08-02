@@ -1,0 +1,16 @@
+[package]
+name = "zest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal front-end for the Zest coding harness."
+
+[[bin]]
+name = "zest"
+path = "src/main.rs"
+
+[dependencies]
+zest-core = { path = "../core" }
+anyhow.workspace = true
+dotenvy = "0.15"
+tokio.workspace = true
