@@ -1,0 +1,371 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import {
+  findApprovalTool,
+  initialChatUiState,
+  isStaleChatEvent,
+  markApprovalRunning,
+  reduceChatEvent,
+  restoreApprovalCard,
+  type ChatUiState,
+} from "./chatReducer.ts";
+import type { ChatEvent, ChatMessage } from "./types.ts";
+
+function seqId() {
+  let n = 0;
+  return (prefix: string) => `${prefix}-${++n}`;
+}
+
+const ID = {
+  session_id: "session-1",
+  thread_id: "thread-1",
+  turn_id: "turn-1",
+};
+
+function reduceAll(events: ChatEvent[], start?: ChatUiState): ChatUiState {
+  const newId = seqId();
+  let state =
+    start ??
+    initialChatUiState([], {
+      sessionId: ID.session_id,
+      threadId: ID.thread_id,
+    });
+  for (const event of events) {
+    state = reduceChatEvent(state, event, { newId }).state;
+  }
+  return state;
+}
+
+function assistant(state: ChatUiState, index = 0): Extract<ChatMessage, { role: "assistant" }> {
+  const msg = state.messages.filter((m) => m.role === "assistant")[index];
+  assert.ok(msg && msg.role === "assistant");
+  return msg;
+}
+
+describe("reduceChatEvent characterization", () => {
+  it("assistant_start shows empty streaming row before first delta", () => {
+    const state = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "hello" },
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+    ]);
+    assert.equal(state.messages.length, 2);
+    const a = assistant(state);
+    assert.equal(a.id, "a1");
+    assert.equal(a.text, "");
+    assert.equal(a.thinking, "");
+    assert.equal(a.streaming, true);
+    assert.equal(state.sending, true);
+    assert.equal(state.activeAssistantId, "a1");
+  });
+
+  it("appends user then streams text and thinking", () => {
+    const state = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "hello" },
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+      { kind: "thinking_delta", ...ID, message_id: "a1", text: "hmm " },
+      { kind: "thinking_delta", ...ID, message_id: "a1", text: "ok" },
+      { kind: "text_delta", ...ID, message_id: "a1", text: "Hi" },
+      { kind: "text_delta", ...ID, message_id: "a1", text: " there" },
+      { kind: "done", ...ID, message_id: "a1" },
+    ]);
+
+    assert.equal(state.messages.length, 2);
+    assert.deepEqual(state.messages[0], {
+      id: "u1",
+      role: "user",
+      text: "hello",
+    });
+    const a = assistant(state);
+    assert.equal(a.thinking, "hmm ok");
+    assert.equal(a.text, "Hi there");
+    assert.equal(a.streaming, false);
+    assert.equal(state.activeAssistantId, null);
+    assert.equal(state.sending, false);
+    assert.equal(state.currentTurnId, null);
+  });
+
+  it("ignores duplicate user message ids", () => {
+    const state = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "first" },
+      { kind: "user", ...ID, message_id: "u1", text: "second" },
+    ]);
+    assert.equal(state.messages.length, 1);
+    const user = state.messages[0];
+    assert.equal(user.role, "user");
+    if (user.role === "user") assert.equal(user.text, "first");
+    assert.equal(state.activeAssistantId, null);
+  });
+
+  it("tracks tool start, approval, and result", () => {
+    const state = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "edit" },
+      {
+        kind: "tool_call_start",
+        ...ID,
+        message_id: "a1",
+        name: "write_file",
+        id: "t1",
+      },
+      {
+        kind: "approval_needed",
+        ...ID,
+        message_id: "a1",
+        approval_id: "ap1",
+        tool_name: "write_file",
+        tool_call_id: "t1",
+        risk: "write",
+        path: "f.txt",
+        summary: "write f.txt",
+        diff: "+x",
+      },
+      {
+        kind: "tool_call_result",
+        ...ID,
+        message_id: "a1",
+        name: "write_file",
+        id: "t1",
+        summary: "wrote f.txt",
+        isError: false,
+      },
+      { kind: "done", ...ID, message_id: "a1" },
+    ]);
+
+    const tools = assistant(state).tools;
+    assert.equal(tools.length, 1);
+    assert.equal(tools[0].status, "done");
+    assert.equal(tools[0].summary, "wrote f.txt");
+    assert.equal(tools[0].approvalId, undefined);
+    assert.equal(tools[0].path, "f.txt");
+    assert.equal(tools[0].diff, "+x");
+  });
+
+  it("creates a tool card from approval_needed when start was missed", () => {
+    const state = reduceAll([
+      {
+        kind: "approval_needed",
+        ...ID,
+        message_id: "a1",
+        approval_id: "ap1",
+        tool_name: "write_file",
+        tool_call_id: "t9",
+        risk: "write",
+        path: "g.txt",
+        summary: "write g.txt",
+        diff: "",
+      },
+    ]);
+    const tool = assistant(state).tools[0];
+    assert.equal(tool.id, "t9");
+    assert.equal(tool.status, "awaiting_approval");
+    assert.equal(tool.approvalId, "ap1");
+  });
+
+  it("marks tool errors and clears approval id", () => {
+    const state = reduceAll([
+      {
+        kind: "tool_call_start",
+        ...ID,
+        message_id: "a1",
+        name: "write_file",
+        id: "t1",
+      },
+      {
+        kind: "approval_needed",
+        ...ID,
+        message_id: "a1",
+        approval_id: "ap1",
+        tool_name: "write_file",
+        tool_call_id: "t1",
+        risk: "write",
+        path: "f.txt",
+        summary: "write",
+        diff: "",
+      },
+      {
+        kind: "tool_call_result",
+        ...ID,
+        message_id: "a1",
+        name: "write_file",
+        id: "t1",
+        summary: "denied",
+        isError: true,
+      },
+    ]);
+    assert.equal(assistant(state).tools[0].status, "error");
+    assert.equal(assistant(state).tools[0].approvalId, undefined);
+  });
+
+  it("done without message_id clears active assistant streaming", () => {
+    let state = initialChatUiState([], {
+      sessionId: ID.session_id,
+      threadId: ID.thread_id,
+    });
+    state = {
+      ...state,
+      activeAssistantId: "a1",
+      sending: true,
+      currentTurnId: ID.turn_id,
+      messages: [
+        {
+          id: "a1",
+          role: "assistant",
+          text: "partial",
+          thinking: "",
+          tools: [],
+          streaming: true,
+        },
+      ],
+    };
+    state = reduceChatEvent(state, {
+      kind: "done",
+      ...ID,
+      message_id: "",
+    }).state;
+    assert.equal(assistant(state).streaming, false);
+    assert.equal(state.activeAssistantId, null);
+    assert.equal(state.sending, false);
+  });
+
+  it("error attaches to assistant and requests toast effect", () => {
+    const { state, effects } = reduceChatEvent(
+      initialChatUiState([], {
+        sessionId: ID.session_id,
+        threadId: ID.thread_id,
+      }),
+      { kind: "error", ...ID, message_id: "a1", message: "boom" },
+      { newId: seqId() }
+    );
+    assert.equal(assistant(state).error, "boom");
+    assert.equal(assistant(state).streaming, false);
+    assert.equal(state.sending, false);
+    assert.equal(state.activeAssistantId, null);
+    assert.equal(effects.errorToast, "boom");
+  });
+
+  it("does not duplicate tool_call_start for the same id", () => {
+    const state = reduceAll([
+      {
+        kind: "tool_call_start",
+        ...ID,
+        message_id: "a1",
+        name: "grep",
+        id: "t1",
+      },
+      {
+        kind: "tool_call_start",
+        ...ID,
+        message_id: "a1",
+        name: "grep",
+        id: "t1",
+      },
+    ]);
+    assert.equal(assistant(state).tools.length, 1);
+  });
+
+  it("ignores stale session/thread/turn events", () => {
+    let state = initialChatUiState([], {
+      sessionId: "session-1",
+      threadId: "thread-1",
+    });
+    state = reduceChatEvent(state, {
+      kind: "user",
+      ...ID,
+      message_id: "u1",
+      text: "live",
+    }).state;
+    assert.equal(state.messages.length, 1);
+
+    const staleSession: ChatEvent = {
+      kind: "text_delta",
+      session_id: "session-other",
+      thread_id: "thread-1",
+      turn_id: "turn-1",
+      message_id: "a1",
+      text: "nope",
+    };
+    assert.equal(isStaleChatEvent(state, staleSession), true);
+    state = reduceChatEvent(state, staleSession).state;
+    assert.equal(state.messages.length, 1);
+
+    const staleTurn: ChatEvent = {
+      kind: "text_delta",
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_id: "turn-old",
+      message_id: "a1",
+      text: "nope",
+    };
+    assert.equal(isStaleChatEvent(state, staleTurn), true);
+
+    const { effects } = reduceChatEvent(state, {
+      kind: "warning",
+      session_id: "session-1",
+      thread_id: "thread-1",
+      message: "history not saved: disk full",
+    });
+    assert.equal(effects.warningToast, "history not saved: disk full");
+  });
+
+  it("cancelled ends sending and marks assistant", () => {
+    const state = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "hi" },
+      { kind: "text_delta", ...ID, message_id: "a1", text: "partial" },
+      { kind: "cancelled", ...ID, message_id: "a1" },
+    ]);
+    assert.equal(state.sending, false);
+    assert.equal(assistant(state).streaming, false);
+    assert.equal(assistant(state).error, "turn cancelled");
+    assert.equal(state.currentTurnId, null);
+  });
+
+  it("warning does not mutate messages and allows cross-turn toast", () => {
+    let state = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "hi" },
+      { kind: "text_delta", ...ID, message_id: "a1", text: "x" },
+    ]);
+    const before = state.messages;
+    const { state: next, effects } = reduceChatEvent(state, {
+      kind: "warning",
+      session_id: ID.session_id,
+      thread_id: ID.thread_id,
+      turn_id: "other-turn",
+      message: "checkpoint failed",
+    });
+    assert.equal(next.messages, before);
+    assert.equal(effects.warningToast, "checkpoint failed");
+  });
+
+  it("restores approval card after failed resolve", () => {
+    const state = reduceAll([
+      {
+        kind: "approval_needed",
+        ...ID,
+        message_id: "a1",
+        approval_id: "ap1",
+        tool_name: "write_file",
+        tool_call_id: "t1",
+        risk: "write",
+        path: "f.txt",
+        summary: "write f.txt",
+        diff: "+x",
+      },
+    ]);
+    const snap = findApprovalTool(state.messages, "ap1");
+    assert.ok(snap);
+    assert.equal(snap?.status, "awaiting_approval");
+
+    const running = markApprovalRunning(state.messages, "ap1");
+    assert.equal(assistant({ ...state, messages: running }).tools[0].status, "running");
+    assert.equal(
+      assistant({ ...state, messages: running }).tools[0].approvalId,
+      undefined
+    );
+
+    const restored = restoreApprovalCard(running, snap!);
+    const tool = assistant({ ...state, messages: restored }).tools[0];
+    assert.equal(tool.status, "awaiting_approval");
+    assert.equal(tool.approvalId, "ap1");
+    assert.equal(tool.diff, "+x");
+  });
+});
