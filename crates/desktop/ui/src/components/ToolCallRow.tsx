@@ -6,6 +6,7 @@ import {
   XIcon,
 } from "lucide-react";
 
+import { DiffPreview } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import type { ToolPart } from "@/lib/types";
@@ -53,9 +54,7 @@ export function ToolCallRow({ tool, onResolveApproval }: Props) {
           </div>
         </div>
         {tool.diff ? (
-          <pre className="max-h-48 overflow-auto border-b border-border/60 bg-[var(--chat-canvas)] px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
-            {tool.diff}
-          </pre>
+          <DiffPreview diff={tool.diff} />
         ) : null}
         <div className="flex items-center justify-end gap-2 px-3 py-2">
           <Button

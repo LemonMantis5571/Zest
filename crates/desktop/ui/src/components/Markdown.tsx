@@ -1,8 +1,22 @@
 import type { Components } from "react-markdown";
+import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { CodeBlock } from "@/components/CodeBlock";
 import { cn } from "@/lib/utils";
+
+function codeText(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(codeText).join("");
+  if (children == null || typeof children === "boolean") return "";
+  if (typeof children === "object" && "props" in children) {
+    const nested = (children as { props?: { children?: ReactNode } }).props
+      ?.children;
+    return codeText(nested);
+  }
+  return String(children);
+}
 
 const components: Components = {
   p: ({ children }) => (
@@ -50,11 +64,8 @@ const components: Components = {
   code: ({ className, children }) => {
     const isBlock = Boolean(className?.includes("language-"));
     if (isBlock) {
-      return (
-        <code className={cn("font-mono text-[12px] leading-relaxed", className)}>
-          {children}
-        </code>
-      );
+      // Fenced blocks are handled by `pre` → CodeBlock.
+      return <code className={className}>{children}</code>;
     }
     return (
       <code className="rounded-md bg-muted px-1 py-0.5 font-mono text-[12px] text-foreground">
@@ -62,11 +73,20 @@ const components: Components = {
       </code>
     );
   },
-  pre: ({ children }) => (
-    <pre className="mb-3 overflow-x-auto rounded-lg border border-border/70 bg-[var(--chat-canvas)] px-3 py-2.5 last:mb-0">
-      {children}
-    </pre>
-  ),
+  pre: ({ children }) => {
+    const child = Array.isArray(children) ? children[0] : children;
+    const props =
+      child && typeof child === "object" && "props" in child
+        ? (child as {
+            props?: { className?: string; children?: ReactNode };
+          }).props
+        : undefined;
+    const className = props?.className ?? "";
+    const langMatch = /language-([\w+#.-]+)/.exec(className);
+    const language = langMatch?.[1] ?? "plaintext";
+    const code = codeText(props?.children ?? children).replace(/\n$/, "");
+    return <CodeBlock code={code} language={language} />;
+  },
   hr: () => <hr className="my-4 border-border/70" />,
   table: ({ children }) => (
     <div className="mb-3 overflow-x-auto last:mb-0">
