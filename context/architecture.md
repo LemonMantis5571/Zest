@@ -2,26 +2,21 @@
 
 ## Overview
 
-Two crates in a Cargo workspace. `zest-core` holds everything that isn't a user interface;
-`zest` is a terminal front-end that consumes it.
+Three crates in a Cargo workspace. `zest-core` holds everything that isn't a user interface;
+`zest` is the terminal front-end; `zest-desktop` is a Tauri launch picker over the same auth APIs.
 
-The split exists so the agent loop can be developed and debugged at `cargo run` speed, without a
-webview in the path. A desktop front-end later becomes a thin view over a core that already works,
-rather than the loop being debugged through a GUI.
+The split exists so the agent loop can be developed and debugged at `cargo run -p zest` speed,
+without a webview in the path. The desktop app is a thin view over core auth today; the agent
+session UI comes after the loop is proven live.
 
 ```
-crates/core/  zest-core
-  anthropic/
-    types.rs    Messages API wire types (Request, Message, ToolDef, Usage)
-    sse.rs      byte-level SSE line reader
-    client.rs   streaming request + content-block accumulator
-  tools/
-    mod.rs      Tool trait + ToolRegistry
-    read_file.rs
-  agent.rs      the loop
-  error.rs      HarnessError
-crates/cli/   zest
-  main.rs       REPL + ANSI renderer
+crates/core/     zest-core
+  anthropic/     Messages API client + SSE
+  auth.rs        detect sign-ins; start_login spawns vendor CLI
+  tools/         Tool trait + ToolRegistry
+  agent.rs       the loop
+crates/cli/      zest — REPL + ANSI renderer
+crates/desktop/  zest-desktop — Tauri provider picker (ui/ + commands)
 ```
 
 ## Components
@@ -91,19 +86,27 @@ The callback is `&mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send)` rather than p
 explicit `for<'a>` is required because inside an `async_trait` method an elided lifetime binds
 instead of staying higher-ranked.
 
-**Auth detection** (`auth.rs`). Zest performs no OAuth. Vendor CLIs already sign in and write
-credentials; Zest reads whether that happened. `AuthStatus` distinguishes `NotLoggedIn` from
-`Unknown` — Claude and Antigravity keep credentials somewhere unreadable on Windows, and reporting
-those as logged-out would push the user to re-authenticate for nothing.
+**Auth detection** (`auth.rs`). Zest performs no OAuth. Vendor CLIs / the local gateway already
+sign in and write credentials; Zest reads whether that happened. `AuthStatus` distinguishes
+`NotLoggedIn` from `Unknown` — Claude and Antigravity keep credentials somewhere unreadable on
+Windows, and reporting those as logged-out would push the user to re-authenticate for nothing.
+The desktop **Connect** button calls `start_login` / `resolve_login`: silent spawn (no console on
+Windows), system browser for ChatGPT/Claude, then re-detect. Codex prefers CLIProxyAPI
+`-codex-login` when that binary is present under `tools/CLIProxyAPI`.
 
 Crucially, *how* a provider is reached is an implementation detail behind the trait. Anthropic is
 native today. Codex and Antigravity can be reached through CLIProxyAPI to get working quickly, then
 swapped to native clients later without the router noticing.
 
-**Router.** Chooses provider + model per task from a declared policy — mechanical edits to a cheap
-fast model, hard reasoning to an expensive one — and falls back when a provider is exhausted or
-down. Open question: whether the unit of routing is the *task* or a *delegated sub-agent*. These
-imply different APIs; see `memory/decisions.md`.
+**Router + delegated workers (v1).** The parent conversation stays pinned to the provider chosen at
+session start. Multi-provider routing runs only through the `delegate` tool: the worker is resolved
+by `Router` against `[routing]` rules / default / fallback, with exhaustion reasons surfaced in the
+tool result. `RuntimeBuilder` registers `delegate` when more than one provider loads. Automatic
+per-turn routing is deferred. See `memory/decisions.md`.
+
+**ModelSpec.** Each `Provider` owns a catalogue (`ModelSpec` / `ProviderDescriptor`). Gateway
+config may list `models` and `efforts`; when `models` is omitted, only the configured default is
+accepted. `RuntimeBuilder` and `update_session_options` validate before spending.
 
 **Usage ledger.** Per-provider consumption and remaining headroom, persisted across runs. The
 honest constraint: most subscription-backed CLI logins expose no "remaining quota" endpoint, so the
