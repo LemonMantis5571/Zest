@@ -66,7 +66,7 @@ export function Composer({
             disabled={sending}
             placeholder="Plan, @ for context, / for commands"
             autoComplete="off"
-            className="block max-h-[180px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
+            className="block max-h-[180px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-sm text-foreground caret-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {

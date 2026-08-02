@@ -97,7 +97,7 @@ function SettingsSection({
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="px-4 pb-4 pt-0">{children}</div>
+        <div className="px-4 pb-4 pt-3">{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );
@@ -289,7 +289,6 @@ export function SettingsPanel({
           <SettingsSection
             title="Provider"
             hint={`${session.label} · ${provider?.statusLabel ?? session.provider}`}
-            defaultOpen
           >
             <div className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5">
               <div className="text-sm font-medium">{session.label}</div>
@@ -334,8 +333,8 @@ export function SettingsPanel({
             title="Usage"
             hint={
               usage?.providers.length
-                ? `${usage.providers.length} provider${usage.providers.length === 1 ? "" : "s"}`
-                : "No measured spend yet"
+                ? `${usage.providers.length} account${usage.providers.length === 1 ? "" : "s"}`
+                : "Nothing used yet"
             }
           >
             {usage?.providers.length ? (
@@ -348,48 +347,49 @@ export function SettingsPanel({
                     <div className="text-sm font-medium">{row.providerId}</div>
                     <div className="mt-1.5 space-y-1 text-[11px] text-muted-foreground">
                       <div>
-                        <span className="text-foreground/80">{row.measured.label}</span>
+                        <span className="text-foreground/80">Used in Zest</span>
                         {": "}
-                        {row.measured.requests} req ·{" "}
+                        {row.measured.requests}{" "}
+                        {row.measured.requests === 1 ? "request" : "requests"} ·{" "}
                         {row.measured.totalTokens.toLocaleString()} tokens
                       </div>
                       <div>
                         {row.headroom.kind === "provider_reported" ? (
                           <>
-                            <span className="text-foreground/80">{row.headroom.label}</span>
+                            <span className="text-foreground/80">Provider limit</span>
                             {": "}
                             {row.headroom.requestsRemaining != null
-                              ? `${row.headroom.requestsRemaining} requests remaining`
-                              : "throughput reading"}
+                              ? `${row.headroom.requestsRemaining} left`
+                              : "shared by your provider"}
                             {row.headroom.ageSecs != null
-                              ? ` · ${formatAge(row.headroom.ageSecs)} ago`
+                              ? ` · updated ${formatAge(row.headroom.ageSecs)} ago`
                               : null}
                           </>
                         ) : (
-                          <span className="text-foreground/80">{row.headroom.label}</span>
+                          <span className="text-foreground/80">
+                            No limit shared by this provider
+                          </span>
                         )}
                       </div>
                     </div>
                   </div>
                 ))}
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  Measured spend and provider headroom are never combined into a
-                  subscription balance.
+                  This is what Zest used in this app — not your full plan remaining.
                 </p>
               </div>
             ) : (
               <p className="text-xs text-muted-foreground">
-                {loading ? "Loading…" : "No usage recorded yet for this machine."}
+                {loading ? "Loading…" : "No usage yet. Send a message to start tracking."}
               </p>
             )}
           </SettingsSection>
 
-          <SettingsSection title="System prompt" hint={promptHint} defaultOpen>
+          <SettingsSection title="System prompt" hint={promptHint}>
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              Overrides Zest’s default identity. Saved to{" "}
+              Custom instructions for this project. Saved to{" "}
               <span className="font-mono text-[11px] text-foreground/80">{promptPath}</span>
-              . Apply takes effect on the next message (start a new chat if a turn already
-              answered as Zest).
+              . Takes effect on the next message.
             </p>
             <textarea
               value={customPrompt}
@@ -399,7 +399,7 @@ export function SettingsPanel({
               spellCheck={false}
               placeholder="You are …&#10;Project conventions, tone, extra rules…"
               className={cn(
-                "w-full resize-y rounded-lg border border-border/80 bg-card/80 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground outline-none",
+                "w-full resize-y rounded-lg border border-border/80 bg-card/80 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground caret-foreground outline-none",
                 "placeholder:text-muted-foreground/70 focus-visible:ring-2 focus-visible:ring-ring/50",
                 "disabled:opacity-60"
               )}
@@ -478,7 +478,6 @@ export function SettingsPanel({
           <SettingsSection
             title="Chats"
             hint={`${threads.length} recent`}
-            defaultOpen
           >
             <Button
               type="button"
