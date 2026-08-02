@@ -14,6 +14,19 @@ Impact:
 
 ---
 
+### 2026-08-02 — Minimal tool approval gate before writes
+
+Decision: Tools declare `risk: read | write | exec`. Read tools auto-run; write/exec pause on an
+`Approver` hook. Desktop shows an in-chat Allow once / Deny card with a short diff for
+`write_file`. Decisions are session-scoped only (no forever-trust). CLI registers `write_file` but
+auto-denies until it has a prompt. No bash/exec yet.
+
+Reason: PROJECT_CONTEXT requires a permission layer before irreversible tools. A per-call desktop
+gate unblocks the first write tool without building a trust store.
+
+Impact: Agent loop owns the gate; front-ends supply Approver + UI. Exec remains blocked until a
+sandbox story exists.
+
 ### 2026-08-01 — Build a harness, not a desktop shell over LimeBot
 
 Decision: Own the agent loop, model client, tool layer, and permission model in Rust. LimeBot-OS
@@ -127,9 +140,9 @@ It also softens "no shipped runtime dependencies" from a rule to a target: if na
 three providers proves impractical, a bundled proxy may be the honest answer. Revisit deliberately
 rather than by drift.
 
-Open question: whether the router picks a model per *task* (declared policy: "mechanical edits →
-Flash") or per *sub-agent* (a delegated worker pinned to a model). These imply different APIs and
-the choice is not yet made.
+Resolved for v1 (see 2026-08-02 Stable Windows Alpha): the parent conversation stays pinned to the
+selected provider; multi-provider routing is performed only by **delegated workers**
+(`delegate` tool), never automatically per user turn.
 
 ### 2026-08-01 — Usage accounting is metered locally, not queried
 
@@ -198,3 +211,111 @@ matters less.
 
 Impact: Revisit only if Zest becomes latency-critical and text-dense enough that a webview is the
 bottleneck. It is not today.
+
+### 2026-08-01 — First live turns go through Codex via CLIProxyAPI
+
+Decision: Accept the subscription-through-proxy tradeoff for local development. Default
+`zest.toml` routes to `[providers.codex]` (CLIProxyAPI on `127.0.0.1:8317`, model
+`gpt-5.6-sol`) authenticated with `ZEST_GATEWAY_KEY`. A paid `OPENAI_API_KEY` remains a valid
+BYOK alternative; it is not required for this path.
+
+Reason: No provider had yet served a live turn. Codex OAuth is already detectable on this
+machine's platform, and Tibo (@thsottiaux, Codex) publicly recommended the same bootstrap —
+CLIProxyAPI + Messages-API client pointed at GPT-5.6 Sol
+(https://x.com/thsottiaux/status/2076119366647894371). That is exactly Zest's transitional
+gateway shape. The ToS risk (account loss) is accepted by the author for personal local use;
+nothing ships that embeds or depends on the proxy.
+
+Impact: First end-to-end verification spends the Codex subscription through a local gateway.
+Native Codex client remains the long-term swap behind the `Provider` trait. Do not distribute a
+setup that requires third-party proxying of subscription credentials.
+
+### 2026-08-01 — Desktop starts as a Tauri provider picker; Connect spawns vendor CLI
+
+Decision: Ship `crates/desktop` (`zest-desktop`) as a Tauri 2 app whose first screen is the
+provider picker. **Connect** calls `start_login` in `zest-core`, which spawns vendor/gateway
+login silently and re-detects — it does not embed OAuth. **Continue** persists the chosen
+provider id under the user config dir; agent session UI followed in the same Tauri shell.
+
+Reason: The project already chose Tauri over GPUI and “detect, don’t implement OAuth.” The
+screenshot-shaped picker is the smallest useful desktop surface: it answers “what can I spend?”
+and “how do I sign in?” before the chat surface.
+
+Impact: Three workspace members (`core`, `cli`, `desktop`). CLIProxyAPI remains a separate
+local process.
+
+### 2026-08-02 — Connect is a native shell over vendor OAuth, not OAuth inside Zest
+
+Decision: Do not implement OAuth (client IDs, redirects, token exchange) in Zest. Make Connect
+feel native instead: `CREATE_NO_WINDOW` spawn, in-app waiting/success UI, system browser for
+ChatGPT/Claude. When `tools/CLIProxyAPI` (or `ZEST_CLIPROXY_PATH`) is installed, Codex Connect
+prefers `cli-proxy-api -codex-login`, and Codex `AuthStatus::Ready` means a well-formed JSON
+file exists under `~/.cli-proxy-api` (presence only).
+
+Reason: The OpenAI success page saying “return to your terminal” is their page; replacing it
+with a real in-process OAuth client would own a fragile vendor flow. Hiding the console and
+owning the waiting chrome gives the product feel without that cost. Gateway credentials are
+what live turns actually spend.
+
+Impact: `resolve_login` / `LoginSpawn` in `auth.rs`; desktop waiting and success screens; README
+Connect table updated. In-webview ChatGPT login remains out of scope.
+
+### 2026-08-02 — Desktop chat UI is React + shadcn; agent stays in Rust
+
+Decision: Keep the agent loop, providers, and tools in `zest-core`. Skin the Tauri webview with
+Vite + React + shadcn chat primitives (`MessageScroller`, `Message`, `Bubble`, `Marker`,
+`Attachment`) themed from `DESIGN.md` (Linear). Stream turns over existing Tauri `chat-event`s;
+extend those with `tool_call_start` / `tool_call_result`. Do not adopt TanStack AI as the live
+transport.
+
+Reason: Rust owns the harness; the webview only needs a modern chat surface. shadcn’s chat
+components cover scrolling/streaming chrome without rewriting the agent path.
+
+Impact: `crates/desktop/ui/` is the Vite app; `ui-legacy/` holds the previous static HTML.
+`npm install` is required for desktop builds. Offline UI smoke via `?fixture=1`.
+
+### 2026-08-02 — Stable Windows Alpha: reliability before more tools
+
+Decision: Prioritize a personal, local Windows alpha gate over new features. Sequence: toolchain
++ CI guardrails → tool/approval integrity (`PreparedToolCall`, real diffs, BLAKE3-bound
+approvals, atomic writes, ignore-aware walk, secrets) → transactional turns + session controller
++ coalescing persistence → desktop contract (reducer, ts-rs DTOs, CSP) → `RuntimeBuilder`,
+provider-owned `ModelSpec`, desktop `delegate`, fake-provider tests, and opt-in
+`zest doctor --live`.
+
+Routing (resolved v1): the main conversation remains pinned to the selected provider.
+Multi-provider routing is performed only by **delegated workers** (`RuntimeBuilder` registers
+`delegate` when `registry.len() > 1`), never automatically per user turn.
+
+Alpha acceptance: automated checks (including deterministic fake-provider proofs for route
+selection, selected model, tool round-trip, ledger attribution, fallback reasons, and thread
+restoration) plus one manual `zest doctor --live` read-only README turn (streaming, tool
+completion, usage delta, persistence). Doctor spends quota and must not run in CI.
+
+Deferred: bash/exec (needs OS sandbox), native Codex transport, compaction, public signing,
+automatic per-turn routing, accounts/cloud/telemetry.
+
+Reason: Trustworthy writes and deterministic session state are the alpha bar; more tools without
+those foundations widen the blast radius.
+
+Impact: Pin Rust 1.97.1 / Node 24.16.0 / npm 11.13.0; root npm workspaces; `scripts/verify.ps1`
+and Windows CI. Visual chat styling stays unless error/loading fixes require it. Gateway
+`models` / `efforts` allow-lists are optional; when `models` is omitted, generic gateways
+accept only the configured default. Provider `codex` uses the built-in Sol/Terra/Luna
+(+ 5.5/5.4) catalogue so the desktop picker and sticky last-model validate without a
+manual allow-list.
+
+### 2026-08-02 — Custom system prompt + Cursor-style skills
+
+Decision: Project custom instructions live in `.zest/system.md` (Settings editor). When
+present they are **authoritative** (composed first; hardcoded “You are Zest…” is softened)
+so persona overrides work. Skills use Cursor-compatible `SKILL.md` under `.zest/skills/*/`
+and `~/.zest/skills/*/`; catalogue (+ small bodies) enter the system prompt; larger skills
+load via `read_skill`. Threads/`system.md` stay gitignored; `.zest/skills/` may be committed.
+
+Reason: Authors need project tone/rules without forking the harness prompt, and reusable
+skill packs without inventing a new format.
+
+Impact: `RuntimeBuilder` always composes custom → base capabilities → skills; desktop
+hot-reloads on Save; Settings uses shadcn Collapsible sections; chat emits `assistant_start`
+so Thinking… appears before the first token.

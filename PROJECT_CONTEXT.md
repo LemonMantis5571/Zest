@@ -43,7 +43,9 @@ component, no accounts.
 
 - **`zest-core`** — headless library: model client, agent loop, tool registry. No terminal or UI
   assumptions.
-- **`zest`** — terminal front-end. One consumer of the core; a desktop app would be another.
+- **`zest`** — terminal front-end. One consumer of the core.
+- **`zest-desktop`** — Tauri shell: provider picker, Connect (vendor OAuth spawn), and chat session
+  UI. Webview is a Vite + React + shadcn build under `crates/desktop/ui/` (Node is build/dev only).
 - **Anthropic Messages API** — the wire protocol implemented natively today, over raw HTTP + SSE.
   No SDK.
 
@@ -51,8 +53,8 @@ Planned, and the actual point of the project:
 
 - **Provider layer** — one `Provider` per authenticated backend (Anthropic, Codex, Antigravity/
   Gemini, …). Each owns its credentials, its model catalogue, and how it reports usage.
-- **Router** — picks provider + model per task from a declared policy, with fallback when a
-  provider is exhausted or unavailable.
+- **Router + delegated workers** — parent chat stays provider-pinned; multi-provider work goes
+  through `delegate` workers resolved by routing policy + ledger fallback (v1 decision).
 - **Usage ledger** — per-provider consumption and remaining headroom, persisted across runs.
 - **Gateway (transitional)** — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) already
   holds OAuth logins for Codex, Claude, Gemini/Antigravity, Grok and Kimi and re-exposes them as
@@ -61,7 +63,8 @@ Planned, and the actual point of the project:
 
 ## Important Constraints
 
-- **Rust only.** No Python, no Node in the runtime path. The whole point is a single binary.
+- **Rust agent path.** No Python, no Node in the agent/runtime path. Desktop UI may use a React
+  webview built ahead of time; the agent loop stays in `zest-core`.
 - **Providers are a first-class abstraction**, not configuration. Whether a given provider is
   reached natively or through a gateway must be an implementation detail behind one trait, so
   either can be swapped without touching the router.
@@ -74,9 +77,8 @@ Planned, and the actual point of the project:
 - **No shipped runtime dependencies, long term.** A proxy is acceptable while bootstrapping
   providers and should not survive into a release; supervising a second process is the problem a
   single binary exists to avoid.
-- **The permission layer still gates dangerous tools.** Tool-call plumbing is a weekend; deciding
-  what an agent may touch, showing a diff before it lands, and sandboxing bash is real engineering.
-  No `bash` or `write` tool ships before it exists.
+- **The permission layer gates dangerous tools.** `write_file` ships with an approval gate and
+  atomic replace; `bash` / exec stay disabled until an OS-backed Windows sandbox exists.
 
 ## Preferred Style
 
