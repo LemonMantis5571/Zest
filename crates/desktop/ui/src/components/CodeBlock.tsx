@@ -85,11 +85,11 @@ export function CodeBlock({
       <div className="overflow-x-auto">
         {html ? (
           <div
-            className="code-highlight [&_pre]:m-0 [&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:text-[12.5px] [&_pre]:leading-[1.65] [&_code]:font-mono [&_code]:text-[12.5px]"
+            className="code-highlight [&_pre]:m-0 [&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:text-[12.5px] [&_pre]:leading-[1.65] [&_code]:font-mono [&_code]:text-[12.5px] [&_span]:text-[length:inherit]"
             dangerouslySetInnerHTML={{ __html: html }}
           />
         ) : (
-          <pre className="m-0 p-3 font-mono text-[12.5px] leading-[1.65] text-foreground whitespace-pre">
+          <pre className="m-0 p-3 font-mono text-[12.5px] leading-[1.65] text-muted-foreground whitespace-pre">
             {code}
           </pre>
         )}
