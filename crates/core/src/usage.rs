@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fsutil;
 use crate::provider::{Completion, RateLimitSnapshot};
 
 /// What Zest itself has spent against one provider, plus the last headroom that
@@ -131,9 +132,16 @@ impl Ledger {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        fsutil::atomic_write_json(path, self)
+    }
+
+    /// Reload spend totals from disk (doctor / external writers).
+    pub fn reload_from_disk(&mut self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let reloaded = Self::load_from(path);
+        self.providers = reloaded.providers;
     }
 
     pub fn get(&self, provider_id: &str) -> Option<&ProviderUsage> {

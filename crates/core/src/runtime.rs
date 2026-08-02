@@ -122,11 +122,7 @@ impl RuntimeBuilder {
 
         let provider_id = self
             .provider_id
-            .or_else(|| {
-                config
-                    .default_target()
-                    .map(|t| t.provider.clone())
-            })
+            .or_else(|| config.default_target().map(|t| t.provider.clone()))
             .ok_or_else(|| {
                 HarnessError::Other(
                     "no provider selected and zest.toml has no [routing].default".into(),
@@ -169,7 +165,7 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| Arc::new(Mutex::new(Ledger::load())));
 
         let base_system = self.system.unwrap_or_else(|| DEFAULT_SYSTEM.to_string());
-        let custom = load_custom_system(&root);
+        let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let skills = Arc::new(RwLock::new(SkillSet::discover(&root)));
         let system = {
             let guard = skills
@@ -179,13 +175,11 @@ impl RuntimeBuilder {
         };
 
         let mut worker_tools = ToolRegistry::new();
-        register_read_tools(&mut worker_tools, &root).map_err(|e| {
-            HarnessError::Other(format!("register read tools: {e}"))
-        })?;
+        register_read_tools(&mut worker_tools, &root)
+            .map_err(|e| HarnessError::Other(format!("register read tools: {e}")))?;
         if self.register_write {
-            register_write_tools(&mut worker_tools, &root).map_err(|e| {
-                HarnessError::Other(format!("register write tools: {e}"))
-            })?;
+            register_write_tools(&mut worker_tools, &root)
+                .map_err(|e| HarnessError::Other(format!("register write tools: {e}")))?;
         }
         register_skill_tools(&mut worker_tools, skills.clone());
 
@@ -194,8 +188,12 @@ impl RuntimeBuilder {
 
         // Multi-provider routing is delegated workers only — parent stays pinned.
         if self.enable_delegate && registry.len() > 1 {
-            let mut kinds: Vec<String> =
-                config.routing.rules.iter().map(|r| r.kind.clone()).collect();
+            let mut kinds: Vec<String> = config
+                .routing
+                .rules
+                .iter()
+                .map(|r| r.kind.clone())
+                .collect();
             kinds.sort();
             kinds.dedup();
             tools.register(Arc::new(

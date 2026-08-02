@@ -4,7 +4,7 @@ Rust is the source of truth for `ChatEvent` and `SessionInfo` wire shapes in
 `crates/desktop/src/lib.rs`. Regenerate after changing those types:
 
 ```powershell
-$env:CARGO_TARGET_DIR = "D:\Code\zest\target"
+$env:CARGO_TARGET_DIR = (Resolve-Path .\target).Path
 cargo test -p zest-desktop --features export-bindings --lib export_bindings
 ```
 

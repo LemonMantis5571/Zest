@@ -13,15 +13,15 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
-use tokio::sync::oneshot;
 use zest_core::{
-    can_start_login, compose_system, detect_all, load_custom_system, new_id,
-    save_custom_system, start_login as core_start_login, ApprovalDecision, ApprovalRequest,
-    Approver, AuthStatus, Config, HarnessError, PersistPriority, PersistWorker, ProviderSlot,
-    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadStore,
-    ThreadSummary,
+    can_start_login, compose_system, detect_all, load_custom_system, new_id, save_custom_system,
+    start_login as core_start_login, truncate_chars, ApprovalDecision, ApprovalRequest, Approver,
+    AuthStatus, Config, HarnessError, PersistPriority, PersistWorker, ProjectSessionState,
+    ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
+    ThreadLoadError, ThreadStore, ThreadSummary, ToolRisk,
 };
 
 use session::{Session, SessionController, SessionError};
@@ -36,8 +36,10 @@ project. Explore and read files before answering questions about them rather tha
 inferring from names. write_file requires the user to Allow once before it runs. \
 Keep responses focused and concise.";
 
-/// Session-scoped pending approval waiters (not persisted).
+/// Turn-scoped pending approval waiters (not persisted).
 struct ApprovalHub {
+    /// Active turn that may own waiters. Resolves outside this turn are rejected.
+    active_turn: Mutex<Option<String>>,
     senders: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     receivers: Mutex<HashMap<String, oneshot::Receiver<bool>>>,
 }
@@ -45,8 +47,15 @@ struct ApprovalHub {
 impl ApprovalHub {
     fn new() -> Self {
         Self {
+            active_turn: Mutex::new(None),
             senders: Mutex::new(HashMap::new()),
             receivers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn begin_turn(&self, turn_id: &str) {
+        if let Ok(mut g) = self.active_turn.lock() {
+            *g = Some(turn_id.to_string());
         }
     }
 
@@ -75,6 +84,14 @@ impl ApprovalHub {
     }
 
     fn resolve(&self, approval_id: &str, allow: bool) -> Result<(), String> {
+        let turn_alive = self
+            .active_turn
+            .lock()
+            .map_err(|_| "approval lock poisoned".to_string())?
+            .is_some();
+        if !turn_alive {
+            return Err("no active turn for approval".into());
+        }
         let mut senders = self
             .senders
             .lock()
@@ -86,6 +103,7 @@ impl ApprovalHub {
         Ok(())
     }
 
+    /// Deny every waiter. Call after cancelling the turn token.
     fn clear(&self) {
         if let Ok(mut senders) = self.senders.lock() {
             for (_, tx) in senders.drain() {
@@ -94,6 +112,9 @@ impl ApprovalHub {
         }
         if let Ok(mut receivers) = self.receivers.lock() {
             receivers.clear();
+        }
+        if let Ok(mut g) = self.active_turn.lock() {
+            *g = None;
         }
     }
 }
@@ -353,7 +374,8 @@ fn start_login(id: String) -> Result<LoginStarted, String> {
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
-    std::env::current_dir().map_err(|e| e.to_string())
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    cwd.canonicalize().or(Ok(cwd))
 }
 
 fn open_store(root: &std::path::Path) -> Result<ThreadStore, String> {
@@ -378,60 +400,63 @@ fn resolve_thread(
     store: &ThreadStore,
     provider_id: &str,
 ) -> Result<(Thread, Option<String>), String> {
-    if let Some(id) = load_last_thread_id(root) {
-        match store.load_with_recovery(&id) {
+    let mut state = ProjectSessionState::load(root, provider_id);
+    if let Some(id) = state.get(provider_id).thread_id {
+        match store.load_for_provider(&id, provider_id) {
             Ok(loaded) => {
                 let mut thread = loaded.thread;
-                if thread.provider_id.is_none() {
-                    thread.provider_id = Some(provider_id.to_string());
-                }
+                // Pin missing owner once; never rewrite a different owner.
+                thread
+                    .ensure_provider(provider_id)
+                    .map_err(|e| e.to_string())?;
                 return Ok((thread, loaded.warning));
             }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("corrupt") {
-                    let thread = store
-                        .create_for_provider(provider_id)
-                        .map_err(|e| e.to_string())?;
-                    persist_last_thread_id(root, &thread.id)?;
-                    return Ok((
-                        thread,
-                        Some(format!("history not saved: {msg}; started a new thread")),
-                    ));
-                }
+            Err(ThreadLoadError::Corrupt { detail, .. }) => {
+                let thread = store
+                    .create_for_provider(provider_id)
+                    .map_err(|e| e.to_string())?;
+                state.set_thread(provider_id, &thread.id);
+                let _ = state.save(root);
+                return Ok((
+                    thread,
+                    Some(format!("history not saved: {detail}; started a new thread")),
+                ));
             }
+            Err(ThreadLoadError::ProviderMismatch { .. })
+            | Err(ThreadLoadError::Missing(_))
+            | Err(ThreadLoadError::UnsupportedVersion { .. }) => {
+                // Fall through to a fresh provider-owned thread.
+            }
+            Err(e) => return Err(e.to_string()),
         }
     }
     let thread = store
         .create_for_provider(provider_id)
         .map_err(|e| e.to_string())?;
-    persist_last_thread_id(root, &thread.id)?;
+    state.set_thread(provider_id, &thread.id);
+    let _ = state.save(root);
     Ok((thread, None))
 }
 
-/// Project-scoped sticky thread (alongside `.zest/threads/`).
-/// Also mirrored next to `last-provider` in the user config dir.
-fn persist_last_thread_id(root: &std::path::Path, id: &str) -> Result<(), String> {
-    let project_dir = root.join(".zest");
-    std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
-    std::fs::write(project_dir.join("last-thread-id"), id).map_err(|e| e.to_string())?;
-    let path = zest_config_dir()?.join("last-thread-id");
-    std::fs::write(path, id).map_err(|e| e.to_string())?;
-    Ok(())
+fn persist_provider_thread(
+    root: &std::path::Path,
+    provider_id: &str,
+    thread_id: &str,
+) -> Result<(), String> {
+    let mut state = ProjectSessionState::load(root, provider_id);
+    state.set_thread(provider_id, thread_id);
+    state.save(root).map_err(|e| e.to_string())
 }
 
-fn load_last_thread_id(root: &std::path::Path) -> Option<String> {
-    let project = root.join(".zest").join("last-thread-id");
-    if let Ok(value) = std::fs::read_to_string(project) {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            return Some(value);
-        }
-    }
-    let path = dirs::config_dir()?.join("zest").join("last-thread-id");
-    let value = std::fs::read_to_string(path).ok()?;
-    let value = value.trim().to_string();
-    (!value.is_empty()).then_some(value)
+fn persist_provider_model_effort(
+    root: &std::path::Path,
+    provider_id: &str,
+    model: &str,
+    effort: &str,
+) -> Result<(), String> {
+    let mut state = ProjectSessionState::load(root, provider_id);
+    state.set_model_effort(provider_id, model, effort);
+    state.save(root).map_err(|e| e.to_string())
 }
 
 fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo {
@@ -539,9 +564,11 @@ fn start_session(
     let root = workspace_root()?;
     let config = Config::find(&root).map_err(|e| e.to_string())?;
 
+    let prefs = ProjectSessionState::load(&root, &id).get(&id);
+
     let model = model
         .filter(|m| !m.trim().is_empty())
-        .or_else(load_last_model)
+        .or(prefs.model)
         .or_else(|| {
             config.default_target().and_then(|t| {
                 if t.provider == id {
@@ -555,17 +582,15 @@ fn start_session(
 
     let effort = effort
         .filter(|e| !e.trim().is_empty())
-        .or_else(load_last_effort)
+        .or(prefs.effort)
         .or_else(|| std::env::var("ZEST_EFFORT").ok())
         .unwrap_or_else(|| "high".to_string());
     let effort = normalize_effort(&effort);
 
     let store = open_store(&root)?;
     let (mut thread, load_warning) = resolve_thread(&root, &store, &id)?;
-    persist_last_thread_id(&root, &thread.id)?;
-    if thread.provider_id.as_deref() != Some(id.as_str()) {
-        thread.provider_id = Some(id.clone());
-    }
+    thread.ensure_provider(&id).map_err(|e| e.to_string())?;
+    persist_provider_thread(&root, &id, &thread.id)?;
 
     let approver: Arc<dyn Approver> = Arc::new(HubApprover {
         hub: state.approvals.clone(),
@@ -587,7 +612,7 @@ fn start_session(
     let mut agent = runtime.agent;
     agent.messages = thread.agent_messages.clone();
 
-    persist_model_effort(&runtime.model, &runtime.effort)?;
+    persist_provider_model_effort(&root, &id, &runtime.model, &runtime.effort)?;
 
     let session = Session {
         session_id: String::new(),
@@ -633,14 +658,41 @@ fn update_session_options(
                 .filter(|e| !e.trim().is_empty())
                 .map(|e| normalize_effort(&e))
                 .unwrap_or_else(|| session.effort.clone());
-            session
-                .agent
-                .validate_options(&next_model, &next_effort)?;
+            session.agent.validate_options(&next_model, &next_effort)?;
             session.model = next_model.clone();
             session.agent.model = next_model;
             session.effort = next_effort.clone();
             session.agent.effort = next_effort;
-            persist_model_effort(&session.model, &session.effort)?;
+            persist_provider_model_effort(
+                &session.root,
+                &session.provider_id,
+                &session.model,
+                &session.effort,
+            )?;
+            Ok(session_info_from(session, None))
+        })
+        .map_err(map_session_err)
+        .and_then(|r| r)
+}
+
+/// Atomically reset sticky model+effort for the active provider (clears prefs).
+#[tauri::command]
+fn reset_session_options(state: State<'_, AppState>) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    state
+        .sessions
+        .with_session_mut(|session| -> Result<SessionInfo, String> {
+            let descriptor = session.agent.descriptor();
+            let next_model = descriptor.default_model.clone();
+            let next_effort = "high".to_string();
+            session.agent.validate_options(&next_model, &next_effort)?;
+            session.model = next_model.clone();
+            session.agent.model = next_model;
+            session.effort = next_effort.clone();
+            session.agent.effort = next_effort;
+            let mut prefs = ProjectSessionState::load(&session.root, &session.provider_id);
+            prefs.clear_model_effort(&session.provider_id);
+            prefs.save(&session.root).map_err(|e| e.to_string())?;
             Ok(session_info_from(session, None))
         })
         .map_err(map_session_err)
@@ -648,9 +700,16 @@ fn update_session_options(
 }
 
 #[tauri::command]
-fn list_threads() -> Result<Vec<ThreadSummary>, String> {
-    let root = workspace_root()?;
-    open_store(&root)?.list().map_err(|e| e.to_string())
+fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadSummary>, String> {
+    state
+        .sessions
+        .with_session_mut(|session| {
+            open_store(&session.root)?
+                .list_for_provider(&session.provider_id)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(map_session_err)
+        .and_then(|r| r)
 }
 
 #[tauri::command]
@@ -662,12 +721,14 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
         .sessions
         .with_session_mut(|session| -> Result<SessionInfo, String> {
             let store = open_store(&session.root)?;
-            let loaded = store.load_with_recovery(&id).map_err(|e| e.to_string())?;
+            let loaded = store
+                .load_for_provider(&id, &session.provider_id)
+                .map_err(|e| e.to_string())?;
             session.agent.clear_messages();
             session.agent.messages = loaded.thread.agent_messages.clone();
             session.thread_id = loaded.thread.id.clone();
             session.thread = loaded.thread;
-            persist_last_thread_id(&session.root, &session.thread_id)?;
+            persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             Ok(session_info_from(session, loaded.warning))
         })
         .map_err(map_session_err)
@@ -689,7 +750,7 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
             session.agent.clear_messages();
             session.thread_id = thread.id.clone();
             session.thread = thread;
-            persist_last_thread_id(&session.root, &session.thread_id)?;
+            persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             Ok(session_info_from(session, None))
         })
         .map_err(map_session_err)
@@ -708,9 +769,11 @@ async fn send_message(
     }
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
+    state.approvals.begin_turn(&turn.turn_id);
     let worker = match ensure_persist(&state, &session.root) {
         Ok(w) => w,
         Err(e) => {
+            state.approvals.clear();
             let _ = state.sessions.finish_turn(&turn, session);
             return Err(desktop_err("persistence", e));
         }
@@ -828,19 +891,12 @@ async fn send_message(
             };
 
             if let Ok(mut thread) = live_thread.lock() {
-                apply_event_to_thread(&mut thread, &event);
                 let priority = event_priority(&event);
-                // Fire-and-forget enqueue from sync callback; terminal path awaits.
-                let persist_result = match priority {
-                    PersistPriority::Immediate => {
-                        // Blocking save from stream callback would stall the
-                        // runtime; enqueue and let the worker flush. Terminal
-                        // events await below.
-                        worker.enqueue(thread.clone(), PersistPriority::Immediate)
-                    }
-                    PersistPriority::Delta => worker.enqueue(thread.clone(), PersistPriority::Delta),
-                };
-                if let Err(e) = persist_result {
+                apply_event_to_thread(&mut thread, &event);
+                // Schedule the checkpoint, then clone for the worker — Immediate
+                // for tools/approvals/terminal; Delta coalesces text/thinking.
+                let snapshot = thread.clone();
+                if let Err(e) = worker.enqueue(snapshot, priority) {
                     let _ = app.emit(
                         "chat-event",
                         ChatEvent::Warning {
@@ -870,9 +926,10 @@ async fn send_message(
     // messages after a successful terminal turn.
     let final_event = match &result {
         Ok(()) => {
+            // Persist redacted wire history; live agent memory keeps secrets.
             session
                 .thread
-                .set_agent_messages(session.agent.messages.clone());
+                .set_agent_messages(session.agent.messages_for_persist());
             ChatEvent::Done {
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
@@ -881,11 +938,12 @@ async fn send_message(
             }
         }
         Err(HarnessError::Cancelled) => {
-            // Keep UI transcript; leave agent.messages (and thus agent_messages
-            // on disk) at the last committed turn.
+            // Keep UI transcript; leave agent.messages at the last committed turn.
+            // Terminalize any pending approval/running tool cards.
+            let _ = session.thread.terminalize_interrupted();
             session
                 .thread
-                .set_agent_messages(session.agent.messages.clone());
+                .set_agent_messages(session.agent.messages_for_persist());
             ChatEvent::Cancelled {
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
@@ -894,9 +952,10 @@ async fn send_message(
             }
         }
         Err(e) => {
+            let _ = session.thread.terminalize_interrupted();
             session
                 .thread
-                .set_agent_messages(session.agent.messages.clone());
+                .set_agent_messages(session.agent.messages_for_persist());
             ChatEvent::Error {
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
@@ -933,6 +992,7 @@ async fn send_message(
     }
     let _ = app.emit("chat-event", &final_event);
 
+    state.approvals.clear();
     let _ = state.sessions.finish_turn(&turn, session);
 
     // Error/cancel already emitted as chat-events; keep invoke Ok to avoid
@@ -942,11 +1002,12 @@ async fn send_message(
 
 #[tauri::command]
 fn cancel_turn(state: State<'_, AppState>) -> Result<(), String> {
-    state.approvals.clear();
+    // Cancel token first so in-flight select! races abort before waiters clear.
     let cancelled = state.sessions.cancel_turn().map_err(map_session_err)?;
     if !cancelled {
         return Err(desktop_err("no_turn", "no turn in progress"));
     }
+    state.approvals.clear();
     Ok(())
 }
 
@@ -961,8 +1022,10 @@ fn resolve_approval(
 
 #[tauri::command]
 fn end_session(state: State<'_, AppState>) -> Result<(), String> {
+    // end_session cancels the turn token; clear waiters after.
+    state.sessions.end_session().map_err(map_session_err)?;
     state.approvals.clear();
-    state.sessions.end_session().map_err(map_session_err)
+    Ok(())
 }
 
 #[tauri::command]
@@ -1043,26 +1106,23 @@ fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillSummary>, String> 
 }
 
 fn system_prompt_info(session: &Session) -> Result<SystemPromptInfo, String> {
-    let custom = load_custom_system(&session.root);
+    let custom = load_custom_system(&session.root)?;
     let composed = session
         .agent
         .system
         .clone()
         .unwrap_or_else(|| session.base_system.clone());
-    let composed_preview = if composed.len() > COMPOSED_PREVIEW_MAX {
-        format!(
-            "{}…\n\n(truncated — {} chars total)",
-            &composed[..COMPOSED_PREVIEW_MAX],
-            composed.len()
-        )
-    } else {
-        composed
-    };
+    let composed_preview = truncate_chars(&composed, COMPOSED_PREVIEW_MAX);
     Ok(SystemPromptInfo {
         base: session.base_system.clone(),
         custom,
         composed_preview,
-        custom_path: session.root.join(".zest").join("system.md").display().to_string(),
+        custom_path: session
+            .root
+            .join(".zest")
+            .join("system.md")
+            .display()
+            .to_string(),
     })
 }
 
@@ -1088,38 +1148,17 @@ fn last_provider() -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn persist_model_effort(model: &str, effort: &str) -> Result<(), String> {
-    let dir = zest_config_dir()?;
-    std::fs::write(dir.join("last-model"), model).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("last-effort"), effort).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn load_last_model() -> Option<String> {
-    let path = dirs::config_dir()?.join("zest").join("last-model");
-    let value = std::fs::read_to_string(path).ok()?;
-    let value = value.trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
-fn load_last_effort() -> Option<String> {
-    let path = dirs::config_dir()?.join("zest").join("last-effort");
-    let value = std::fs::read_to_string(path).ok()?;
-    let value = value.trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
 fn normalize_effort(effort: &str) -> String {
     zest_core::normalize_effort(effort)
 }
 
 /// Wire label for approval / chat-event payloads (snake_case string).
-fn tool_risk_wire(risk: zest_core::ToolRisk) -> &'static str {
+fn tool_risk_wire(risk: ToolRisk) -> &'static str {
     match risk {
-        zest_core::ToolRisk::Read => "read",
-        zest_core::ToolRisk::Sensitive => "sensitive",
-        zest_core::ToolRisk::Write => "write",
-        zest_core::ToolRisk::Exec => "exec",
+        ToolRisk::Read => "read",
+        ToolRisk::Sensitive => "sensitive",
+        ToolRisk::Write => "write",
+        ToolRisk::Exec => "exec",
     }
 }
 
@@ -1140,6 +1179,7 @@ pub fn run() {
             start_login,
             start_session,
             update_session_options,
+            reset_session_options,
             list_threads,
             load_thread,
             new_thread,
@@ -1154,6 +1194,17 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zest desktop");
+}
+
+#[cfg(all(test, feature = "export-bindings"))]
+mod export_bindings {
+    use super::*;
+
+    #[test]
+    fn export_bindings() {
+        ChatEvent::export_all().expect("export ChatEvent bindings");
+        SessionInfo::export_all().expect("export SessionInfo bindings");
+    }
 }
 
 #[cfg(test)]
@@ -1248,11 +1299,15 @@ mod characterization {
     #[tokio::test]
     async fn approval_hub_prepare_resolve_and_unknown_id() {
         let hub = ApprovalHub::new();
+        hub.begin_turn("turn-1");
         hub.prepare("ap1");
         hub.resolve("ap1", true).unwrap();
         assert!(hub.wait("ap1").await);
 
         assert!(hub.resolve("missing", false).is_err());
         assert!(!hub.wait("never-prepared").await);
+
+        hub.clear();
+        assert!(hub.resolve("ap2", true).is_err());
     }
 }

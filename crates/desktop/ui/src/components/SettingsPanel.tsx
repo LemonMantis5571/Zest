@@ -133,26 +133,27 @@ export function SettingsPanel({
 
     const backend = getBackend();
     Promise.all([
-      backend.listProviders().catch(() => [] as ProviderRow[]),
+      backend.listProviders(),
       backend.listThreads(),
-      backend.getSystemPrompt().catch(() => null),
-      backend.listSkills().catch(() => [] as SkillSummary[]),
+      backend.getSystemPrompt(),
+      backend.listSkills(),
     ])
       .then(([rows, list, prompt, skillList]) => {
         if (cancelled) return;
         setProvider(rows.find((p) => p.id === session.provider) ?? null);
         setThreads(list);
-        if (prompt) {
-          setCustomPrompt(prompt.custom);
-          setSavedCustom(prompt.custom);
-          setPromptPath(prompt.customPath);
-        }
+        setCustomPrompt(prompt.custom);
+        setSavedCustom(prompt.custom);
+        setPromptPath(prompt.customPath);
         setSkills(skillList);
       })
       .catch((err) => {
         if (cancelled) return;
+        // Surface real load failures — never fake empty settings state.
         setError(String(err));
         setThreads([]);
+        setSkills([]);
+        setPromptError(String(err));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -261,7 +262,13 @@ export function SettingsPanel({
             <div className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5">
               <div className="text-sm font-medium">{session.label}</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">
-                {provider?.statusLabel ?? session.provider} · Local
+                {provider?.statusLabel ?? session.provider}
+              </div>
+              <div
+                className="mt-1 break-all font-mono text-[11px] text-muted-foreground"
+                title={session.root}
+              >
+                {session.root}
               </div>
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {canConnect ? (

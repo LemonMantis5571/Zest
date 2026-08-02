@@ -287,6 +287,8 @@ default = { provider = "ghost" }
         let config = Config::env_fallback();
         let router = Router::from_config(&config);
 
-        assert!(router.resolve(None, &registry, &Ledger::default()).is_none());
+        assert!(router
+            .resolve(None, &registry, &Ledger::default())
+            .is_none());
     }
 }

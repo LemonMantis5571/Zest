@@ -1,11 +1,9 @@
 import { useEffect, useRef } from "react";
-import { ArrowUpIcon, PlusIcon } from "lucide-react";
+import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
 
 import { ModelEffortPicker } from "@/components/ModelEffortPicker";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 import { chipLabel, modelLabel, type EffortId } from "@/lib/models";
-import { cn } from "@/lib/utils";
 
 type Props = {
   value: string;
@@ -18,6 +16,7 @@ type Props = {
   optionsDisabled?: boolean;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  onStop?: () => void;
   onModelChange: (model: string) => void;
   onEffortChange: (effort: EffortId) => void;
 };
@@ -32,6 +31,7 @@ export function Composer({
   optionsDisabled = false,
   onChange,
   onSubmit,
+  onStop,
   onModelChange,
   onEffortChange,
 }: Props) {
@@ -92,18 +92,31 @@ export function Composer({
                 </span>
               )}
             </div>
-            <Button
-              type="button"
-              size="icon-sm"
-              disabled={!canSend}
-              aria-label="Send"
-              className={cn("rounded-full", sending && "pointer-events-none")}
-              onClick={() => {
-                if (canSend) onSubmit();
-              }}
-            >
-              {sending ? <Spinner className="size-3.5" /> : <ArrowUpIcon />}
-            </Button>
+            {sending ? (
+              <Button
+                type="button"
+                size="icon-sm"
+                aria-label="Stop"
+                title="Stop"
+                className="rounded-full"
+                onClick={() => onStop?.()}
+              >
+                <SquareIcon className="size-3.5 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                size="icon-sm"
+                disabled={!canSend}
+                aria-label="Send"
+                className="rounded-full"
+                onClick={() => {
+                  if (canSend) onSubmit();
+                }}
+              >
+                <ArrowUpIcon />
+              </Button>
+            )}
           </div>
         </div>
         <div className="mt-2 flex items-center justify-between px-1 text-[11px] text-muted-foreground">

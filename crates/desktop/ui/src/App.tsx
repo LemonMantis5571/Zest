@@ -49,6 +49,30 @@ function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+/** Collapse adjacent text/thinking deltas for the same message before reduce. */
+function mergeAdjacentDeltas(events: ChatEvent[]): ChatEvent[] {
+  const out: ChatEvent[] = [];
+  for (const event of events) {
+    const last = out[out.length - 1];
+    if (
+      last &&
+      (event.kind === "text_delta" || event.kind === "thinking_delta") &&
+      last.kind === event.kind &&
+      "message_id" in last &&
+      "message_id" in event &&
+      last.message_id === event.message_id &&
+      last.turn_id === event.turn_id &&
+      "text" in last &&
+      "text" in event
+    ) {
+      out[out.length - 1] = { ...last, text: last.text + event.text };
+    } else {
+      out.push(event);
+    }
+  }
+  return out;
+}
+
 function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
   if (!raw?.length) return [];
   // Rust terminalizes interrupted tools on load; keep a belt-and-suspenders pass.
@@ -249,7 +273,8 @@ export default function App() {
     deltaRafRef.current = null;
     const queued = deltaQueueRef.current;
     deltaQueueRef.current = [];
-    for (const event of queued) {
+    // Merge adjacent text/thinking deltas before React reduce to cut renders.
+    for (const event of mergeAdjacentDeltas(queued)) {
       applyChatEventNow(event);
     }
   }, [applyChatEventNow]);
@@ -376,11 +401,20 @@ export default function App() {
   }, [applySession, enterChat, handleChatEvent]);
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     backend.onChatEvent(handleChatEvent).then((fn) => {
+      if (disposed) {
+        // Strict Mode: dispose late-resolving subscriptions immediately.
+        fn();
+        return;
+      }
       unlisten = fn;
     });
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [handleChatEvent]);
 
   // Persist sticky draft for the active thread.
@@ -534,7 +568,9 @@ export default function App() {
     if (session?.threadId) {
       saveDraft(session.threadId, "");
     }
+    // Stay busy until an authoritative done/cancelled/error chat-event arrives.
     setSending(true);
+    sendingRef.current = true;
     activeAssistantId.current = null;
     try {
       await backend.sendMessage(text);
@@ -555,6 +591,20 @@ export default function App() {
           description: message,
         });
       }
+    }
+  }
+
+  async function onStop() {
+    if (!sendingRef.current) return;
+    try {
+      await backend.cancelTurn();
+      // Keep sending=true until the Cancelled chat-event clears busy state.
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not stop",
+        description: formatInvokeError(err),
+      });
     }
   }
 
@@ -700,6 +750,7 @@ export default function App() {
             optionsDisabled={optionsUpdating}
             onDraftChange={setDraft}
             onSend={onSend}
+            onStop={onStop}
             onNewChat={onNewChat}
             onChangeProvider={changeProvider}
             onReconnect={reconnectProvider}

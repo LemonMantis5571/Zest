@@ -3,20 +3,24 @@
 ## Overview
 
 Three crates in a Cargo workspace. `zest-core` holds everything that isn't a user interface;
-`zest` is the terminal front-end; `zest-desktop` is a Tauri launch picker over the same auth APIs.
+`zest` is the terminal front-end; `zest-desktop` is a Tauri chat shell over the same agent loop.
 
 The split exists so the agent loop can be developed and debugged at `cargo run -p zest` speed,
-without a webview in the path. The desktop app is a thin view over core auth today; the agent
-session UI comes after the loop is proven live.
+without a webview in the path. Desktop is a thin view over core: provider picker, streaming chat,
+approvals, and project-scoped thread persistence.
 
 ```
 crates/core/     zest-core
-  anthropic/     Messages API client + SSE
+  anthropic/     Messages API client + SSE (message_stop required; idle/connect timeouts)
   auth.rs        detect sign-ins; start_login spawns vendor CLI
-  tools/         Tool trait + ToolRegistry
-  agent.rs       the loop
-crates/cli/      zest — REPL + ANSI renderer
-crates/desktop/  zest-desktop — Tauri provider picker (ui/ + commands)
+  cancel.rs      async CancelToken (races stream/tools/approvals; HTTP abort on drop)
+  thread.rs      provider-owned threads; typed load errors; never rewrite newer formats
+  prefs.rs       project-scoped provider sticky state (`.zest/session-state.json`)
+  fsutil.rs      centralized atomic persistence (flush/sync + Windows MoveFileExW)
+  tools/         Tool trait + ToolRegistry (sensitive-path gates, bounded I/O)
+  agent.rs       transactional loop + ledger-before-late-cancel
+crates/cli/      zest — REPL + doctor --live
+crates/desktop/  zest-desktop — Tauri chat shell (ui/ + session controller)
 ```
 
 ## Components

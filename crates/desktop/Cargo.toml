@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Desktop front-end for the Zest coding harness."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "zest-desktop"
 path = "src/main.rs"

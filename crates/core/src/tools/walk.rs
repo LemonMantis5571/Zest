@@ -14,7 +14,7 @@ use super::sensitive::is_sensitive_path;
 const HARD_SKIP_DIRS: &[&str] = &[".git", ".zest", "target", "node_modules"];
 
 fn hard_skip_name(name: &str) -> bool {
-    HARD_SKIP_DIRS.iter().any(|d| *d == name)
+    HARD_SKIP_DIRS.contains(&name)
 }
 
 fn configure_builder(builder: &mut WalkBuilder) {
@@ -43,11 +43,7 @@ pub fn walk_files(root: &ProjectRoot, start: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for entry in builder.build().flatten() {
         let path = entry.path();
-        if !entry
-            .file_type()
-            .map(|t| t.is_file())
-            .unwrap_or(false)
-        {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let Ok(resolved) = root.confine(path) else {
@@ -94,10 +90,7 @@ pub fn list_children(root: &ProjectRoot, dir: &Path) -> Result<Vec<ListedEntry>,
             if root.confine(path).is_err() {
                 continue;
             }
-            entries.push(ListedEntry {
-                name,
-                is_dir: true,
-            });
+            entries.push(ListedEntry { name, is_dir: true });
             continue;
         }
 
