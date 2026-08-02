@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::anthropic::AnthropicProvider;
-use super::Provider;
+use super::{catalogue_for_provider, Provider};
 use crate::config::{Config, ProviderConfig};
 
 /// A provider that could not be built, and why — phrased for a user to act on.
@@ -52,6 +52,12 @@ impl ProviderRegistry {
         self.providers.get(id).cloned()
     }
 
+    /// Insert or replace a provider (tests and custom assembly).
+    pub fn insert(&mut self, provider: Arc<dyn Provider>) {
+        let id = provider.id().to_string();
+        self.providers.insert(id, provider);
+    }
+
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.providers.keys().map(String::as_str)
     }
@@ -83,6 +89,8 @@ fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provid
             base_url,
             api_key_env,
             model,
+            models,
+            efforts,
         } => {
             // A gateway may legitimately need no key. But if the config *names*
             // an env var and it is empty, that is a mistake worth surfacing
@@ -94,8 +102,15 @@ fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provid
                 None => String::new(),
             };
 
-            let provider = AnthropicProvider::gateway(id.to_string(), key, base_url, model.clone())
-                .map_err(|e| format!("could not build client: {e}"))?;
+            let mut provider =
+                AnthropicProvider::gateway(id.to_string(), key, base_url, model.clone())
+                    .map_err(|e| format!("could not build client: {e}"))?
+                    .with_models(catalogue_for_provider(id, model, models, efforts));
+            // CLIProxyAPI maps Anthropic thinking + output_config.effort onto
+            // Codex reasoning — keep them on for the codex gateway path.
+            if id == "codex" {
+                provider = provider.with_extensions(true);
+            }
             Ok(Arc::new(provider))
         }
     }
