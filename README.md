@@ -193,13 +193,18 @@ Agent-facing docs for contributors: `AGENTS.md`, `PROJECT_CONTEXT.md`, `context/
 .\scripts\verify.ps1
 ```
 
-CI runs the same checks on `windows-latest`.
+ASCII-safe PowerShell 5.1 gate: `npm ci` → UI test/lint/build → `cargo fmt` / clippy `-D warnings` /
+tests → ts-rs binding drift → `npm audit` → RustSec (`cargo audit`) → `git diff --check`.
+CI runs the same script on `windows-latest`. Root convenience: `npm run ui:test`.
 
 ```powershell
 cargo run -p zest -- doctor --live
 ```
 
-Opt-in. Spends real quota. Checks streamed text, `read_file` on `README.md`, ledger delta, thread reload. Writes/`delegate` disabled for this command.
+Opt-in. Requires a working gateway/login and spends real quota. Reloads the usage ledger from disk
+before asserting success (no RAM-only fake pass). Checks streamed text, `read_file` on `README.md`,
+ledger delta, thread reload. Writes/`delegate` disabled for this command. If creds are missing,
+skip live doctor — do not invent a green result.
 
 ---
 

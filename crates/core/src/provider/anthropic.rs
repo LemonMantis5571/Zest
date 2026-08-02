@@ -13,9 +13,7 @@
 
 use async_trait::async_trait;
 
-use super::{
-    catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest,
-};
+use super::{catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
 use crate::anthropic::client::AnthropicClient;
 use crate::anthropic::types::{OutputConfig, Request, Thinking, DEFAULT_MODEL};
 use crate::auth::AuthStatus;
@@ -165,6 +163,8 @@ impl Provider for AnthropicProvider {
             },
         };
 
-        self.client.stream(&wire, on_event).await
+        self.client
+            .stream_cancellable(&wire, on_event, req.cancel.as_ref())
+            .await
     }
 }

@@ -66,9 +66,7 @@ impl PersistWorker {
                             .expect("persist worker runtime");
                         rt.block_on(run_worker(store, rx));
                     })
-                    .map_err(|e| {
-                        HarnessError::Other(format!("spawn persist worker: {e}"))
-                    })?;
+                    .map_err(|e| HarnessError::Other(format!("spawn persist worker: {e}")))?;
             }
         }
         Ok(Self { tx })
@@ -87,11 +85,7 @@ impl PersistWorker {
     }
 
     /// Save immediately (or as a delta) and wait for the write to finish.
-    pub async fn save_and_wait(
-        &self,
-        thread: Thread,
-        priority: PersistPriority,
-    ) -> Result<()> {
+    pub async fn save_and_wait(&self, thread: Thread, priority: PersistPriority) -> Result<()> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.tx
             .send(Cmd::Upsert {

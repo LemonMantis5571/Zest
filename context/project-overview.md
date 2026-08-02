@@ -25,9 +25,10 @@ is already built.
 
 ## Current Priorities
 
-1. **Stable Windows Alpha gate** — finish desktop-contract hardening if still open; run
-   `cargo run -p zest -- doctor --live` once against a working gateway/login (manual; spends quota).
-2. **Visible delegation provenance + honest usage UX** immediately after the alpha gate.
+1. **Stable Windows Alpha (Milestone 0)** — core safety, real cancel, file/prompt hardening, and
+   `scripts/verify.ps1` are in place. Run `cargo run -p zest -- doctor --live` only when a working
+   gateway/login exists (manual; spends quota). Do not treat verify green as live-doctor green.
+2. **Milestone 1 — usage/routing UX** — visible delegation provenance + honest ledger after M0.
 3. **Second spendable provider** alongside Codex so delegated workers exercise real dual-account
    routing.
 4. **OS-backed Windows sandbox** before any `bash` / exec tool ships.

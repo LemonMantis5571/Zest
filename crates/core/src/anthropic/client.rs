@@ -4,14 +4,22 @@
 //! from the event stream lives in `accumulate.rs` so it can be tested against a
 //! recorded transcript rather than only over the network.
 
+use std::time::Duration;
+
 use futures_util::StreamExt;
 use serde_json::Value;
 
 use super::accumulate::TurnAccumulator;
 use super::sse::SseParser;
 use super::types::{Request, API_BASE, API_VERSION};
+use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::provider::{Completion, RateLimitSnapshot, StreamEvent};
+
+/// TCP/TLS connect budget.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Max silence between SSE chunks before the turn fails.
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct AnthropicClient {
     http: reqwest::Client,
@@ -22,7 +30,9 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     pub fn new(api_key: String) -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder().build()?,
+            http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()?,
             api_key,
             base_url: API_BASE.to_string(),
         })
@@ -47,18 +57,30 @@ impl AnthropicClient {
         req: &Request,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion> {
-        let resp = self
-            .http
-            .post(self.endpoint())
-            .header("x-api-key", &self.api_key)
-            // Gateways commonly read the bearer header instead. Sending both is
-            // harmless — the real API ignores it.
-            .header("authorization", format!("Bearer {}", self.api_key))
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(req)
-            .send()
-            .await?;
+        self.stream_cancellable(req, on_event, None).await
+    }
+
+    pub async fn stream_cancellable(
+        &self,
+        req: &Request,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Result<Completion> {
+        let resp = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
+            resp = self
+                .http
+                .post(self.endpoint())
+                .header("x-api-key", &self.api_key)
+                // Gateways commonly read the bearer header instead. Sending both is
+                // harmless — the real API ignores it.
+                .header("authorization", format!("Bearer {}", self.api_key))
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json")
+                .json(req)
+                .send() => resp?,
+        };
 
         let status = resp.status();
         if !status.is_success() {
@@ -77,16 +99,39 @@ impl AnthropicClient {
         let mut parser = SseParser::default();
         let mut body = resp.bytes_stream();
 
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk?;
-            for payload in parser.feed(&chunk) {
-                let event: Value = serde_json::from_str(&payload)?;
-                accumulator.push(&event, on_event)?;
-            }
+        loop {
+            tokio::select! {
+                biased;
 
-            if accumulator.is_done() {
-                break;
+                _ = wait_cancel(cancel) => {
+                    // Dropping `body` aborts the HTTP connection.
+                    return Err(HarnessError::Cancelled);
+                }
+
+                chunk = body.next() => {
+                    match chunk {
+                        Some(Ok(chunk)) => {
+                            for payload in parser.feed(&chunk) {
+                                let event: Value = serde_json::from_str(&payload)?;
+                                accumulator.push(&event, on_event)?;
+                            }
+                            if accumulator.is_done() {
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => return Err(e.into()),
+                        None => break,
+                    }
+                }
+
+                _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                    return Err(HarnessError::StreamIdleTimeout);
+                }
             }
+        }
+
+        if !accumulator.is_done() {
+            return Err(HarnessError::PrematureEof);
         }
 
         Ok(accumulator.finish(limits))

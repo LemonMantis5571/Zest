@@ -13,9 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::anthropic::types::Message;
 use crate::error::{HarnessError, Result};
+use crate::fsutil;
 
 /// Current on-disk thread document version.
 pub const THREAD_FORMAT_VERSION: u32 = 1;
@@ -93,9 +95,7 @@ fn validate_thread_id(s: &str) -> std::result::Result<(), String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(
-            "thread id may only contain ASCII letters, digits, '-' and '_'".into(),
-        );
+        return Err("thread id may only contain ASCII letters, digits, '-' and '_'".into());
     }
     Ok(())
 }
@@ -153,6 +153,7 @@ impl StoredMessage {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn assistant_fields(
     msg: &mut StoredMessage,
 ) -> Option<(
@@ -183,7 +184,42 @@ pub struct ThreadSummary {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
     pub message_count: usize,
+}
+
+/// Typed outcomes when loading a thread from disk.
+#[derive(Debug, Error)]
+pub enum ThreadLoadError {
+    #[error("thread `{0}` not found")]
+    Missing(String),
+    #[error("thread `{id}` is corrupt: {detail}")]
+    Corrupt { id: String, detail: String },
+    #[error(
+        "thread `{id}` format v{found} is newer than supported v{supported}; refusing to rewrite"
+    )]
+    UnsupportedVersion {
+        id: String,
+        found: u32,
+        supported: u32,
+    },
+    #[error("thread `{id}` I/O error: {detail}")]
+    Io { id: String, detail: String },
+    #[error("invalid thread id: {0}")]
+    InvalidId(String),
+    #[error("thread `{id}` belongs to provider `{owned}`, not `{wanted}`")]
+    ProviderMismatch {
+        id: String,
+        owned: String,
+        wanted: String,
+    },
+}
+
+impl From<ThreadLoadError> for HarnessError {
+    fn from(err: ThreadLoadError) -> Self {
+        HarnessError::Other(err.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,8 +261,7 @@ pub struct ThreadLoad {
 impl Thread {
     pub fn new() -> Self {
         let now = now_secs();
-        let id = ThreadId::parse(new_id("thread"))
-            .expect("generated thread id is always valid");
+        let id = ThreadId::parse(new_id("thread")).expect("generated thread id is always valid");
         Self {
             version: THREAD_FORMAT_VERSION,
             id: id.as_str().to_string(),
@@ -246,26 +281,56 @@ impl Thread {
     }
 
     /// Fill missing version / wire-format fields from older files.
-    pub fn migrate_in_place(&mut self) -> Option<String> {
+    ///
+    /// Returns `Err` when the on-disk version is newer than this binary supports
+    /// — callers must not rewrite those threads.
+    pub fn migrate_in_place(&mut self) -> std::result::Result<Option<String>, ThreadLoadError> {
+        if self.version > THREAD_FORMAT_VERSION {
+            return Err(ThreadLoadError::UnsupportedVersion {
+                id: self.id.clone(),
+                found: self.version,
+                supported: THREAD_FORMAT_VERSION,
+            });
+        }
         let mut notes = Vec::new();
         if self.version == 0 {
             self.version = THREAD_FORMAT_VERSION;
             notes.push("migrated thread to format v1".to_string());
-        } else if self.version > THREAD_FORMAT_VERSION {
-            notes.push(format!(
-                "thread format v{} is newer than supported v{}; loading best-effort",
-                self.version, THREAD_FORMAT_VERSION
-            ));
         }
         if self.wire_format.trim().is_empty() {
             self.wire_format = default_wire_format();
             notes.push("filled missing wireFormat".into());
         }
-        if notes.is_empty() {
+        Ok(if notes.is_empty() {
             None
         } else {
             Some(notes.join("; "))
+        })
+    }
+
+    /// Refuse to change an already-pinned provider owner.
+    pub fn assert_provider(&self, provider_id: &str) -> std::result::Result<(), ThreadLoadError> {
+        match self.provider_id.as_deref() {
+            None => Ok(()),
+            Some(owned) if owned == provider_id => Ok(()),
+            Some(owned) => Err(ThreadLoadError::ProviderMismatch {
+                id: self.id.clone(),
+                owned: owned.to_string(),
+                wanted: provider_id.to_string(),
+            }),
         }
+    }
+
+    /// Pin provider once. Never rewrites an existing owner.
+    pub fn ensure_provider(
+        &mut self,
+        provider_id: &str,
+    ) -> std::result::Result<(), ThreadLoadError> {
+        self.assert_provider(provider_id)?;
+        if self.provider_id.is_none() {
+            self.provider_id = Some(provider_id.to_string());
+        }
+        Ok(())
     }
 
     /// Convert interrupted approvals / still-running tools into terminal error
@@ -320,6 +385,7 @@ impl Thread {
             created_at: self.created_at,
             updated_at: self.updated_at,
             title: self.title.clone(),
+            provider_id: self.provider_id.clone(),
             message_count: self.messages.len(),
         }
     }
@@ -419,6 +485,7 @@ impl Thread {
         self.touch();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_approval_needed(
         &mut self,
         message_id: &str,
@@ -545,25 +612,22 @@ impl ThreadStore {
     pub fn save(&self, thread: &Thread) -> Result<()> {
         let id = ThreadId::parse(&thread.id)
             .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        if thread.version > THREAD_FORMAT_VERSION {
+            return Err(ThreadLoadError::UnsupportedVersion {
+                id: thread.id.clone(),
+                found: thread.version,
+                supported: THREAD_FORMAT_VERSION,
+            }
+            .into());
+        }
         let mut thread = thread.clone();
         thread.version = THREAD_FORMAT_VERSION;
         if thread.wire_format.trim().is_empty() {
             thread.wire_format = default_wire_format();
         }
         let path = self.path_for(&id);
-        let tmp = path.with_extension("json.tmp");
-        let body = serde_json::to_vec_pretty(&thread)
-            .map_err(|e| HarnessError::Other(format!("serialize thread: {e}")))?;
-        fs::write(&tmp, body).map_err(|e| {
-            HarnessError::Other(format!("write thread {}: {e}", tmp.display()))
-        })?;
-        // Windows-safe replace: remove destination first when rename would fail.
-        if path.exists() {
-            let _ = fs::remove_file(&path);
-        }
-        fs::rename(&tmp, &path).map_err(|e| {
-            HarnessError::Other(format!("rename thread {}: {e}", path.display()))
-        })?;
+        fsutil::atomic_write_json(&path, &thread)
+            .map_err(|e| HarnessError::Other(format!("write thread {}: {e}", path.display())))?;
         Ok(())
     }
 
@@ -573,21 +637,36 @@ impl ThreadStore {
 
     /// Load + migrate + terminalize interrupted in-flight tool/approval cards.
     pub fn load_with_recovery(&self, id: &str) -> Result<ThreadLoad> {
-        let tid = ThreadId::parse(id)
-            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        self.load_typed(id).map_err(Into::into)
+    }
+
+    /// Typed load used by desktop restore / provider ownership checks.
+    pub fn load_typed(&self, id: &str) -> std::result::Result<ThreadLoad, ThreadLoadError> {
+        let tid = ThreadId::parse(id).map_err(ThreadLoadError::InvalidId)?;
         let path = self.path_for(&tid);
-        let body = fs::read_to_string(&path).map_err(|e| {
-            HarnessError::Other(format!("read thread {}: {e}", path.display()))
-        })?;
+        let body = match fs::read_to_string(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ThreadLoadError::Missing(tid.as_str().to_string()));
+            }
+            Err(e) => {
+                return Err(ThreadLoadError::Io {
+                    id: tid.as_str().to_string(),
+                    detail: e.to_string(),
+                });
+            }
+        };
         let mut thread: Thread = match serde_json::from_str(&body) {
             Ok(t) => t,
             Err(e) => {
-                let preserved = preserve_corrupt(&path)?;
-                return Err(HarnessError::Other(format!(
-                    "corrupt thread {} preserved as {}; parse error: {e}",
-                    path.display(),
-                    preserved.display()
-                )));
+                let preserved = preserve_corrupt(&path).map_err(|err| ThreadLoadError::Io {
+                    id: tid.as_str().to_string(),
+                    detail: err.to_string(),
+                })?;
+                return Err(ThreadLoadError::Corrupt {
+                    id: tid.as_str().to_string(),
+                    detail: format!("preserved as {}; parse error: {e}", preserved.display()),
+                });
             }
         };
 
@@ -597,8 +676,10 @@ impl ThreadStore {
         }
 
         let mut warnings = Vec::new();
-        if let Some(note) = thread.migrate_in_place() {
-            warnings.push(note);
+        match thread.migrate_in_place() {
+            Ok(Some(note)) => warnings.push(note),
+            Ok(None) => {}
+            Err(e) => return Err(e),
         }
         if thread.terminalize_interrupted() {
             warnings.push("interrupted tools/approvals were closed after restart".into());
@@ -618,6 +699,17 @@ impl ThreadStore {
         })
     }
 
+    /// Load and reject cross-provider restore (never rewrites `provider_id`).
+    pub fn load_for_provider(
+        &self,
+        id: &str,
+        provider_id: &str,
+    ) -> std::result::Result<ThreadLoad, ThreadLoadError> {
+        let loaded = self.load_typed(id)?;
+        loaded.thread.assert_provider(provider_id)?;
+        Ok(loaded)
+    }
+
     pub fn load_or_none(&self, id: &str) -> Option<Thread> {
         self.load_with_recovery(id).ok().map(|l| l.thread)
     }
@@ -635,6 +727,15 @@ impl ThreadStore {
     }
 
     pub fn list(&self) -> Result<Vec<ThreadSummary>> {
+        self.list_filtered(None)
+    }
+
+    /// Recent threads for one provider (active-provider filter).
+    pub fn list_for_provider(&self, provider_id: &str) -> Result<Vec<ThreadSummary>> {
+        self.list_filtered(Some(provider_id))
+    }
+
+    fn list_filtered(&self, provider_id: Option<&str>) -> Result<Vec<ThreadSummary>> {
         let mut out = Vec::new();
         let entries = fs::read_dir(&self.dir).map_err(|e| {
             HarnessError::Other(format!("list threads {}: {e}", self.dir.display()))
@@ -651,13 +752,22 @@ impl ThreadStore {
             let Ok(body) = fs::read_to_string(&path) else {
                 continue;
             };
-            let Ok(mut thread) = serde_json::from_str::<Thread>(&body) else {
+            let Ok(thread) = serde_json::from_str::<Thread>(&body) else {
                 continue;
             };
-            let _ = thread.migrate_in_place();
+            // Skip unsupported newer versions rather than rewriting them.
+            if thread.version > THREAD_FORMAT_VERSION {
+                continue;
+            }
+            if let Some(want) = provider_id {
+                match thread.provider_id.as_deref() {
+                    Some(id) if id == want => {}
+                    _ => continue,
+                }
+            }
             out.push(thread.summary());
         }
-        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        out.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         Ok(out)
     }
 }
@@ -667,10 +777,7 @@ fn preserve_corrupt(path: &Path) -> Result<PathBuf> {
     let stamp = now_secs();
     let preserved = path.with_extension(format!("json.corrupt-{stamp}"));
     fs::rename(path, &preserved).map_err(|e| {
-        HarnessError::Other(format!(
-            "preserve corrupt thread {}: {e}",
-            path.display()
-        ))
+        HarnessError::Other(format!("preserve corrupt thread {}: {e}", path.display()))
     })?;
     Ok(preserved)
 }
@@ -701,7 +808,10 @@ mod characterization {
 
         let loaded = store.load(&thread.id).unwrap();
         assert_eq!(loaded.id, thread.id);
-        assert_eq!(loaded.title.as_deref(), Some("first question about the repo"));
+        assert_eq!(
+            loaded.title.as_deref(),
+            Some("first question about the repo")
+        );
         assert_eq!(loaded.messages.len(), 2);
         match &loaded.messages[0] {
             StoredMessage::User { id, text } => {
@@ -893,6 +1003,35 @@ mod characterization {
     }
 
     #[test]
+    fn refuses_newer_thread_format() {
+        let root = scratch("newer");
+        let store = ThreadStore::open(&root).unwrap();
+        let id = "thread-newer1";
+        let path = store.dir().join(format!("{id}.json"));
+        fs::write(
+            &path,
+            r#"{
+  "version": 99,
+  "id": "thread-newer1",
+  "createdAt": 1,
+  "updatedAt": 2,
+  "providerId": "codex",
+  "wireFormat": "anthropic_messages",
+  "messages": [],
+  "agentMessages": []
+}"#,
+        )
+        .unwrap();
+        let err = store.load_typed(id).unwrap_err();
+        assert!(
+            matches!(err, ThreadLoadError::UnsupportedVersion { .. }),
+            "{err}"
+        );
+        // Original file must remain (no rewrite).
+        assert!(path.exists());
+    }
+
+    #[test]
     fn corrupt_thread_is_preserved_aside() {
         let root = scratch("corrupt");
         let store = ThreadStore::open(&root).unwrap();
@@ -915,15 +1054,7 @@ mod characterization {
     fn terminalize_interrupted_closes_running_and_approvals() {
         let mut thread = Thread::new();
         thread.apply_tool_start("a1", "t1", "write_file");
-        thread.apply_approval_needed(
-            "a1",
-            "t2",
-            "write_file",
-            "ap1",
-            "f.txt",
-            "write",
-            "diff",
-        );
+        thread.apply_approval_needed("a1", "t2", "write_file", "ap1", "f.txt", "write", "diff");
         assert!(thread.terminalize_interrupted());
         match &thread.messages[0] {
             StoredMessage::Assistant {

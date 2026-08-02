@@ -20,10 +20,7 @@ impl SseParser {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
 
-        loop {
-            let Some(nl) = self.buf.iter().position(|b| *b == b'\n') else {
-                break;
-            };
+        while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=nl).collect();
             let line = String::from_utf8_lossy(&line);
             let line = line.trim();

@@ -241,8 +241,10 @@ async fn run_doctor_live() -> anyhow::Result<()> {
     }
 
     let provider_id = agent.provider_id().to_string();
+    // Reload from disk so success reflects durable metering, not just RAM.
     let after = {
-        let guard = ledger.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut guard = ledger.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        guard.reload_from_disk();
         guard
             .get(&provider_id)
             .cloned()
@@ -276,10 +278,7 @@ async fn run_doctor_live() -> anyhow::Result<()> {
         "  usage delta ........... ok ({} → {} req on {provider_id})",
         before_requests, after.requests
     );
-    println!(
-        "  persistence ........... ok (thread {})",
-        loaded.thread.id
-    );
+    println!("  persistence ........... ok (thread {})", loaded.thread.id);
     println!("\n\x1b[32mdoctor --live passed\x1b[0m");
     Ok(())
 }
@@ -426,7 +425,7 @@ impl Renderer {
             }
             StreamEvent::Text(t) => {
                 if self.thinking_open {
-                    print!("\x1b[0m\n");
+                    println!("\x1b[0m");
                     self.thinking_open = false;
                 }
                 if !self.text_started {
@@ -437,7 +436,7 @@ impl Renderer {
             }
             StreamEvent::ToolCallStart { name, .. } => {
                 if self.thinking_open {
-                    print!("\x1b[0m\n");
+                    println!("\x1b[0m");
                     self.thinking_open = false;
                 }
                 println!("\n\x1b[36m→ {name}\x1b[0m");
@@ -455,9 +454,7 @@ impl Renderer {
                 }
             }
             StreamEvent::ApprovalNeeded {
-                tool_name,
-                summary,
-                ..
+                tool_name, summary, ..
             } => {
                 println!("\n\x1b[33m? approve {tool_name}\x1b[0m \x1b[90m{summary}\x1b[0m");
             }

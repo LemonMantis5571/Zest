@@ -56,18 +56,32 @@ impl ReadFile {
     }
 
     async fn read_path(&self, path: &str) -> Result<String, String> {
+        use tokio::io::AsyncReadExt;
+
         let resolved = self.root.resolve(path)?;
-        let bytes = tokio::fs::read(&resolved)
+        let meta = tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|e| format!("stat failed: {e}"))?;
+        let file_len = meta.len() as usize;
+
+        let file = tokio::fs::File::open(&resolved)
+            .await
+            .map_err(|e| format!("open failed: {e}"))?;
+        // Bound before alloc: read at most MAX_BYTES (+1 to detect truncation).
+        let mut buf = Vec::with_capacity(file_len.min(MAX_BYTES).saturating_add(1));
+        let mut limited = file.take(MAX_BYTES as u64 + 1);
+        limited
+            .read_to_end(&mut buf)
             .await
             .map_err(|e| format!("read failed: {e}"))?;
-
-        let truncated = bytes.len() > MAX_BYTES;
-        let slice = &bytes[..bytes.len().min(MAX_BYTES)];
-        let mut text = String::from_utf8_lossy(slice).into_owned();
+        let truncated = buf.len() > MAX_BYTES || file_len > MAX_BYTES;
+        if buf.len() > MAX_BYTES {
+            buf.truncate(MAX_BYTES);
+        }
+        let mut text = String::from_utf8_lossy(&buf).into_owned();
         if truncated {
             text.push_str(&format!(
-                "\n\n[truncated at {MAX_BYTES} bytes; file is {} bytes]",
-                bytes.len()
+                "\n\n[truncated at {MAX_BYTES} bytes; file is {file_len} bytes]"
             ));
         }
         Ok(text)
@@ -159,15 +173,11 @@ mod tests {
         std::fs::write(dir.join(".env.example"), "SECRET=\n").unwrap();
         let tool = ReadFile::new(&dir).unwrap();
 
-        let prepared = tool
-            .prepare(json!({ "path": ".env" }))
-            .unwrap();
+        let prepared = tool.prepare(json!({ "path": ".env" })).unwrap();
         assert_eq!(prepared.risk, ToolRisk::Sensitive);
         assert!(prepared.risk.requires_approval());
 
-        let example = tool
-            .prepare(json!({ "path": ".env.example" }))
-            .unwrap();
+        let example = tool.prepare(json!({ "path": ".env.example" })).unwrap();
         assert_eq!(example.risk, ToolRisk::Read);
         assert!(!example.risk.requires_approval());
     }

@@ -61,14 +61,12 @@ impl Tool for GlobFiles {
         }
 
         let mut builder = GlobSetBuilder::new();
-        builder
-            .add(Glob::new(pattern).map_err(|e| format!("invalid glob pattern: {e}"))?);
+        builder.add(Glob::new(pattern).map_err(|e| format!("invalid glob pattern: {e}"))?);
         // Also accept patterns that omit the recursive prefix when the model
         // writes `*.rs` meaning "anywhere".
         if !pattern.contains('/') && !pattern.contains('\\') && !pattern.starts_with("**/") {
             let anywhere = format!("**/{pattern}");
-            builder
-                .add(Glob::new(&anywhere).map_err(|e| format!("invalid glob pattern: {e}"))?);
+            builder.add(Glob::new(&anywhere).map_err(|e| format!("invalid glob pattern: {e}"))?);
         }
         let set = builder
             .build()
@@ -83,10 +81,7 @@ impl Tool for GlobFiles {
     }
 }
 
-fn collect_matches(
-    root: &ProjectRoot,
-    set: &globset::GlobSet,
-) -> Result<Vec<String>, String> {
+fn collect_matches(root: &ProjectRoot, set: &globset::GlobSet) -> Result<Vec<String>, String> {
     let mut matches = Vec::new();
 
     for resolved in walk_files(root, root.as_path()) {

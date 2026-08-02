@@ -5,7 +5,10 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use serde_json::{json, Value};
 
+use super::approval::{ApprovalPreview, ToolRisk};
+use super::prepared::PreparedToolCall;
 use super::project::ProjectRoot;
+use super::sensitive::is_sensitive_path;
 use super::Tool;
 
 const MAX_MATCHES: usize = 100;
@@ -24,6 +27,84 @@ impl Grep {
             root: ProjectRoot::new(root)?,
         })
     }
+
+    fn prepare_call(&self, input: Value) -> Result<PreparedToolCall, String> {
+        let pattern = input
+            .get("pattern")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing required field `pattern`".to_string())?;
+        if pattern.is_empty() {
+            return Err("pattern must not be empty".to_string());
+        }
+        // Validate regex before approval so bad patterns fail fast.
+        let _ = Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+
+        let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
+        let start = self.root.resolve(path)?;
+        let meta = std::fs::metadata(&start).map_err(|e| format!("stat failed: {e}"))?;
+
+        // Direct-file grep on a sensitive path requires approval. Discovery
+        // walks continue to omit sensitive files.
+        if meta.is_file() {
+            let rel = self.root.relativize(&start);
+            if is_sensitive_path(&rel) {
+                return Ok(PreparedToolCall::plain_with_preview(
+                    "grep",
+                    ToolRisk::Sensitive,
+                    input,
+                    ApprovalPreview {
+                        path: rel.clone(),
+                        summary: format!("Search sensitive file {rel}"),
+                        diff: String::new(),
+                    },
+                ));
+            }
+        }
+
+        Ok(PreparedToolCall::plain("grep", ToolRisk::Read, input))
+    }
+
+    async fn run_search(&self, input: Value) -> Result<String, String> {
+        let pattern = input
+            .get("pattern")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing required field `pattern`".to_string())?;
+        if pattern.is_empty() {
+            return Err("pattern must not be empty".to_string());
+        }
+        let re = Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+
+        let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
+        let start = self.root.resolve(path)?;
+
+        let file_filter = match input.get("glob").and_then(Value::as_str) {
+            Some(g) if !g.trim().is_empty() => Some(build_glob_filter(g.trim())?),
+            _ => None,
+        };
+
+        // Bound: allow searching a sensitive file only when prepare marked it
+        // Sensitive (approval already granted). Discovery still skips them.
+        let allow_sensitive_file = {
+            let meta = std::fs::metadata(&start).ok();
+            meta.map(|m| m.is_file()).unwrap_or(false)
+                && is_sensitive_path(&self.root.relativize(&start))
+        };
+
+        let root = self.root.clone();
+        let matches = tokio::task::spawn_blocking(move || {
+            search(
+                &root,
+                &start,
+                &re,
+                file_filter.as_ref(),
+                allow_sensitive_file,
+            )
+        })
+        .await
+        .map_err(|e| format!("grep task failed: {e}"))??;
+
+        format_results(matches)
+    }
 }
 
 #[async_trait]
@@ -36,7 +117,8 @@ impl Tool for Grep {
         "Search file contents under the project root with a regular expression. \
          Optional `path` scopes to a file or directory; optional `glob` filters \
          by filename pattern (e.g. `*.rs`). Results are capped. Respects \
-         `.gitignore` and skips `.git`, `.zest`, `target`, and `node_modules`."
+         `.gitignore` and skips `.git`, `.zest`, `target`, and `node_modules`. \
+         Direct search of likely-secret files requires user approval."
     }
 
     fn input_schema(&self) -> Value {
@@ -61,35 +143,12 @@ impl Tool for Grep {
         })
     }
 
+    fn prepare(&self, input: Value) -> Result<PreparedToolCall, String> {
+        self.prepare_call(input)
+    }
+
     async fn run(&self, input: Value) -> std::result::Result<String, String> {
-        let pattern = input
-            .get("pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "missing required field `pattern`".to_string())?;
-        if pattern.is_empty() {
-            return Err("pattern must not be empty".to_string());
-        }
-        let re = Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
-
-        let path = input
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or(".");
-        let start = self.root.resolve(path)?;
-
-        let file_filter = match input.get("glob").and_then(Value::as_str) {
-            Some(g) if !g.trim().is_empty() => Some(build_glob_filter(g.trim())?),
-            _ => None,
-        };
-
-        let root = self.root.clone();
-        let matches = tokio::task::spawn_blocking(move || {
-            search(&root, &start, &re, file_filter.as_ref())
-        })
-        .await
-        .map_err(|e| format!("grep task failed: {e}"))??;
-
-        format_results(matches)
+        self.run_search(input).await
     }
 }
 
@@ -98,8 +157,7 @@ fn build_glob_filter(pattern: &str) -> Result<GlobSet, String> {
     builder.add(Glob::new(pattern).map_err(|e| format!("invalid glob filter: {e}"))?);
     if !pattern.contains('/') && !pattern.contains('\\') && !pattern.starts_with("**/") {
         let anywhere = format!("**/{pattern}");
-        builder
-            .add(Glob::new(&anywhere).map_err(|e| format!("invalid glob filter: {e}"))?);
+        builder.add(Glob::new(&anywhere).map_err(|e| format!("invalid glob filter: {e}"))?);
     }
     builder
         .build()
@@ -118,6 +176,7 @@ fn search(
     start: &Path,
     re: &Regex,
     file_filter: Option<&GlobSet>,
+    allow_sensitive_file: bool,
 ) -> Result<Vec<MatchLine>, String> {
     let meta = std::fs::metadata(start).map_err(|e| format!("stat failed: {e}"))?;
 
@@ -128,6 +187,10 @@ fn search(
         let Ok(resolved) = root.confine(start) else {
             return Ok(matches);
         };
+        let rel = root.relativize(&resolved);
+        if is_sensitive_path(&rel) && !allow_sensitive_file {
+            return Ok(matches);
+        }
         search_file(
             root,
             &resolved,
@@ -166,11 +229,7 @@ fn search(
         if matches.len() >= MAX_MATCHES || output_bytes >= MAX_OUTPUT_BYTES {
             break;
         }
-        if !entry
-            .file_type()
-            .map(|t| t.is_file())
-            .unwrap_or(false)
-        {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let Ok(resolved) = root.confine(entry.path()) else {
@@ -180,7 +239,7 @@ fn search(
             continue;
         }
         let rel = root.relativize(&resolved);
-        if super::sensitive::is_sensitive_path(&rel) {
+        if is_sensitive_path(&rel) {
             continue;
         }
         search_file(
@@ -244,8 +303,7 @@ fn search_file(
     }
 }
 
-/// Clip on Unicode scalar boundaries (never mid-codepoint).
-pub fn clip_chars(s: &str, max_chars: usize) -> String {
+fn clip_chars(s: &str, max_chars: usize) -> String {
     let mut iter = s.chars();
     let mut out = String::new();
     for _ in 0..max_chars {
@@ -283,7 +341,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zest-grep-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+        std::fs::write(
+            dir.join("src/main.rs"),
+            "fn main() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
         std::fs::write(dir.join("README.md"), "println is documented\n").unwrap();
         dir
@@ -345,6 +407,23 @@ mod tests {
         assert!(!out.contains(".env"), "{out}");
     }
 
+    #[tokio::test]
+    async fn direct_sensitive_file_requires_approval() {
+        let dir = scratch("direct-secret");
+        std::fs::write(dir.join(".env"), "SECRET_TOKEN=abc\n").unwrap();
+        let tool = Grep::new(&dir).unwrap();
+        let prepared = tool
+            .prepare(json!({ "pattern": "SECRET", "path": ".env" }))
+            .unwrap();
+        assert_eq!(prepared.risk, ToolRisk::Sensitive);
+        assert!(prepared.risk.requires_approval());
+        let out = tool
+            .run(json!({ "pattern": "SECRET", "path": ".env" }))
+            .await
+            .unwrap();
+        assert!(out.contains(".env"), "{out}");
+    }
+
     #[test]
     fn clips_at_unicode_char_boundaries() {
         // Each emoji is one char but multiple bytes.
@@ -352,7 +431,7 @@ mod tests {
         let clipped = clip_chars(&s, 3);
         assert!(clipped.ends_with('…'), "{clipped}");
         assert_eq!(clipped.chars().count(), 4); // 3 + ellipsis
-        // Must remain valid UTF-8 (String invariant) and not panic.
+                                                // Must remain valid UTF-8 (String invariant) and not panic.
         assert!(clipped.is_char_boundary(clipped.len()));
 
         // Mid-byte slice would panic; char clip must not.

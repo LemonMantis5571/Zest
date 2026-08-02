@@ -88,9 +88,9 @@ impl ProjectRoot {
             if let Some(name) = cursor.file_name() {
                 suffix.push(name.to_os_string());
             }
-            let parent = cursor.parent().ok_or_else(|| {
-                format!("cannot resolve parent for `{raw}`")
-            })?;
+            let parent = cursor
+                .parent()
+                .ok_or_else(|| format!("cannot resolve parent for `{raw}`"))?;
             if let Ok(canon_parent) = std::fs::canonicalize(parent) {
                 if !canon_parent.starts_with(&self.root) {
                     return Err(format!("`{raw}` resolves outside the project root"));
@@ -110,7 +110,9 @@ impl ProjectRoot {
             cursor = parent;
         }
 
-        Err(format!("cannot resolve `{raw}`: no existing parent under project root"))
+        Err(format!(
+            "cannot resolve `{raw}`: no existing parent under project root"
+        ))
     }
 }
 
@@ -166,11 +168,16 @@ mod tests {
         let dir = scratch("escape");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         // A sibling outside the project root.
-        let outside = dir.parent().unwrap().join("zest-project-escape-outside.txt");
+        let outside = dir
+            .parent()
+            .unwrap()
+            .join("zest-project-escape-outside.txt");
         std::fs::write(&outside, "secret").unwrap();
 
         let root = ProjectRoot::new(&dir).unwrap();
-        let err = root.resolve("../zest-project-escape-outside.txt").unwrap_err();
+        let err = root
+            .resolve("../zest-project-escape-outside.txt")
+            .unwrap_err();
         assert!(
             err.contains("outside the project root") || err.contains("cannot resolve"),
             "{err}"

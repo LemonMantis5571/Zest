@@ -8,8 +8,12 @@ use serde::Serialize;
 
 /// Max skills kept after discovery (project overrides user on same name).
 pub const MAX_SKILLS: usize = 32;
-/// Bodies at or under this size are inlined into the system prompt.
+/// Per-skill file size cap (checked before allocating the body).
+pub const MAX_SKILL_BYTES: usize = 64 * 1024;
+/// Bodies at or under this size are candidates for inlining.
 pub const INLINE_MAX_BYTES: usize = 4096;
+/// Cumulative budget for all inlined skill bodies in the system prompt.
+pub const INLINE_BUDGET_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,14 +95,12 @@ impl SkillSet {
         if let Some(home) = dirs::home_dir() {
             set.scan_dir(&home.join(".zest").join("skills"), SkillSource::User);
         }
-        set.scan_dir(&project_root.join(".zest").join("skills"), SkillSource::Project);
+        set.scan_dir(
+            &project_root.join(".zest").join("skills"),
+            SkillSource::Project,
+        );
         if set.by_name.len() > MAX_SKILLS {
-            let excess: Vec<_> = set
-                .by_name
-                .keys()
-                .cloned()
-                .skip(MAX_SKILLS)
-                .collect();
+            let excess: Vec<_> = set.by_name.keys().skip(MAX_SKILLS).cloned().collect();
             for name in excess {
                 set.by_name.remove(&name);
             }
@@ -112,7 +114,12 @@ impl SkillSet {
     fn scan_dir(&mut self, dir: &Path, source: SkillSource) {
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
-            Err(_) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                self.warnings
+                    .push(format!("skills dir {}: read failed: {e}", dir.display()));
+                return;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -144,14 +151,25 @@ impl SkillSet {
         lines.join("\n")
     }
 
-    /// Full bodies for skills under the inline size cap.
+    /// Full bodies for skills under the per-skill and cumulative inline budgets.
     pub fn inline_markdown(&self) -> String {
         let mut parts = Vec::new();
+        let mut used = 0usize;
         for skill in self.by_name.values() {
             if !skill.inlined() {
                 continue;
             }
-            parts.push(format!("## {}\n\n{}", skill.name, skill.body.trim()));
+            let body = skill.body.trim();
+            let piece_len = skill
+                .name
+                .len()
+                .saturating_add(body.len())
+                .saturating_add(8);
+            if used.saturating_add(piece_len) > INLINE_BUDGET_BYTES {
+                continue;
+            }
+            used = used.saturating_add(piece_len);
+            parts.push(format!("## {}\n\n{body}", skill.name));
         }
         parts.join("\n\n")
     }
@@ -166,7 +184,10 @@ pub fn parse_skill_markdown(raw: &str, path: &Path, source: SkillSource) -> Resu
             path.display()
         ));
     };
-    let rest = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n")).unwrap_or(rest);
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+        .unwrap_or(rest);
     let Some(end) = rest.find("\n---") else {
         return Err(format!(
             "skill {}: missing YAML frontmatter closer",
@@ -194,9 +215,9 @@ pub fn parse_skill_markdown(raw: &str, path: &Path, source: SkillSource) -> Resu
         }
     }
 
-    let name = name.filter(|s| !s.is_empty()).ok_or_else(|| {
-        format!("skill {}: frontmatter missing `name`", path.display())
-    })?;
+    let name = name
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("skill {}: frontmatter missing `name`", path.display()))?;
     let description = description.filter(|s| !s.is_empty()).ok_or_else(|| {
         format!(
             "skill {}: frontmatter missing `description`",
@@ -214,6 +235,15 @@ pub fn parse_skill_markdown(raw: &str, path: &Path, source: SkillSource) -> Resu
 }
 
 fn parse_skill_file(path: &Path, source: SkillSource) -> Result<Skill, String> {
+    let meta =
+        fs::metadata(path).map_err(|e| format!("skill {}: stat failed: {e}", path.display()))?;
+    let len = meta.len() as usize;
+    if len > MAX_SKILL_BYTES {
+        return Err(format!(
+            "skill {}: {len} bytes exceeds max {MAX_SKILL_BYTES}",
+            path.display()
+        ));
+    }
     let raw = fs::read_to_string(path)
         .map_err(|e| format!("skill {}: read failed: {e}", path.display()))?;
     parse_skill_markdown(&raw, path, source)
@@ -259,8 +289,16 @@ mod tests {
     #[test]
     fn project_overrides_user_on_same_name() {
         let root = scratch("override");
-        let user_skills = root.join("home").join(".zest").join("skills").join("shared");
-        let proj_skills = root.join("proj").join(".zest").join("skills").join("shared");
+        let user_skills = root
+            .join("home")
+            .join(".zest")
+            .join("skills")
+            .join("shared");
+        let proj_skills = root
+            .join("proj")
+            .join(".zest")
+            .join("skills")
+            .join("shared");
         fs::create_dir_all(&user_skills).unwrap();
         fs::create_dir_all(&proj_skills).unwrap();
         write_skill(

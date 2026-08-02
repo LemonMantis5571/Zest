@@ -144,10 +144,9 @@ impl Tool for Delegate {
         .ok_or_else(|| "no provider is available to take this subtask".to_string())?;
 
         let provider_id = resolution.target.provider.clone();
-        let provider = self
-            .registry
-            .get(&provider_id)
-            .ok_or_else(|| format!("provider `{provider_id}` disappeared between resolve and run"))?;
+        let provider = self.registry.get(&provider_id).ok_or_else(|| {
+            format!("provider `{provider_id}` disappeared between resolve and run")
+        })?;
 
         let model = resolution
             .target
@@ -155,8 +154,8 @@ impl Tool for Delegate {
             .clone()
             .unwrap_or_else(|| provider.default_model().to_string());
 
-        let mut worker = Agent::new(provider, self.worker_tools.clone())
-            .with_system(self.worker_system.clone());
+        let mut worker =
+            Agent::new(provider, self.worker_tools.clone()).with_system(self.worker_system.clone());
         if let Some(ledger) = &self.ledger {
             worker = worker.with_ledger(ledger.clone());
         }
