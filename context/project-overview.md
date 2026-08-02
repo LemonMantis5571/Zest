@@ -25,17 +25,12 @@ is already built.
 
 ## Current Priorities
 
-1. **Refactor `Agent` to hold a `Provider` trait rather than a concrete `AnthropicClient`.** Small
-   now, painful once more code depends on the concrete type. Blocks everything else.
-2. **Verify the existing loop against a live key** with a real tool call. Streaming, SSE
-   accumulation, `input_json_delta` reassembly and thinking round-tripping have never seen a real
-   event stream — a 401 short-circuits before any of it.
-3. **Second provider end to end**, through CLIProxyAPI, to prove the trait boundary is in the right
-   place. Two providers is where the abstraction gets tested; one proves nothing.
-4. **Usage ledger**, starting with Anthropic's `anthropic-ratelimit-*` response headers plus local
-   metering.
-5. **Permission layer** — approvals, diffs before writes, a sandbox boundary. Required before a
-   `bash` or `write` tool exists.
+1. **Stable Windows Alpha gate** — finish desktop-contract hardening if still open; run
+   `cargo run -p zest -- doctor --live` once against a working gateway/login (manual; spends quota).
+2. **Visible delegation provenance + honest usage UX** immediately after the alpha gate.
+3. **Second spendable provider** alongside Codex so delegated workers exercise real dual-account
+   routing.
+4. **OS-backed Windows sandbox** before any `bash` / exec tool ships.
 
 ## Known Risks
 
