@@ -59,6 +59,12 @@ impl ScriptedProvider {
         self.tool_roundtrip = true;
         self
     }
+
+    fn with_models(mut self, models: &[&str]) -> Self {
+        let listed: Vec<String> = models.iter().map(|s| (*s).to_string()).collect();
+        self.models = catalogue_from_lists(&self.default_model, &listed, &[]);
+        self
+    }
 }
 
 #[async_trait]
@@ -167,7 +173,10 @@ fn route_selection_picks_rule_model() {
     let config = multi_provider_config();
     let mut registry = ProviderRegistry::default();
     registry.insert(Arc::new(ScriptedProvider::new("primary", "model-primary")));
-    registry.insert(Arc::new(ScriptedProvider::new("worker", "model-worker")));
+    registry.insert(Arc::new(
+        ScriptedProvider::new("worker", "model-worker")
+            .with_models(&["model-worker", "model-worker-fast"]),
+    ));
     let router = Router::from_config(&config);
 
     let hit = router
@@ -268,7 +277,10 @@ async fn delegate_uses_routed_model_and_attributes_ledger() {
     let dir = scratch("delegate");
     let config = multi_provider_config();
 
-    let worker = Arc::new(ScriptedProvider::new("worker", "model-worker"));
+    let worker = Arc::new(
+        ScriptedProvider::new("worker", "model-worker")
+            .with_models(&["model-worker", "model-worker-fast"]),
+    );
     let primary = Arc::new(ScriptedProvider::new("primary", "model-primary"));
 
     let mut registry = ProviderRegistry::default();
@@ -297,10 +309,16 @@ async fn delegate_uses_routed_model_and_attributes_ledger() {
         .unwrap();
 
     assert!(
-        out.contains("[worker · model-worker-fast]"),
-        "header must name routed provider/model: {out}"
+        out.body.contains("[worker · model-worker-fast]"),
+        "header must name routed provider/model: {}",
+        out.body
     );
-    assert!(out.contains("alpha-ok"));
+    assert!(out.body.contains("alpha-ok"));
+    assert!(matches!(
+        out.metadata,
+        Some(crate::tools::ToolMetadata::Delegation { ref provider_id, ref model, .. })
+            if provider_id == "worker" && model == "model-worker-fast"
+    ));
 
     let seen = worker.seen_models.lock().unwrap().clone();
     assert_eq!(seen, vec!["model-worker-fast".to_string()]);

@@ -20,7 +20,9 @@ use crate::error::{HarnessError, Result};
 use crate::fsutil;
 
 /// Current on-disk thread document version.
-pub const THREAD_FORMAT_VERSION: u32 = 1;
+///
+/// v2 adds optional typed [`ToolPart::metadata`] (delegation provenance).
+pub const THREAD_FORMAT_VERSION: u32 = 2;
 
 /// Anthropic Messages API content blocks (today's only wire format).
 pub const WIRE_FORMAT_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
@@ -121,6 +123,24 @@ pub struct ToolPart {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// Typed side-channel (e.g. delegation provenance). Empty on v1 threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<crate::tools::ToolMetadata>,
+}
+
+impl ToolPart {
+    pub fn running(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            status: "running".into(),
+            summary: None,
+            approval_id: None,
+            path: None,
+            diff: None,
+            metadata: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,9 +313,16 @@ impl Thread {
             });
         }
         let mut notes = Vec::new();
-        if self.version == 0 {
+        if self.version < THREAD_FORMAT_VERSION {
+            let from = self.version;
             self.version = THREAD_FORMAT_VERSION;
-            notes.push("migrated thread to format v1".to_string());
+            if from == 0 {
+                notes.push("migrated thread to format v2".to_string());
+            } else {
+                notes.push(format!(
+                    "migrated thread from format v{from} to v{THREAD_FORMAT_VERSION}"
+                ));
+            }
         }
         if self.wire_format.trim().is_empty() {
             self.wire_format = default_wire_format();
@@ -469,15 +496,7 @@ impl Thread {
         if let Some(msg) = self.find_mut(message_id) {
             if let Some((_, _, tools, _, streaming)) = assistant_fields(msg) {
                 if !tools.iter().any(|t| t.id == tool_id) {
-                    tools.push(ToolPart {
-                        id: tool_id.to_string(),
-                        name: name.to_string(),
-                        status: "running".into(),
-                        summary: None,
-                        approval_id: None,
-                        path: None,
-                        diff: None,
-                    });
+                    tools.push(ToolPart::running(tool_id, name));
                 }
                 *streaming = true;
             }
@@ -514,6 +533,7 @@ impl Thread {
                         approval_id: Some(approval_id.to_string()),
                         path: Some(path.to_string()),
                         diff: Some(diff.to_string()),
+                        metadata: None,
                     });
                 }
                 *streaming = true;
@@ -529,6 +549,7 @@ impl Thread {
         name: &str,
         summary: &str,
         is_error: bool,
+        metadata: Option<crate::tools::ToolMetadata>,
     ) {
         self.ensure_assistant(message_id);
         if let Some(msg) = self.find_mut(message_id) {
@@ -537,6 +558,9 @@ impl Thread {
                     tool.status = if is_error { "error" } else { "done" }.into();
                     tool.summary = Some(summary.to_string());
                     tool.approval_id = None;
+                    if metadata.is_some() {
+                        tool.metadata = metadata;
+                    }
                     // Keep path/diff on the card for context after allow/deny.
                 } else {
                     tools.push(ToolPart {
@@ -547,6 +571,7 @@ impl Thread {
                         approval_id: None,
                         path: None,
                         diff: None,
+                        metadata,
                     });
                 }
                 *streaming = true;
@@ -889,7 +914,14 @@ mod characterization {
             1
         );
 
-        thread.apply_tool_result("a1", "tool-1", "write_file", "wrote src/main.rs", false);
+        thread.apply_tool_result(
+            "a1",
+            "tool-1",
+            "write_file",
+            "wrote src/main.rs",
+            false,
+            None,
+        );
         match &thread.messages[1] {
             StoredMessage::Assistant { tools, .. } => {
                 assert_eq!(tools[0].status, "done");

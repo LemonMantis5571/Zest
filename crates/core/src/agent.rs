@@ -199,7 +199,7 @@ impl Agent {
                     let mut results = Vec::with_capacity(calls.len());
                     for call in calls {
                         Self::check_cancel(cancel)?;
-                        let (body, is_error, risk) =
+                        let (body, is_error, risk, metadata) =
                             self.execute_tool_call(&call, on_event, cancel).await;
                         if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
                             return Err(HarnessError::Cancelled);
@@ -209,6 +209,11 @@ impl Agent {
                         }
                         let summary = if risk == ToolRisk::Sensitive {
                             "sensitive content (hidden)".to_string()
+                        } else if let Some(label) =
+                            metadata.as_ref().and_then(|m| m.delegation_label())
+                        {
+                            // Prefer the short provenance label; full body stays on wire.
+                            label
                         } else {
                             summarize_tool_body(&body)
                         };
@@ -217,6 +222,7 @@ impl Agent {
                             id: &call.id,
                             summary: &summary,
                             is_error,
+                            metadata,
                         });
                         // Live staged history keeps the real body for the model.
                         results.push(tool_result(&call.id, &body, is_error));
@@ -264,12 +270,13 @@ impl Agent {
         call: &crate::anthropic::types::ToolUse,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
-    ) -> (String, bool, ToolRisk) {
+    ) -> (String, bool, ToolRisk, Option<crate::tools::ToolMetadata>) {
         if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
             return (
                 "turn cancelled before tool ran".into(),
                 true,
                 ToolRisk::Read,
+                None,
             );
         }
 
@@ -282,6 +289,7 @@ impl Agent {
                     format!("cannot prepare `{}`: {message}", call.name),
                     true,
                     ToolRisk::Read,
+                    None,
                 );
             }
         };
@@ -329,7 +337,7 @@ impl Agent {
                 ApprovalDecision::AllowOnce => {}
                 ApprovalDecision::Deny => {
                     if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-                        return ("turn cancelled during approval".into(), true, risk);
+                        return ("turn cancelled during approval".into(), true, risk, None);
                     }
                     return (
                         format!(
@@ -338,26 +346,27 @@ impl Agent {
                         ),
                         true,
                         risk,
+                        None,
                     );
                 }
             }
 
             if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-                return ("turn cancelled during approval".into(), true, risk);
+                return ("turn cancelled during approval".into(), true, risk, None);
             }
         }
 
         let exec = tokio::select! {
             biased;
             _ = wait_cancel(cancel) => {
-                return ("turn cancelled before tool finished".into(), true, risk);
+                return ("turn cancelled before tool finished".into(), true, risk, None);
             }
             result = self.tools.execute_prepared(prepared) => result,
         };
 
         match exec {
-            Ok(output) => (output, false, risk),
-            Err(message) => (message, true, risk),
+            Ok(outcome) => (outcome.body, false, risk, outcome.metadata),
+            Err(message) => (message, true, risk, None),
         }
     }
 }

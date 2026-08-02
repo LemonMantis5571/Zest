@@ -9,7 +9,12 @@ import {
 } from "@/components/ui/collapsible";
 import { getBackend, type SkillSummary } from "@/lib/backend";
 import { chipLabel, type EffortId } from "@/lib/models";
-import type { ProviderRow, SessionInfo, ThreadSummary } from "@/lib/types";
+import type {
+  ProviderRow,
+  SessionInfo,
+  ThreadSummary,
+  UsageSnapshot,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -39,6 +44,12 @@ function formatUpdatedAt(epochSecs: number) {
   } catch {
     return "";
   }
+}
+
+function formatAge(secs: number) {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  return `${Math.floor(secs / 3600)}h`;
 }
 
 function threadTitle(thread: ThreadSummary) {
@@ -122,6 +133,7 @@ export function SettingsPanel({
   const [promptSavedFlash, setPromptSavedFlash] = useState(false);
 
   const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [usage, setUsage] = useState<UsageSnapshot | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -137,8 +149,9 @@ export function SettingsPanel({
       backend.listThreads(),
       backend.getSystemPrompt(),
       backend.listSkills(),
+      backend.usageSnapshot(),
     ])
-      .then(([rows, list, prompt, skillList]) => {
+      .then(([rows, list, prompt, skillList, snap]) => {
         if (cancelled) return;
         setProvider(rows.find((p) => p.id === session.provider) ?? null);
         setThreads(list);
@@ -146,6 +159,7 @@ export function SettingsPanel({
         setSavedCustom(prompt.custom);
         setPromptPath(prompt.customPath);
         setSkills(skillList);
+        setUsage(snap);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -153,6 +167,7 @@ export function SettingsPanel({
         setError(String(err));
         setThreads([]);
         setSkills([]);
+        setUsage(null);
         setPromptError(String(err));
       })
       .finally(() => {
@@ -163,6 +178,23 @@ export function SettingsPanel({
       cancelled = true;
     };
   }, [open, session.provider]);
+
+  // Refresh usage after terminal turns without resetting prompt drafts.
+  useEffect(() => {
+    if (!open || sending) return;
+    let cancelled = false;
+    getBackend()
+      .usageSnapshot()
+      .then((snap) => {
+        if (!cancelled) setUsage(snap);
+      })
+      .catch(() => {
+        /* keep last good snapshot */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, sending]);
 
   useEffect(() => {
     if (!open) return;
@@ -296,6 +328,60 @@ export function SettingsPanel({
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
               Using {chipLabel(model, effort)}. Change model and effort in the composer.
             </p>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Usage"
+            hint={
+              usage?.providers.length
+                ? `${usage.providers.length} provider${usage.providers.length === 1 ? "" : "s"}`
+                : "No measured spend yet"
+            }
+          >
+            {usage?.providers.length ? (
+              <div className="space-y-2">
+                {usage.providers.map((row) => (
+                  <div
+                    key={row.providerId}
+                    className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5"
+                  >
+                    <div className="text-sm font-medium">{row.providerId}</div>
+                    <div className="mt-1.5 space-y-1 text-[11px] text-muted-foreground">
+                      <div>
+                        <span className="text-foreground/80">{row.measured.label}</span>
+                        {": "}
+                        {row.measured.requests} req ·{" "}
+                        {row.measured.totalTokens.toLocaleString()} tokens
+                      </div>
+                      <div>
+                        {row.headroom.kind === "provider_reported" ? (
+                          <>
+                            <span className="text-foreground/80">{row.headroom.label}</span>
+                            {": "}
+                            {row.headroom.requestsRemaining != null
+                              ? `${row.headroom.requestsRemaining} requests remaining`
+                              : "throughput reading"}
+                            {row.headroom.ageSecs != null
+                              ? ` · ${formatAge(row.headroom.ageSecs)} ago`
+                              : null}
+                          </>
+                        ) : (
+                          <span className="text-foreground/80">{row.headroom.label}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  Measured spend and provider headroom are never combined into a
+                  subscription balance.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {loading ? "Loading…" : "No usage recorded yet for this machine."}
+              </p>
+            )}
           </SettingsSection>
 
           <SettingsSection title="System prompt" hint={promptHint} defaultOpen>
