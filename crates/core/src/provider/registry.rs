@@ -1,0 +1,192 @@
+//! Building live providers from configuration.
+//!
+//! A provider that cannot be constructed is **skipped with a reason**, not
+//! treated as fatal. Half the point of this harness is that some accounts are
+//! available and some are not; one missing key must not prevent the rest from
+//! loading. The reasons come back so the picker can show them.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use super::anthropic::AnthropicProvider;
+use super::Provider;
+use crate::config::{Config, ProviderConfig};
+
+/// A provider that could not be built, and why — phrased for a user to act on.
+#[derive(Debug, Clone)]
+pub struct Skipped {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Default)]
+pub struct ProviderRegistry {
+    providers: BTreeMap<String, Arc<dyn Provider>>,
+}
+
+impl ProviderRegistry {
+    /// Build every provider the config declares.
+    ///
+    /// Returns the registry plus everything skipped. Never errors: an empty
+    /// registry with reasons is more useful than a failed startup.
+    pub fn from_config(config: &Config) -> (Self, Vec<Skipped>) {
+        let mut providers: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::new();
+        let mut skipped = Vec::new();
+
+        for (id, entry) in &config.providers {
+            match build(id, entry) {
+                Ok(provider) => {
+                    providers.insert(id.clone(), provider);
+                }
+                Err(reason) => skipped.push(Skipped {
+                    id: id.clone(),
+                    reason,
+                }),
+            }
+        }
+
+        (Self { providers }, skipped)
+    }
+
+    pub fn get(&self, id: &str) -> Option<Arc<dyn Provider>> {
+        self.providers.get(id).cloned()
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.providers.keys().map(String::as_str)
+    }
+
+    pub fn len(&self) -> usize {
+        self.providers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+}
+
+fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provider>, String> {
+    match entry {
+        ProviderConfig::Anthropic { api_key_env, model } => {
+            let key = read_key(api_key_env)
+                .ok_or_else(|| format!("{api_key_env} is not set in the environment"))?;
+
+            let mut provider = AnthropicProvider::native(key)
+                .map_err(|e| format!("could not build client: {e}"))?;
+            if let Some(model) = model {
+                provider = provider.with_default_model(model.clone());
+            }
+            Ok(Arc::new(provider.with_id(id.to_string())))
+        }
+
+        ProviderConfig::Gateway {
+            base_url,
+            api_key_env,
+            model,
+        } => {
+            // A gateway may legitimately need no key. But if the config *names*
+            // an env var and it is empty, that is a mistake worth surfacing
+            // rather than silently sending an empty credential.
+            let key = match api_key_env {
+                Some(var) => {
+                    read_key(var).ok_or_else(|| format!("{var} is not set in the environment"))?
+                }
+                None => String::new(),
+            };
+
+            let provider = AnthropicProvider::gateway(id.to_string(), key, base_url, model.clone())
+                .map_err(|e| format!("could not build client: {e}"))?;
+            Ok(Arc::new(provider))
+        }
+    }
+}
+
+fn read_key(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|v| !v.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthStatus;
+
+    #[test]
+    fn one_missing_key_does_not_stop_the_others() {
+        // Two providers; only the gateway's key is present.
+        std::env::set_var("ZEST_TEST_GATEWAY_KEY", "present");
+        std::env::remove_var("ZEST_TEST_ABSENT_KEY");
+
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "ZEST_TEST_ABSENT_KEY"
+
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+api_key_env = "ZEST_TEST_GATEWAY_KEY"
+model = "gpt-5.3-codex"
+"#,
+        )
+        .expect("valid config");
+
+        let (registry, skipped) = ProviderRegistry::from_config(&config);
+
+        assert_eq!(registry.len(), 1, "the usable provider still loaded");
+        assert!(registry.get("codex").is_some());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].id, "anthropic");
+        assert!(
+            skipped[0].reason.contains("ZEST_TEST_ABSENT_KEY"),
+            "the reason names the variable to set: {}",
+            skipped[0].reason
+        );
+
+        std::env::remove_var("ZEST_TEST_GATEWAY_KEY");
+    }
+
+    #[test]
+    fn a_gateway_keeps_the_id_it_was_configured_under() {
+        std::env::set_var("ZEST_TEST_KEY_2", "present");
+
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+api_key_env = "ZEST_TEST_KEY_2"
+model = "gpt-5.3-codex"
+"#,
+        )
+        .unwrap();
+
+        let (registry, _) = ProviderRegistry::from_config(&config);
+        let provider = registry.get("codex").expect("built");
+
+        // The ledger and routing rules key on this, so it must be the config
+        // name — not "gateway", and not the proxy's identity.
+        assert_eq!(provider.id(), "codex");
+        assert_eq!(provider.default_model(), "gpt-5.3-codex");
+        assert!(matches!(provider.auth_status(), AuthStatus::Ready { .. }));
+
+        std::env::remove_var("ZEST_TEST_KEY_2");
+    }
+
+    #[test]
+    fn a_gateway_with_no_key_env_is_allowed() {
+        let config = Config::parse(
+            r#"
+[providers.local]
+kind = "gateway"
+base_url = "http://127.0.0.1:11434"
+model = "llama"
+"#,
+        )
+        .unwrap();
+
+        let (registry, skipped) = ProviderRegistry::from_config(&config);
+        assert_eq!(registry.len(), 1, "no key declared means no key required");
+        assert!(skipped.is_empty());
+    }
+}
