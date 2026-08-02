@@ -1,0 +1,946 @@
+//! Project-scoped chat thread projection.
+//!
+//! Threads live under `<workspace>/.zest/threads/<id>.json` so history follows the
+//! repo you launched from. The projection is a durable UI transcript plus the
+//! agent wire messages needed to restore model context on reopen.
+//!
+//! On-disk format is versioned ([`THREAD_FORMAT_VERSION`]) and binds provider /
+//! wire-format metadata so reopen can migrate non-destructively.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::anthropic::types::Message;
+use crate::error::{HarnessError, Result};
+
+/// Current on-disk thread document version.
+pub const THREAD_FORMAT_VERSION: u32 = 1;
+
+/// Anthropic Messages API content blocks (today's only wire format).
+pub const WIRE_FORMAT_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
+
+static ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Stable id for messages / turns / threads.
+pub fn new_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{nanos:x}-{seq:x}")
+}
+
+/// Validated thread identifier safe for use as a single path segment.
+///
+/// Rejects separators, absolute paths, drive prefixes, and `.` / `..` segments
+/// so store paths cannot escape `.zest/threads/`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ThreadId(String);
+
+impl ThreadId {
+    pub fn parse(raw: impl AsRef<str>) -> std::result::Result<Self, String> {
+        let s = raw.as_ref();
+        validate_thread_id(s)?;
+        Ok(Self(s.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn validate_thread_id(s: &str) -> std::result::Result<(), String> {
+    if s.is_empty() {
+        return Err("thread id must not be empty".into());
+    }
+    if s.len() > 200 {
+        return Err("thread id is too long".into());
+    }
+    if s.contains('/') || s.contains('\\') {
+        return Err("thread id must not contain path separators".into());
+    }
+    if s.contains('\0') {
+        return Err("thread id must not contain NUL".into());
+    }
+    // Drive prefix (`C:`) or bare colon tricks.
+    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        return Err("thread id must not contain a drive prefix".into());
+    }
+    if s.contains(':') {
+        return Err("thread id must not contain ':'".into());
+    }
+    // Dot segments (whole id or as a path component if separators slipped through).
+    if s == "." || s == ".." {
+        return Err("thread id must not be a dot segment".into());
+    }
+    if s.split(['/', '\\']).any(|part| part == "." || part == "..") {
+        return Err("thread id must not contain dot segments".into());
+    }
+    // Keep store filenames boring: alnum, hyphen, underscore only.
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "thread id may only contain ASCII letters, digits, '-' and '_'".into(),
+        );
+    }
+    Ok(())
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPart {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum StoredMessage {
+    User {
+        id: String,
+        text: String,
+    },
+    Assistant {
+        id: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        tools: Vec<ToolPart>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default)]
+        streaming: bool,
+    },
+}
+
+impl StoredMessage {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::User { id, .. } | Self::Assistant { id, .. } => id,
+        }
+    }
+}
+
+fn assistant_fields(
+    msg: &mut StoredMessage,
+) -> Option<(
+    &mut String,
+    &mut String,
+    &mut Vec<ToolPart>,
+    &mut Option<String>,
+    &mut bool,
+)> {
+    match msg {
+        StoredMessage::Assistant {
+            text,
+            thinking,
+            tools,
+            error,
+            streaming,
+            ..
+        } => Some((text, thinking, tools, error, streaming)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSummary {
+    pub id: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub message_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Thread {
+    /// On-disk schema version. Missing / 0 in pre-alpha files → migrated to 1.
+    #[serde(default)]
+    pub version: u32,
+    pub id: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Provider that owns this conversation (parent is always pinned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// Wire format for `agent_messages` (e.g. anthropic_messages).
+    #[serde(default = "default_wire_format")]
+    pub wire_format: String,
+    #[serde(default)]
+    pub messages: Vec<StoredMessage>,
+    /// Wire messages for restoring `Agent.messages` so the model sees prior context.
+    #[serde(default)]
+    pub agent_messages: Vec<Message>,
+}
+
+fn default_wire_format() -> String {
+    WIRE_FORMAT_ANTHROPIC_MESSAGES.to_string()
+}
+
+/// Outcome of loading a thread, including non-fatal migration notes.
+#[derive(Debug, Clone)]
+pub struct ThreadLoad {
+    pub thread: Thread,
+    /// Soft warning for the UI (migration notes, recovered interrupted tools, …).
+    pub warning: Option<String>,
+}
+
+impl Thread {
+    pub fn new() -> Self {
+        let now = now_secs();
+        let id = ThreadId::parse(new_id("thread"))
+            .expect("generated thread id is always valid");
+        Self {
+            version: THREAD_FORMAT_VERSION,
+            id: id.as_str().to_string(),
+            created_at: now,
+            updated_at: now,
+            title: None,
+            provider_id: None,
+            wire_format: default_wire_format(),
+            messages: Vec::new(),
+            agent_messages: Vec::new(),
+        }
+    }
+
+    pub fn with_provider(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    /// Fill missing version / wire-format fields from older files.
+    pub fn migrate_in_place(&mut self) -> Option<String> {
+        let mut notes = Vec::new();
+        if self.version == 0 {
+            self.version = THREAD_FORMAT_VERSION;
+            notes.push("migrated thread to format v1".to_string());
+        } else if self.version > THREAD_FORMAT_VERSION {
+            notes.push(format!(
+                "thread format v{} is newer than supported v{}; loading best-effort",
+                self.version, THREAD_FORMAT_VERSION
+            ));
+        }
+        if self.wire_format.trim().is_empty() {
+            self.wire_format = default_wire_format();
+            notes.push("filled missing wireFormat".into());
+        }
+        if notes.is_empty() {
+            None
+        } else {
+            Some(notes.join("; "))
+        }
+    }
+
+    /// Convert interrupted approvals / still-running tools into terminal error
+    /// cards so a restart never leaves forever-pending UI state.
+    pub fn terminalize_interrupted(&mut self) -> bool {
+        let mut changed = false;
+        for msg in &mut self.messages {
+            let Some((_, _, tools, _, streaming)) = assistant_fields(msg) else {
+                continue;
+            };
+            if *streaming {
+                *streaming = false;
+                changed = true;
+            }
+            for tool in tools.iter_mut() {
+                match tool.status.as_str() {
+                    "awaiting_approval" => {
+                        tool.status = "error".into();
+                        tool.summary = Some(match tool.summary.take() {
+                            Some(s) if !s.is_empty() => format!("{s} (approval interrupted)"),
+                            _ => "approval interrupted".into(),
+                        });
+                        tool.approval_id = None;
+                        changed = true;
+                    }
+                    "running" => {
+                        tool.status = "error".into();
+                        tool.summary = Some(match tool.summary.take() {
+                            Some(s) if !s.is_empty() => format!("{s} (interrupted)"),
+                            _ => "tool interrupted".into(),
+                        });
+                        tool.approval_id = None;
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if changed {
+            self.touch();
+        }
+        changed
+    }
+
+    pub fn thread_id(&self) -> std::result::Result<ThreadId, String> {
+        ThreadId::parse(&self.id)
+    }
+
+    pub fn summary(&self) -> ThreadSummary {
+        ThreadSummary {
+            id: self.id.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            title: self.title.clone(),
+            message_count: self.messages.len(),
+        }
+    }
+
+    pub fn touch(&mut self) {
+        self.updated_at = now_secs();
+    }
+
+    fn ensure_title_from_user(&mut self, text: &str) {
+        if self.title.is_some() {
+            return;
+        }
+        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.is_empty() {
+            return;
+        }
+        let title: String = flat.chars().take(72).collect();
+        self.title = Some(title);
+    }
+
+    fn find_mut(&mut self, id: &str) -> Option<&mut StoredMessage> {
+        self.messages.iter_mut().find(|m| m.id() == id)
+    }
+
+    fn ensure_assistant(&mut self, message_id: &str) {
+        if self.find_mut(message_id).is_some() {
+            return;
+        }
+        self.messages.push(StoredMessage::Assistant {
+            id: message_id.to_string(),
+            text: String::new(),
+            thinking: String::new(),
+            tools: Vec::new(),
+            error: None,
+            streaming: true,
+        });
+    }
+
+    /// Upsert UI projection from a chat-event shape (desktop emits these).
+    pub fn apply_user(&mut self, message_id: &str, text: &str) {
+        if self.find_mut(message_id).is_none() {
+            self.messages.push(StoredMessage::User {
+                id: message_id.to_string(),
+                text: text.to_string(),
+            });
+        }
+        self.ensure_title_from_user(text);
+        self.touch();
+    }
+
+    /// Create an empty streaming assistant row before the first delta.
+    pub fn apply_assistant_start(&mut self, message_id: &str) {
+        self.ensure_assistant(message_id);
+        self.touch();
+    }
+
+    pub fn apply_text_delta(&mut self, message_id: &str, text: &str) {
+        self.ensure_assistant(message_id);
+        if let Some(msg) = self.find_mut(message_id) {
+            if let Some((body, _, _, _, streaming)) = assistant_fields(msg) {
+                body.push_str(text);
+                *streaming = true;
+            }
+        }
+        self.touch();
+    }
+
+    pub fn apply_thinking_delta(&mut self, message_id: &str, text: &str) {
+        self.ensure_assistant(message_id);
+        if let Some(msg) = self.find_mut(message_id) {
+            if let Some((_, thinking, _, _, streaming)) = assistant_fields(msg) {
+                thinking.push_str(text);
+                *streaming = true;
+            }
+        }
+        self.touch();
+    }
+
+    pub fn apply_tool_start(&mut self, message_id: &str, tool_id: &str, name: &str) {
+        self.ensure_assistant(message_id);
+        if let Some(msg) = self.find_mut(message_id) {
+            if let Some((_, _, tools, _, streaming)) = assistant_fields(msg) {
+                if !tools.iter().any(|t| t.id == tool_id) {
+                    tools.push(ToolPart {
+                        id: tool_id.to_string(),
+                        name: name.to_string(),
+                        status: "running".into(),
+                        summary: None,
+                        approval_id: None,
+                        path: None,
+                        diff: None,
+                    });
+                }
+                *streaming = true;
+            }
+        }
+        self.touch();
+    }
+
+    pub fn apply_approval_needed(
+        &mut self,
+        message_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        approval_id: &str,
+        path: &str,
+        summary: &str,
+        diff: &str,
+    ) {
+        self.ensure_assistant(message_id);
+        if let Some(msg) = self.find_mut(message_id) {
+            if let Some((_, _, tools, _, streaming)) = assistant_fields(msg) {
+                if let Some(tool) = tools.iter_mut().find(|t| t.id == tool_call_id) {
+                    tool.status = "awaiting_approval".into();
+                    tool.approval_id = Some(approval_id.to_string());
+                    tool.path = Some(path.to_string());
+                    tool.summary = Some(summary.to_string());
+                    tool.diff = Some(diff.to_string());
+                } else {
+                    tools.push(ToolPart {
+                        id: tool_call_id.to_string(),
+                        name: tool_name.to_string(),
+                        status: "awaiting_approval".into(),
+                        summary: Some(summary.to_string()),
+                        approval_id: Some(approval_id.to_string()),
+                        path: Some(path.to_string()),
+                        diff: Some(diff.to_string()),
+                    });
+                }
+                *streaming = true;
+            }
+        }
+        self.touch();
+    }
+
+    pub fn apply_tool_result(
+        &mut self,
+        message_id: &str,
+        tool_id: &str,
+        name: &str,
+        summary: &str,
+        is_error: bool,
+    ) {
+        self.ensure_assistant(message_id);
+        if let Some(msg) = self.find_mut(message_id) {
+            if let Some((_, _, tools, _, streaming)) = assistant_fields(msg) {
+                if let Some(tool) = tools.iter_mut().find(|t| t.id == tool_id) {
+                    tool.status = if is_error { "error" } else { "done" }.into();
+                    tool.summary = Some(summary.to_string());
+                    tool.approval_id = None;
+                    // Keep path/diff on the card for context after allow/deny.
+                } else {
+                    tools.push(ToolPart {
+                        id: tool_id.to_string(),
+                        name: name.to_string(),
+                        status: if is_error { "error" } else { "done" }.into(),
+                        summary: Some(summary.to_string()),
+                        approval_id: None,
+                        path: None,
+                        diff: None,
+                    });
+                }
+                *streaming = true;
+            }
+        }
+        self.touch();
+    }
+
+    pub fn apply_done(&mut self, message_id: &str) {
+        if let Some(msg) = self.find_mut(message_id) {
+            if let Some((_, _, _, _, streaming)) = assistant_fields(msg) {
+                *streaming = false;
+            }
+        }
+        self.touch();
+    }
+
+    pub fn apply_error(&mut self, message_id: &str, message: &str) {
+        self.ensure_assistant(message_id);
+        if let Some(msg) = self.find_mut(message_id) {
+            if let Some((_, _, _, error, streaming)) = assistant_fields(msg) {
+                *error = Some(message.to_string());
+                *streaming = false;
+            }
+        }
+        self.touch();
+    }
+
+    pub fn set_agent_messages(&mut self, messages: Vec<Message>) {
+        self.agent_messages = messages;
+        self.touch();
+    }
+}
+
+impl Default for Thread {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `<workspace>/.zest/threads`.
+pub struct ThreadStore {
+    dir: PathBuf,
+}
+
+impl ThreadStore {
+    pub fn open(workspace_root: impl AsRef<Path>) -> Result<Self> {
+        let dir = workspace_root.as_ref().join(".zest").join("threads");
+        fs::create_dir_all(&dir).map_err(|e| {
+            HarnessError::Other(format!("create thread dir {}: {e}", dir.display()))
+        })?;
+        Ok(Self { dir })
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn path_for(&self, id: &ThreadId) -> PathBuf {
+        self.dir.join(format!("{}.json", id.as_str()))
+    }
+
+    pub fn save(&self, thread: &Thread) -> Result<()> {
+        let id = ThreadId::parse(&thread.id)
+            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        let mut thread = thread.clone();
+        thread.version = THREAD_FORMAT_VERSION;
+        if thread.wire_format.trim().is_empty() {
+            thread.wire_format = default_wire_format();
+        }
+        let path = self.path_for(&id);
+        let tmp = path.with_extension("json.tmp");
+        let body = serde_json::to_vec_pretty(&thread)
+            .map_err(|e| HarnessError::Other(format!("serialize thread: {e}")))?;
+        fs::write(&tmp, body).map_err(|e| {
+            HarnessError::Other(format!("write thread {}: {e}", tmp.display()))
+        })?;
+        // Windows-safe replace: remove destination first when rename would fail.
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+        fs::rename(&tmp, &path).map_err(|e| {
+            HarnessError::Other(format!("rename thread {}: {e}", path.display()))
+        })?;
+        Ok(())
+    }
+
+    pub fn load(&self, id: &str) -> Result<Thread> {
+        Ok(self.load_with_recovery(id)?.thread)
+    }
+
+    /// Load + migrate + terminalize interrupted in-flight tool/approval cards.
+    pub fn load_with_recovery(&self, id: &str) -> Result<ThreadLoad> {
+        let tid = ThreadId::parse(id)
+            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        let path = self.path_for(&tid);
+        let body = fs::read_to_string(&path).map_err(|e| {
+            HarnessError::Other(format!("read thread {}: {e}", path.display()))
+        })?;
+        let mut thread: Thread = match serde_json::from_str(&body) {
+            Ok(t) => t,
+            Err(e) => {
+                let preserved = preserve_corrupt(&path)?;
+                return Err(HarnessError::Other(format!(
+                    "corrupt thread {} preserved as {}; parse error: {e}",
+                    path.display(),
+                    preserved.display()
+                )));
+            }
+        };
+
+        // Ensure id in file matches request (path is authoritative).
+        if thread.id != tid.as_str() {
+            thread.id = tid.as_str().to_string();
+        }
+
+        let mut warnings = Vec::new();
+        if let Some(note) = thread.migrate_in_place() {
+            warnings.push(note);
+        }
+        if thread.terminalize_interrupted() {
+            warnings.push("interrupted tools/approvals were closed after restart".into());
+            // Persist the terminalized projection so reopen stays stable.
+            let _ = self.save(&thread);
+        } else if !warnings.is_empty() {
+            let _ = self.save(&thread);
+        }
+
+        Ok(ThreadLoad {
+            thread,
+            warning: if warnings.is_empty() {
+                None
+            } else {
+                Some(warnings.join("; "))
+            },
+        })
+    }
+
+    pub fn load_or_none(&self, id: &str) -> Option<Thread> {
+        self.load_with_recovery(id).ok().map(|l| l.thread)
+    }
+
+    pub fn create(&self) -> Result<Thread> {
+        let thread = Thread::new();
+        self.save(&thread)?;
+        Ok(thread)
+    }
+
+    pub fn create_for_provider(&self, provider_id: &str) -> Result<Thread> {
+        let thread = Thread::new().with_provider(provider_id);
+        self.save(&thread)?;
+        Ok(thread)
+    }
+
+    pub fn list(&self) -> Result<Vec<ThreadSummary>> {
+        let mut out = Vec::new();
+        let entries = fs::read_dir(&self.dir).map_err(|e| {
+            HarnessError::Other(format!("list threads {}: {e}", self.dir.display()))
+        })?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Skip temps and preserved corrupt siblings.
+            if !name.ends_with(".json") || name.contains(".corrupt") {
+                continue;
+            }
+            let Ok(body) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(mut thread) = serde_json::from_str::<Thread>(&body) else {
+                continue;
+            };
+            let _ = thread.migrate_in_place();
+            out.push(thread.summary());
+        }
+        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(out)
+    }
+}
+
+/// Rename a corrupt thread file aside so it is not overwritten.
+fn preserve_corrupt(path: &Path) -> Result<PathBuf> {
+    let stamp = now_secs();
+    let preserved = path.with_extension(format!("json.corrupt-{stamp}"));
+    fs::rename(path, &preserved).map_err(|e| {
+        HarnessError::Other(format!(
+            "preserve corrupt thread {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(preserved)
+}
+
+#[cfg(test)]
+mod characterization {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zest-thread-{name}-{}", new_id("tmp")));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn store_create_save_load_round_trip() {
+        let root = scratch("roundtrip");
+        let store = ThreadStore::open(&root).unwrap();
+        assert!(store.dir().ends_with(Path::new(".zest").join("threads")));
+
+        let mut thread = store.create().unwrap();
+        thread.apply_user("user-1", "first question about the repo");
+        thread.apply_text_delta("asst-1", "hello ");
+        thread.apply_text_delta("asst-1", "world");
+        thread.apply_done("asst-1");
+        store.save(&thread).unwrap();
+
+        let loaded = store.load(&thread.id).unwrap();
+        assert_eq!(loaded.id, thread.id);
+        assert_eq!(loaded.title.as_deref(), Some("first question about the repo"));
+        assert_eq!(loaded.messages.len(), 2);
+        match &loaded.messages[0] {
+            StoredMessage::User { id, text } => {
+                assert_eq!(id, "user-1");
+                assert_eq!(text, "first question about the repo");
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+        match &loaded.messages[1] {
+            StoredMessage::Assistant {
+                id,
+                text,
+                streaming,
+                ..
+            } => {
+                assert_eq!(id, "asst-1");
+                assert_eq!(text, "hello world");
+                assert!(!streaming);
+            }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, thread.id);
+        assert_eq!(listed[0].message_count, 2);
+    }
+
+    #[test]
+    fn apply_chat_event_upserts_preserve_tool_and_approval_fields() {
+        let mut thread = Thread::new();
+        thread.apply_user("u1", "edit the file");
+        thread.apply_thinking_delta("a1", "planning…");
+        thread.apply_text_delta("a1", "I'll write");
+        thread.apply_tool_start("a1", "tool-1", "write_file");
+        thread.apply_approval_needed(
+            "a1",
+            "tool-1",
+            "write_file",
+            "approval-1",
+            "src/main.rs",
+            "write src/main.rs",
+            "@@ -1 +1 @@\n-old\n+new\n",
+        );
+
+        match &thread.messages[1] {
+            StoredMessage::Assistant {
+                thinking,
+                text,
+                tools,
+                streaming,
+                ..
+            } => {
+                assert_eq!(thinking, "planning…");
+                assert_eq!(text, "I'll write");
+                assert!(*streaming);
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0].id, "tool-1");
+                assert_eq!(tools[0].status, "awaiting_approval");
+                assert_eq!(tools[0].approval_id.as_deref(), Some("approval-1"));
+                assert_eq!(tools[0].path.as_deref(), Some("src/main.rs"));
+                assert_eq!(tools[0].summary.as_deref(), Some("write src/main.rs"));
+                assert!(tools[0].diff.as_ref().unwrap().contains("+new"));
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        // Duplicate tool_start is a no-op for the same id.
+        thread.apply_tool_start("a1", "tool-1", "write_file");
+        assert_eq!(
+            match &thread.messages[1] {
+                StoredMessage::Assistant { tools, .. } => tools.len(),
+                _ => 0,
+            },
+            1
+        );
+
+        thread.apply_tool_result("a1", "tool-1", "write_file", "wrote src/main.rs", false);
+        match &thread.messages[1] {
+            StoredMessage::Assistant { tools, .. } => {
+                assert_eq!(tools[0].status, "done");
+                assert_eq!(tools[0].summary.as_deref(), Some("wrote src/main.rs"));
+                assert!(tools[0].approval_id.is_none());
+                // Path/diff retained after allow for card context.
+                assert_eq!(tools[0].path.as_deref(), Some("src/main.rs"));
+                assert!(tools[0].diff.is_some());
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        thread.apply_error("a1", "upstream failed");
+        match &thread.messages[1] {
+            StoredMessage::Assistant {
+                error, streaming, ..
+            } => {
+                assert_eq!(error.as_deref(), Some("upstream failed"));
+                assert!(!streaming);
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_or_none_and_duplicate_user_id_are_stable() {
+        let root = scratch("stable");
+        let store = ThreadStore::open(&root).unwrap();
+        assert!(store.load_or_none("missing").is_none());
+
+        let mut thread = Thread::new();
+        thread.apply_user("u1", "hello");
+        thread.apply_user("u1", "ignored duplicate");
+        assert_eq!(thread.messages.len(), 1);
+        match &thread.messages[0] {
+            StoredMessage::User { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("expected user, got {other:?}"),
+        }
+        // First user text still owns the title.
+        assert_eq!(thread.title.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn stored_message_json_uses_role_tag_and_camel_case_tools() {
+        let mut thread = Thread::new();
+        thread.apply_user("u1", "hi");
+        thread.apply_approval_needed(
+            "a1",
+            "t1",
+            "write_file",
+            "approval-1",
+            "f.txt",
+            "write f.txt",
+            "diff",
+        );
+        let json = serde_json::to_value(&thread).unwrap();
+        assert_eq!(json["messages"][0]["role"], "user");
+        assert_eq!(json["messages"][1]["role"], "assistant");
+        // ToolPart optional fields are camelCase on the wire.
+        let tool = &json["messages"][1]["tools"][0];
+        assert_eq!(tool["status"], "awaiting_approval");
+        assert_eq!(tool["approvalId"], "approval-1");
+        assert_eq!(tool["path"], "f.txt");
+        assert!(tool.get("approval_id").is_none());
+    }
+
+    #[test]
+    fn thread_id_rejects_traversal_and_drive_prefixes() {
+        assert!(ThreadId::parse("thread-abc-1").is_ok());
+        assert!(ThreadId::parse("../secret").is_err());
+        assert!(ThreadId::parse("..\\secret").is_err());
+        assert!(ThreadId::parse("C:windows").is_err());
+        assert!(ThreadId::parse("foo/bar").is_err());
+        assert!(ThreadId::parse(".").is_err());
+        assert!(ThreadId::parse("..").is_err());
+        assert!(ThreadId::parse("").is_err());
+        assert!(ThreadId::parse("has space").is_err());
+    }
+
+    #[test]
+    fn store_rejects_traversal_thread_id() {
+        let root = scratch("traverse");
+        let store = ThreadStore::open(&root).unwrap();
+        let err = store.load("../outside").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid thread id"), "{msg}");
+    }
+
+    #[test]
+    fn migrates_legacy_thread_json_without_version() {
+        let root = scratch("migrate");
+        let store = ThreadStore::open(&root).unwrap();
+        let id = "thread-legacy1";
+        let path = store.dir().join(format!("{id}.json"));
+        fs::write(
+            &path,
+            r#"{
+  "id": "thread-legacy1",
+  "createdAt": 1,
+  "updatedAt": 2,
+  "messages": [{"role":"user","id":"u1","text":"hi"}],
+  "agentMessages": []
+}"#,
+        )
+        .unwrap();
+
+        let loaded = store.load_with_recovery(id).unwrap();
+        assert_eq!(loaded.thread.version, THREAD_FORMAT_VERSION);
+        assert_eq!(loaded.thread.wire_format, WIRE_FORMAT_ANTHROPIC_MESSAGES);
+        assert!(loaded.warning.is_some());
+    }
+
+    #[test]
+    fn corrupt_thread_is_preserved_aside() {
+        let root = scratch("corrupt");
+        let store = ThreadStore::open(&root).unwrap();
+        let id = "thread-bad1";
+        let path = store.dir().join(format!("{id}.json"));
+        fs::write(&path, "{not json").unwrap();
+        let err = store.load_with_recovery(id).unwrap_err().to_string();
+        assert!(err.contains("corrupt"), "{err}");
+        assert!(!path.exists());
+        let preserved: Vec<_> = fs::read_dir(store.dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("corrupt"))
+            .collect();
+        assert_eq!(preserved.len(), 1);
+    }
+
+    #[test]
+    fn terminalize_interrupted_closes_running_and_approvals() {
+        let mut thread = Thread::new();
+        thread.apply_tool_start("a1", "t1", "write_file");
+        thread.apply_approval_needed(
+            "a1",
+            "t2",
+            "write_file",
+            "ap1",
+            "f.txt",
+            "write",
+            "diff",
+        );
+        assert!(thread.terminalize_interrupted());
+        match &thread.messages[0] {
+            StoredMessage::Assistant {
+                tools, streaming, ..
+            } => {
+                assert!(!streaming);
+                assert_eq!(tools[0].status, "error");
+                assert!(tools[0].summary.as_deref().unwrap().contains("interrupted"));
+                assert_eq!(tools[1].status, "error");
+                assert!(tools[1]
+                    .summary
+                    .as_deref()
+                    .unwrap()
+                    .contains("approval interrupted"));
+                assert!(tools[1].approval_id.is_none());
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+}

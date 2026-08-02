@@ -13,7 +13,9 @@
 
 use async_trait::async_trait;
 
-use super::{Completion, Provider, StreamEvent, TurnRequest};
+use super::{
+    catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest,
+};
 use crate::anthropic::client::AnthropicClient;
 use crate::anthropic::types::{OutputConfig, Request, Thinking, DEFAULT_MODEL};
 use crate::auth::AuthStatus;
@@ -23,6 +25,7 @@ pub struct AnthropicProvider {
     id: String,
     client: AnthropicClient,
     default_model: String,
+    models: Vec<ModelSpec>,
     /// Presence only — the key itself is never inspected or reported.
     has_key: bool,
     /// Whether the endpoint understands `thinking` and `output_config.effort`.
@@ -35,10 +38,12 @@ impl AnthropicProvider {
     /// Anthropic's own API.
     pub fn native(api_key: String) -> Result<Self> {
         let has_key = !api_key.trim().is_empty();
+        let default_model = DEFAULT_MODEL.to_string();
         Ok(Self {
             id: "anthropic".to_string(),
             client: AnthropicClient::new(api_key)?,
-            default_model: DEFAULT_MODEL.to_string(),
+            models: catalogue_from_lists(&default_model, &[], &[]),
+            default_model,
             has_key,
             extensions: true,
         })
@@ -55,10 +60,13 @@ impl AnthropicProvider {
         default_model: impl Into<String>,
     ) -> Result<Self> {
         let has_key = !api_key.trim().is_empty();
+        let default_model = default_model.into();
         Ok(Self {
             id: id.into(),
             client: AnthropicClient::new(api_key)?.with_base_url(base_url),
-            default_model: default_model.into(),
+            // No optional catalogue → only the configured default is accepted.
+            models: catalogue_from_lists(&default_model, &[], &[]),
+            default_model,
             has_key,
             extensions: false,
         })
@@ -73,6 +81,31 @@ impl AnthropicProvider {
 
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = model.into();
+        if !self.models.iter().any(|m| m.id == self.default_model) {
+            let efforts = self
+                .models
+                .first()
+                .map(|m| m.efforts.clone())
+                .unwrap_or_else(|| {
+                    super::STANDARD_EFFORTS
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                });
+            self.models.insert(
+                0,
+                ModelSpec {
+                    id: self.default_model.clone(),
+                    efforts,
+                },
+            );
+        }
+        self
+    }
+
+    /// Replace the model/effort catalogue (from gateway config allow-lists).
+    pub fn with_models(mut self, models: Vec<ModelSpec>) -> Self {
+        self.models = models;
         self
     }
 
@@ -94,6 +127,10 @@ impl Provider for AnthropicProvider {
 
     fn default_model(&self) -> &str {
         &self.default_model
+    }
+
+    fn models(&self) -> Vec<ModelSpec> {
+        self.models.clone()
     }
 
     /// This provider authenticates with a key it was handed, so its status is

@@ -59,7 +59,8 @@ impl TurnAccumulator {
                 if matches!(kind, "tool_use" | "server_tool_use") {
                     self.json_bufs.insert(idx, String::new());
                     if let Some(name) = block.get("name").and_then(Value::as_str) {
-                        on_event(StreamEvent::ToolCallStart { name });
+                        let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                        on_event(StreamEvent::ToolCallStart { name, id });
                     }
                 }
 
@@ -206,7 +207,13 @@ mod tests {
             let mut sink = |e: StreamEvent<'_>| match e {
                 StreamEvent::Text(t) => seen.push(format!("text:{t}")),
                 StreamEvent::Thinking(t) => seen.push(format!("thinking:{t}")),
-                StreamEvent::ToolCallStart { name } => seen.push(format!("tool:{name}")),
+                StreamEvent::ToolCallStart { name, .. } => seen.push(format!("tool:{name}")),
+                StreamEvent::ApprovalNeeded { tool_name, .. } => {
+                    seen.push(format!("approval:{tool_name}"))
+                }
+                StreamEvent::ToolCallResult { name, .. } => {
+                    seen.push(format!("tool_result:{name}"))
+                }
             };
             for payload in parser.feed(sse.as_bytes()) {
                 let ev: Value = serde_json::from_str(&payload).expect("valid event json");
