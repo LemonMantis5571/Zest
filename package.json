@@ -1,0 +1,20 @@
+{
+  "name": "zest",
+  "private": true,
+  "workspaces": [
+    "crates/desktop",
+    "crates/desktop/ui"
+  ],
+  "engines": {
+    "node": "24.16.0",
+    "npm": "11.13.0"
+  },
+  "scripts": {
+    "ui:dev": "npm run dev -w ui",
+    "ui:build": "npm run build -w ui",
+    "ui:lint": "npm run lint -w ui",
+    "desktop:dev": "npm run dev -w zest-desktop",
+    "desktop:build": "npm run build -w zest-desktop",
+    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify.ps1"
+  }
+}
