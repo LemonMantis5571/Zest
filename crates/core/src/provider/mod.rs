@@ -17,9 +17,49 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::anthropic::types::{Message, ToolDef, Usage};
+use crate::anthropic::types::{Message, ToolDef, Usage, DEFAULT_MODEL};
 use crate::auth::AuthStatus;
+use crate::config::ProviderConfig;
 use crate::error::Result;
+
+/// Build a picker/validation catalogue from config without loading credentials.
+pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> ProviderDescriptor {
+    match config {
+        ProviderConfig::Anthropic { model, .. } => {
+            let default_model = model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string());
+            ProviderDescriptor {
+                id: provider_id.to_string(),
+                default_model: default_model.clone(),
+                models: catalogue_for_provider(provider_id, &default_model, &[], &[]),
+            }
+        }
+        ProviderConfig::Gateway {
+            model,
+            models,
+            efforts,
+            ..
+        } => ProviderDescriptor {
+            id: provider_id.to_string(),
+            default_model: model.clone(),
+            models: catalogue_for_provider(provider_id, model, models, efforts),
+        },
+    }
+}
+
+/// Fallback catalogue when a picker id is not present in `zest.toml`.
+pub fn descriptor_for_picker_id(provider_id: &str) -> ProviderDescriptor {
+    let default_model = match provider_id {
+        "codex" => "gpt-5.6-sol".to_string(),
+        "claude" | "anthropic" => DEFAULT_MODEL.to_string(),
+        "antigravity" => "gemini-3.1-pro-high".to_string(),
+        _ => DEFAULT_MODEL.to_string(),
+    };
+    ProviderDescriptor {
+        id: provider_id.to_string(),
+        default_model: default_model.clone(),
+        models: catalogue_for_provider(provider_id, &default_model, &[], &[]),
+    }
+}
 
 /// Efforts every provider understands today (Anthropic + CLIProxyAPI mapping).
 pub const STANDARD_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -163,11 +203,13 @@ pub enum StreamEvent<'a> {
         id: &'a str,
     },
     /// Emitted after a local tool finishes. `summary` is a short preview of the body.
+    /// `metadata` is a typed UI/persist side-channel (never model wire content).
     ToolCallResult {
         name: &'a str,
         id: &'a str,
         summary: &'a str,
         is_error: bool,
+        metadata: Option<crate::tools::ToolMetadata>,
     },
     /// A gated tool is waiting on the user (write/exec). Owned strings so the
     /// preview can outlive the tool-call stack frame.

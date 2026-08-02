@@ -226,16 +226,17 @@ impl Tool for WriteFile {
     async fn execute_prepared(
         &self,
         prepared: PreparedToolCall,
-    ) -> std::result::Result<String, String> {
+    ) -> std::result::Result<super::ToolOutcome, String> {
         // Sync filesystem work; keep off the runtime if it ever grows heavy.
         let tool_root = self.root.clone();
         let this = Self { root: tool_root };
         tokio::task::spawn_blocking(move || this.execute_write(prepared))
             .await
             .map_err(|e| format!("write task failed: {e}"))?
+            .map(super::ToolOutcome::text)
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String> {
+    async fn run(&self, input: Value) -> std::result::Result<super::ToolOutcome, String> {
         let prepared = self.prepare_call(input)?;
         self.execute_prepared(prepared).await
     }
@@ -493,7 +494,8 @@ mod tests {
         let out = tool
             .run(json!({ "path": "note.txt", "content": "hello" }))
             .await
-            .unwrap();
+            .unwrap()
+            .body;
         assert!(out.contains("wrote note.txt"));
         assert_eq!(
             std::fs::read_to_string(dir.join("note.txt")).unwrap(),

@@ -160,6 +160,102 @@ impl Ledger {
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
+
+    /// Snapshot for UI/CLI: measured spend vs provider-reported headroom, never merged.
+    pub fn snapshot(&self) -> UsageSnapshot {
+        let providers = self
+            .providers
+            .iter()
+            .map(|(id, usage)| ProviderUsageView::from_entry(id, usage))
+            .collect();
+        UsageSnapshot {
+            providers,
+            path: self.path.as_ref().map(|p| p.display().to_string()),
+        }
+    }
+}
+
+/// Honest usage projection: Zest metering and provider headroom stay separate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSnapshot {
+    pub providers: Vec<ProviderUsageView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageView {
+    pub provider_id: String,
+    /// Exact for Zest's own traffic — label as "Measured by Zest".
+    pub measured: MeasuredUsage,
+    /// Authoritative short-window throughput when present — never a subscription balance.
+    pub headroom: HeadroomView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredUsage {
+    pub label: String,
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HeadroomView {
+    /// Provider reported throughput headroom; `age_secs` is how stale the reading is.
+    ProviderReported {
+        label: String,
+        age_secs: Option<u64>,
+        requests_remaining: Option<u64>,
+        input_tokens_remaining: Option<u64>,
+        output_tokens_remaining: Option<u64>,
+        retry_after_secs: Option<u64>,
+    },
+    NotReported {
+        label: String,
+    },
+}
+
+impl ProviderUsageView {
+    fn from_entry(provider_id: &str, usage: &ProviderUsage) -> Self {
+        let measured = MeasuredUsage {
+            label: "Measured by Zest".into(),
+            requests: usage.requests,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            total_tokens: usage.total_tokens(),
+        };
+        let headroom = match &usage.headroom {
+            Some(h) if !h.is_empty() => {
+                let age_secs = usage.headroom_at.map(|at| now_secs().saturating_sub(at));
+                HeadroomView::ProviderReported {
+                    label: "Provider reported".into(),
+                    age_secs,
+                    requests_remaining: h.requests_remaining,
+                    input_tokens_remaining: h.input_tokens_remaining,
+                    output_tokens_remaining: h.output_tokens_remaining,
+                    retry_after_secs: h.retry_after_secs,
+                }
+            }
+            _ => HeadroomView::NotReported {
+                label: "Not reported".into(),
+            },
+        };
+        Self {
+            provider_id: provider_id.to_string(),
+            measured,
+            headroom,
+        }
+    }
 }
 
 fn now_secs() -> u64 {
@@ -277,5 +373,52 @@ mod tests {
         assert!(ledger.path().is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_keeps_measured_and_headroom_separate() {
+        let mut ledger = Ledger::default();
+        ledger.record(
+            "codex",
+            &completion(
+                10,
+                5,
+                Some(RateLimitSnapshot {
+                    requests_remaining: Some(9),
+                    ..Default::default()
+                }),
+            ),
+        );
+        ledger.record("anthropic", &completion(1, 1, None));
+
+        let snap = ledger.snapshot();
+        assert_eq!(snap.providers.len(), 2);
+        let codex = snap
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "codex")
+            .unwrap();
+        assert_eq!(codex.measured.label, "Measured by Zest");
+        assert_eq!(codex.measured.requests, 1);
+        match &codex.headroom {
+            HeadroomView::ProviderReported {
+                label,
+                requests_remaining,
+                ..
+            } => {
+                assert_eq!(label, "Provider reported");
+                assert_eq!(*requests_remaining, Some(9));
+            }
+            other => panic!("expected reported headroom, got {other:?}"),
+        }
+        let anth = snap
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "anthropic")
+            .unwrap();
+        match &anth.headroom {
+            HeadroomView::NotReported { label } => assert_eq!(label, "Not reported"),
+            other => panic!("expected not reported, got {other:?}"),
+        }
     }
 }

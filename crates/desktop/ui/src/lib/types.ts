@@ -1,23 +1,24 @@
 import type { ChatEvent as GeneratedChatEvent } from "./generated/ChatEvent.ts";
+import type { ModelCapability } from "./generated/ModelCapability.ts";
+import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
+import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 
 export type StatusKind = "ready" | "unknown" | "not_logged_in" | "unconfigured";
 
-export type ProviderRow = {
-  id: string;
-  label: string;
-  method: string;
+/** Rust-authoritative provider row (auth + catalogue). */
+export type ProviderRow = Omit<GeneratedProviderView, "statusKind"> & {
   statusKind: StatusKind;
-  statusLabel: string;
-  detail: string;
-  selectable: boolean;
-  canConnect: boolean;
 };
 
 export type LoginStarted = {
   browserTitle: string;
   browserBody: string;
 };
+
+export type { ModelCapability };
+
+export type ToolMetadata = ToolMetaView;
 
 export type ToolPart = {
   id: string;
@@ -27,6 +28,7 @@ export type ToolPart = {
   approvalId?: string;
   path?: string;
   diff?: string;
+  metadata?: ToolMetadata;
 };
 
 export type ChatMessage =
@@ -69,4 +71,37 @@ export type EventIdentity = {
   session_id: string;
   thread_id: string;
   turn_id: string;
+};
+
+export type MeasuredUsage = {
+  label: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+};
+
+export type HeadroomView =
+  | {
+      kind: "provider_reported";
+      label: string;
+      ageSecs?: number | null;
+      requestsRemaining?: number | null;
+      inputTokensRemaining?: number | null;
+      outputTokensRemaining?: number | null;
+      retryAfterSecs?: number | null;
+    }
+  | { kind: "not_reported"; label: string };
+
+export type ProviderUsageView = {
+  providerId: string;
+  measured: MeasuredUsage;
+  headroom: HeadroomView;
+};
+
+export type UsageSnapshot = {
+  providers: ProviderUsageView[];
+  path?: string | null;
 };

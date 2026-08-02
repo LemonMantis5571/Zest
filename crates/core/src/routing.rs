@@ -77,15 +77,34 @@ impl Router {
         let mut skipped = Vec::new();
 
         for target in self.candidates(kind, registry) {
-            if registry.get(&target.provider).is_none() {
+            let Some(provider) = registry.get(&target.provider) else {
                 skipped.push((target.provider.clone(), "not loaded".to_string()));
                 continue;
-            }
+            };
             if let Some(reason) = exhausted(ledger, &target.provider) {
                 skipped.push((target.provider.clone(), reason));
                 continue;
             }
-            return Some(Resolution { target, skipped });
+            // Validate the routed model before dispatch. Invalid targets become
+            // explicit skipped reasons and fall through safely.
+            let model = target
+                .model
+                .clone()
+                .unwrap_or_else(|| provider.default_model().to_string());
+            // Worker effort is fixed to `high` for this milestone.
+            if let Err(reason) = provider.validate_selection(&model, "high") {
+                skipped.push((
+                    target.provider.clone(),
+                    format!("invalid model `{model}`: {reason}"),
+                ));
+                continue;
+            }
+            let mut accepted = target;
+            accepted.model = Some(model);
+            return Some(Resolution {
+                target: accepted,
+                skipped,
+            });
         }
 
         None
@@ -290,5 +309,47 @@ default = { provider = "ghost" }
         assert!(router
             .resolve(None, &registry, &Ledger::default())
             .is_none());
+    }
+
+    #[test]
+    fn invalid_delegated_model_is_skipped_with_reason() {
+        std::env::set_var("ZEST_ROUTE_TEST_KEY", "present");
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:1"
+api_key_env = "ZEST_ROUTE_TEST_KEY"
+model = "gpt-5.6-sol"
+models = ["gpt-5.6-sol"]
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "ZEST_ROUTE_TEST_KEY"
+
+[routing]
+default = { provider = "anthropic" }
+
+[[routing.rules]]
+kind = "mechanical"
+provider = "codex"
+model = "not-a-real-model"
+"#,
+        )
+        .expect("valid");
+        let registry = ProviderRegistry::from_config(&config).0;
+        let router = Router::from_config(&config);
+
+        let hit = router
+            .resolve(Some("mechanical"), &registry, &Ledger::default())
+            .expect("falls through");
+        assert_eq!(hit.target.provider, "anthropic");
+        assert!(
+            hit.skipped
+                .iter()
+                .any(|(id, reason)| { id == "codex" && reason.contains("invalid model") }),
+            "skipped={:?}",
+            hit.skipped
+        );
     }
 }

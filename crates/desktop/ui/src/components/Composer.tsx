@@ -3,12 +3,19 @@ import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
 
 import { ModelEffortPicker } from "@/components/ModelEffortPicker";
 import { Button } from "@/components/ui/button";
-import { chipLabel, modelLabel, type EffortId } from "@/lib/models";
+import {
+  chipLabel,
+  modelLabel,
+  type EffortId,
+  type ModelCapability,
+} from "@/lib/models";
 
 type Props = {
   value: string;
   model: string;
   effort: EffortId;
+  models?: ModelCapability[];
+  defaultModel?: string;
   meta: string;
   sending: boolean;
   showModelPicker: boolean;
@@ -25,6 +32,8 @@ export function Composer({
   value,
   model,
   effort,
+  models,
+  defaultModel,
   meta,
   sending,
   showModelPicker,
@@ -82,6 +91,8 @@ export function Composer({
                 <ModelEffortPicker
                   model={model}
                   effort={effort}
+                  models={models}
+                  defaultModel={defaultModel}
                   disabled={sending || optionsDisabled}
                   onModelChange={onModelChange}
                   onEffortChange={onEffortChange}

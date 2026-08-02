@@ -119,12 +119,12 @@ impl Tool for ReadFile {
         self.prepare_call(input)
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String> {
+    async fn run(&self, input: Value) -> std::result::Result<super::ToolOutcome, String> {
         let path = input
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| "missing required field `path`".to_string())?;
-        self.read_path(path).await
+        self.read_path(path).await.map(super::ToolOutcome::text)
     }
 }
 
@@ -147,7 +147,7 @@ mod tests {
         let dir = scratch("ok");
         std::fs::write(dir.join("note.txt"), "hello").unwrap();
         let tool = ReadFile::new(&dir).unwrap();
-        let out = tool.run(json!({ "path": "note.txt" })).await.unwrap();
+        let out = tool.run(json!({ "path": "note.txt" })).await.unwrap().body;
         assert_eq!(out, "hello");
     }
 
@@ -191,7 +191,7 @@ mod tests {
         let prepared = reg.prepare("read_file", json!({ "path": ".env" })).unwrap();
         assert_eq!(prepared.risk, ToolRisk::Sensitive);
         let _ = AllowApprover; // documents the approval path
-        let out = reg.execute_prepared(prepared).await.unwrap();
+        let out = reg.execute_prepared(prepared).await.unwrap().body;
         assert!(out.contains("SECRET=1"));
     }
 }

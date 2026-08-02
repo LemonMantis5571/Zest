@@ -17,11 +17,12 @@ use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    can_start_login, compose_system, detect_all, load_custom_system, new_id, save_custom_system,
-    start_login as core_start_login, truncate_chars, ApprovalDecision, ApprovalRequest, Approver,
-    AuthStatus, Config, HarnessError, PersistPriority, PersistWorker, ProjectSessionState,
-    ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
-    ThreadLoadError, ThreadStore, ThreadSummary, ToolRisk,
+    can_start_login, compose_system, descriptor_for_picker_id, descriptor_from_config, detect_all,
+    load_custom_system, new_id, save_custom_system, start_login as core_start_login,
+    truncate_chars, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, HarnessError,
+    Ledger, PersistPriority, PersistWorker, ProjectSessionState, ProviderSlot, RuntimeBuilder,
+    SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadLoadError, ThreadStore,
+    ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
 };
 
 use session::{Session, SessionController, SessionError};
@@ -144,9 +145,26 @@ struct AppState {
     persist: Mutex<Option<PersistWorker>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ModelCapability.ts", rename_all = "camelCase")
+)]
+struct ModelCapability {
+    id: String,
+    efforts: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProviderRow {
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ProviderView.ts", rename_all = "camelCase")
+)]
+struct ProviderView {
     id: String,
     label: String,
     method: String,
@@ -155,49 +173,142 @@ struct ProviderRow {
     detail: String,
     selectable: bool,
     can_connect: bool,
+    /// Present in `zest.toml` / env fallback — Rust is authoritative for availability.
+    configured: bool,
+    default_model: String,
+    models: Vec<ModelCapability>,
 }
 
-impl From<&ProviderSlot> for ProviderRow {
-    fn from(slot: &ProviderSlot) -> Self {
-        let (status_kind, status_label, detail) = match &slot.status {
-            AuthStatus::Ready { account } => (
-                "ready".into(),
-                "Signed in".into(),
-                account.clone().unwrap_or_else(|| slot.method.to_string()),
-            ),
-            AuthStatus::Unknown { reason } => {
-                let detail = if reason.contains("outside a readable file") {
-                    "Installed — session stored outside a readable file".into()
-                } else {
-                    format!("Installed — {reason}")
-                };
-                ("unknown".into(), "Unverified".into(), detail)
-            }
-            AuthStatus::NotLoggedIn { fix } => (
-                "not_logged_in".into(),
-                "Not signed in".into(),
-                if fix.starts_with("Connect") {
-                    fix.clone()
-                } else {
-                    format!("Run: {fix}")
-                },
-            ),
-            AuthStatus::Unconfigured => (
-                "unconfigured".into(),
-                "Not configured".into(),
-                "No key set".into(),
-            ),
-        };
+fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView {
+    let (status_kind, status_label, detail) = match &slot.status {
+        AuthStatus::Ready { account } => (
+            "ready".into(),
+            "Signed in".into(),
+            account.clone().unwrap_or_else(|| slot.method.to_string()),
+        ),
+        AuthStatus::Unknown { reason } => {
+            let detail = if reason.contains("outside a readable file") {
+                "Installed — session stored outside a readable file".into()
+            } else {
+                format!("Installed — {reason}")
+            };
+            ("unknown".into(), "Unverified".into(), detail)
+        }
+        AuthStatus::NotLoggedIn { fix } => (
+            "not_logged_in".into(),
+            "Not signed in".into(),
+            if fix.starts_with("Connect") {
+                fix.clone()
+            } else {
+                format!("Run: {fix}")
+            },
+        ),
+        AuthStatus::Unconfigured => (
+            "unconfigured".into(),
+            "Not configured".into(),
+            "No key set".into(),
+        ),
+    };
 
-        Self {
-            id: slot.id.to_string(),
-            label: slot.label.to_string(),
-            method: slot.method.to_string(),
-            status_kind,
-            status_label,
-            detail,
-            selectable: slot.status.selectable(),
-            can_connect: can_start_login(slot.id),
+    let (configured, descriptor) = match config.providers.get(slot.id) {
+        Some(pc) => (true, descriptor_from_config(slot.id, pc)),
+        None => (false, descriptor_for_picker_id(slot.id)),
+    };
+
+    ProviderView {
+        id: slot.id.to_string(),
+        label: slot.label.to_string(),
+        method: slot.method.to_string(),
+        status_kind,
+        status_label,
+        detail,
+        selectable: slot.status.selectable(),
+        can_connect: can_start_login(slot.id),
+        configured,
+        default_model: descriptor.default_model,
+        models: descriptor
+            .models
+            .into_iter()
+            .map(|m| ModelCapability {
+                id: m.id,
+                efforts: m.efforts,
+            })
+            .collect(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ToolMetaView.ts", rename_all = "camelCase")
+)]
+struct SkippedProviderView {
+    provider_id: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ToolMetaView.ts", rename_all = "camelCase")
+)]
+struct UsageDeltaView {
+    requests: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+/// Desktop wire view of core `ToolMetadata` (ts-rs exportable).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ToolMetaView.ts", rename_all = "snake_case")
+)]
+enum ToolMetaView {
+    Delegation {
+        provider_id: String,
+        model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        routing_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<SkippedProviderView>,
+        usage_delta: UsageDeltaView,
+    },
+}
+
+impl From<ToolMetadata> for ToolMetaView {
+    fn from(meta: ToolMetadata) -> Self {
+        match meta {
+            ToolMetadata::Delegation {
+                provider_id,
+                model,
+                routing_kind,
+                skipped,
+                usage_delta,
+            } => Self::Delegation {
+                provider_id,
+                model,
+                routing_kind,
+                skipped: skipped
+                    .into_iter()
+                    .map(|s| SkippedProviderView {
+                        provider_id: s.provider_id,
+                        reason: s.reason,
+                    })
+                    .collect(),
+                usage_delta: UsageDeltaView {
+                    requests: usage_delta.requests,
+                    input_tokens: usage_delta.input_tokens,
+                    output_tokens: usage_delta.output_tokens,
+                },
+            },
         }
     }
 }
@@ -224,6 +335,9 @@ struct SessionInfo {
     effort: String,
     root: String,
     thread_id: String,
+    /// Rust-authoritative catalogue for the active provider (UI may only add labels).
+    default_model: String,
+    models: Vec<ModelCapability>,
     /// UI projects these as `ChatMessage[]` (see `types.ts`); keep codegen free of StoredMessage.
     #[cfg_attr(feature = "export-bindings", ts(type = "unknown[]"))]
     messages: Vec<StoredMessage>,
@@ -287,6 +401,9 @@ enum ChatEvent {
         summary: String,
         #[serde(rename = "isError")]
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        metadata: Option<ToolMetaView>,
     },
     ApprovalNeeded {
         session_id: String,
@@ -350,18 +467,31 @@ fn map_session_err(e: SessionError) -> String {
     desktop_err(e.code(), e.message())
 }
 
+fn load_workspace_config() -> Config {
+    match workspace_root() {
+        Ok(root) => Config::find(&root).unwrap_or_else(|_| Config::env_fallback()),
+        Err(_) => Config::env_fallback(),
+    }
+}
+
 #[tauri::command]
-fn list_providers() -> Vec<ProviderRow> {
+fn list_providers() -> Vec<ProviderView> {
+    let config = load_workspace_config();
     detect_all()
         .iter()
         .filter(|s| PICKER_IDS.contains(&s.id))
-        .map(ProviderRow::from)
+        .map(|s| provider_view_from_slot(s, &config))
         .collect()
 }
 
 #[tauri::command]
-fn refresh_providers() -> Vec<ProviderRow> {
+fn refresh_providers() -> Vec<ProviderView> {
     list_providers()
+}
+
+#[tauri::command]
+fn usage_snapshot() -> UsageSnapshot {
+    Ledger::load().snapshot()
 }
 
 #[tauri::command]
@@ -459,7 +589,23 @@ fn persist_provider_model_effort(
     state.save(root).map_err(|e| e.to_string())
 }
 
+fn session_capabilities(session: &Session) -> (String, Vec<ModelCapability>) {
+    let descriptor = session.agent.descriptor();
+    (
+        descriptor.default_model,
+        descriptor
+            .models
+            .into_iter()
+            .map(|m| ModelCapability {
+                id: m.id,
+                efforts: m.efforts,
+            })
+            .collect(),
+    )
+}
+
 fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo {
+    let (default_model, models) = session_capabilities(session);
     SessionInfo {
         session_id: session.session_id.clone(),
         provider: session.provider_id.clone(),
@@ -468,6 +614,8 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
         effort: session.effort.clone(),
         root: session.root.display().to_string(),
         thread_id: session.thread_id.clone(),
+        default_model,
+        models,
         messages: session.thread.messages.clone(),
         warning,
     }
@@ -499,8 +647,36 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
             id,
             summary,
             is_error,
+            metadata,
             ..
-        } => thread.apply_tool_result(message_id, id, name, summary, *is_error),
+        } => {
+            let core_meta = metadata.clone().map(|m| match m {
+                ToolMetaView::Delegation {
+                    provider_id,
+                    model,
+                    routing_kind,
+                    skipped,
+                    usage_delta,
+                } => ToolMetadata::Delegation {
+                    provider_id,
+                    model,
+                    routing_kind,
+                    skipped: skipped
+                        .into_iter()
+                        .map(|s| zest_core::SkippedProvider {
+                            provider_id: s.provider_id,
+                            reason: s.reason,
+                        })
+                        .collect(),
+                    usage_delta: zest_core::UsageDelta {
+                        requests: usage_delta.requests,
+                        input_tokens: usage_delta.input_tokens,
+                        output_tokens: usage_delta.output_tokens,
+                    },
+                },
+            });
+            thread.apply_tool_result(message_id, id, name, summary, *is_error, core_meta);
+        }
         ChatEvent::ApprovalNeeded {
             message_id,
             approval_id,
@@ -857,6 +1033,7 @@ async fn send_message(
                     id,
                     summary,
                     is_error,
+                    metadata,
                 } => ChatEvent::ToolCallResult {
                     session_id: session_id.clone(),
                     thread_id: thread_id.clone(),
@@ -866,6 +1043,7 @@ async fn send_message(
                     id: id.to_string(),
                     summary: summary.to_string(),
                     is_error,
+                    metadata: metadata.map(ToolMetaView::from),
                 },
                 StreamEvent::ApprovalNeeded {
                     approval_id,
@@ -1175,6 +1353,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_providers,
             refresh_providers,
+            usage_snapshot,
             last_provider,
             start_login,
             start_session,
@@ -1204,6 +1383,9 @@ mod export_bindings {
     fn export_bindings() {
         ChatEvent::export_all().expect("export ChatEvent bindings");
         SessionInfo::export_all().expect("export SessionInfo bindings");
+        ProviderView::export_all().expect("export ProviderView bindings");
+        ModelCapability::export_all().expect("export ModelCapability bindings");
+        ToolMetaView::export_all().expect("export ToolMetaView bindings");
     }
 }
 
@@ -1240,6 +1422,7 @@ mod characterization {
             id: "t1".into(),
             summary: "wrote f.txt".into(),
             is_error: false,
+            metadata: None,
         };
         let v = serde_json::to_value(&event).unwrap();
         assert_eq!(v["kind"], "tool_call_result");

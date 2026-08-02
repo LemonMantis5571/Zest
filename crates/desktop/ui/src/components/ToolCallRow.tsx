@@ -84,6 +84,15 @@ export function ToolCallRow({ tool, onResolveApproval }: Props) {
     );
   }
 
+  const delegation =
+    tool.metadata?.kind === "delegation" ? tool.metadata : null;
+  const title = delegation
+    ? `Delegated to ${delegation.provider_id} · ${delegation.model}`
+    : tool.name;
+  const skipped = delegation?.skipped ?? [];
+  const hasSkipped = skipped.length > 0;
+  const hasBody = Boolean(tool.summary?.trim()) || hasSkipped;
+
   const statusIcon =
     tool.status === "running" ? (
       <Spinner className="size-3.5" />
@@ -92,8 +101,6 @@ export function ToolCallRow({ tool, onResolveApproval }: Props) {
     ) : (
       <CheckIcon className="size-3.5 text-[var(--success,#27a644)]" />
     );
-
-  const hasBody = Boolean(tool.summary?.trim());
 
   return (
     <div
@@ -121,15 +128,17 @@ export function ToolCallRow({ tool, onResolveApproval }: Props) {
             tool.status === "running" && "shimmer-text"
           )}
         >
-          {tool.name}
+          {title}
         </span>
-        {tool.summary ? (
+        {!delegation && tool.summary ? (
           <TruncateWithHover
             text={tool.summary}
             className="min-w-0 flex-1 font-mono text-[11px] text-muted-foreground"
           />
         ) : (
-          <span className="min-w-0 flex-1" />
+          <span className="min-w-0 flex-1 text-[11px] text-muted-foreground">
+            {hasSkipped ? `${skipped.length} fallback` : null}
+          </span>
         )}
         {hasBody ? (
           <ChevronRightIcon
@@ -140,10 +149,28 @@ export function ToolCallRow({ tool, onResolveApproval }: Props) {
           />
         ) : null}
       </button>
-      {open && tool.summary ? (
-        <pre className="max-h-56 overflow-auto border-t border-border/50 bg-[var(--chat-canvas)] px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
-          {tool.summary}
-        </pre>
+      {open ? (
+        <div className="space-y-2 border-t border-border/50 bg-[var(--chat-canvas)] px-3 py-2">
+          {hasSkipped ? (
+            <div className="space-y-1">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Fallback reasons
+              </div>
+              <ul className="space-y-0.5 text-[11px] text-muted-foreground">
+                {skipped.map((s) => (
+                  <li key={`${s.providerId}:${s.reason}`}>
+                    skipped {s.providerId}: {s.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {tool.summary ? (
+            <pre className="max-h-56 overflow-auto font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
+              {tool.summary}
+            </pre>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );

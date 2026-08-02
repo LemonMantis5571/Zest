@@ -16,6 +16,11 @@ const base: SessionInfo = {
   effort: "high",
   root: ".",
   threadId: "t1",
+  defaultModel: "gpt-5.6-sol",
+  models: [
+    { id: "gpt-5.6-sol", efforts: ["low", "medium", "high", "xhigh", "max"] },
+    { id: "gpt-5.4", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  ],
   messages: [{ id: "u1", role: "user", text: "hi" }],
 };
 

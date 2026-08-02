@@ -2,18 +2,20 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon, ChevronDownIcon, RotateCcwIcon } from "lucide-react";
 
 import {
-  CODEX_MODELS,
-  DEFAULT_CODEX_MODEL,
   DEFAULT_EFFORT,
-  EFFORTS,
   chipLabel,
+  effortsForModel,
+  modelOptionsFromCapabilities,
   type EffortId,
+  type ModelCapability,
 } from "@/lib/models";
 import { cn } from "@/lib/utils";
 
 type Props = {
   model: string;
   effort: EffortId;
+  models?: ModelCapability[];
+  defaultModel?: string;
   disabled?: boolean;
   onModelChange: (model: string) => void;
   onEffortChange: (effort: EffortId) => void;
@@ -23,10 +25,13 @@ type Props = {
 /**
  * Plain positioned panel — no Base UI Menu/Portal.
  * Floating-ui portals have been crashing the Tauri WebView on open.
+ * Model/effort availability comes from Rust; labels are display-only.
  */
 export function ModelEffortPicker({
   model,
   effort,
+  models,
+  defaultModel,
   disabled,
   onModelChange,
   onEffortChange,
@@ -35,6 +40,9 @@ export function ModelEffortPicker({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const labelId = useId();
+  const modelOptions = modelOptionsFromCapabilities(models);
+  const effortOptions = effortsForModel(models, model);
+  const resetModel = defaultModel ?? modelOptions[0]?.id ?? model;
 
   useEffect(() => {
     if (!open) return;
@@ -71,7 +79,7 @@ export function ModelEffortPicker({
 
   function reset() {
     setOpen(false);
-    onModelChange(DEFAULT_CODEX_MODEL);
+    onModelChange(resetModel);
     onEffortChange(DEFAULT_EFFORT);
     onReset?.();
   }
@@ -109,7 +117,7 @@ export function ModelEffortPicker({
             Model
           </div>
           <div role="listbox" aria-label="Model" className="flex flex-col">
-            {CODEX_MODELS.map((item) => {
+            {modelOptions.map((item) => {
               const selected = item.id === model;
               return (
                 <button
@@ -137,7 +145,7 @@ export function ModelEffortPicker({
             Effort
           </div>
           <div role="listbox" aria-label="Effort" className="flex flex-col">
-            {EFFORTS.map((item) => {
+            {effortOptions.map((item) => {
               const selected = item.id === effort;
               return (
                 <button

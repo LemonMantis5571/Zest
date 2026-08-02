@@ -4,6 +4,7 @@ import * as tauriApi from "./api";
 import type { SkillSummary, SystemPromptInfo } from "./api";
 import { runFixtureStream } from "./fixture";
 import {
+  CODEX_MODELS,
   DEFAULT_CODEX_MODEL,
   DEFAULT_EFFORT,
 } from "./models";
@@ -13,14 +14,21 @@ import type {
   ProviderRow,
   SessionInfo,
   ThreadSummary,
+  UsageSnapshot,
 } from "./types";
 
 export type { SkillSummary, SystemPromptInfo };
+
+const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
+  id: m.id,
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+}));
 
 /** Desktop I/O surface used by App — Tauri in production, fixture offline. */
 export type DesktopBackend = {
   readonly mode: "tauri" | "fixture";
   listProviders(): Promise<ProviderRow[]>;
+  usageSnapshot(): Promise<UsageSnapshot>;
   lastProvider(): Promise<string | null>;
   startLogin(id: string): Promise<LoginStarted>;
   startSession(
@@ -54,6 +62,8 @@ const FIXTURE_SESSION: SessionInfo = {
   effort: DEFAULT_EFFORT,
   root: ".",
   threadId: "fixture",
+  defaultModel: DEFAULT_CODEX_MODEL,
+  models: FIXTURE_MODELS,
   messages: [],
 };
 
@@ -65,6 +75,7 @@ export function createTauriBackend(): DesktopBackend {
   return {
     mode: "tauri",
     listProviders: () => tauriApi.listProviders(),
+    usageSnapshot: () => tauriApi.usageSnapshot(),
     lastProvider: () => tauriApi.lastProvider(),
     startLogin: (id) => tauriApi.startLogin(id),
     startSession: (id, options) => tauriApi.startSession(id, options),
@@ -101,8 +112,30 @@ export function createFixtureBackend(): DesktopBackend {
           detail: "Deterministic UI stream",
           selectable: true,
           canConnect: false,
+          configured: true,
+          defaultModel: DEFAULT_CODEX_MODEL,
+          models: FIXTURE_MODELS,
         },
       ];
+    },
+    async usageSnapshot() {
+      return {
+        providers: [
+          {
+            providerId: "fixture",
+            measured: {
+              label: "Measured by Zest",
+              requests: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheWriteTokens: 0,
+              cacheReadTokens: 0,
+              totalTokens: 0,
+            },
+            headroom: { kind: "not_reported", label: "Not reported" },
+          },
+        ],
+      };
     },
     async lastProvider() {
       return "fixture";

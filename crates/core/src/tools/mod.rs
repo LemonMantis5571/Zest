@@ -3,6 +3,7 @@ pub mod delegate;
 pub mod glob_files;
 pub mod grep;
 pub mod list_dir;
+pub mod outcome;
 pub mod prepared;
 pub mod project;
 pub mod read_file;
@@ -29,13 +30,16 @@ use self::read_file::ReadFile;
 use self::read_skill::ReadSkill;
 use self::write_file::WriteFile;
 
+pub use self::outcome::{SkippedProvider, ToolMetadata, ToolOutcome, UsageDelta};
+
 /// A client-side tool.
 ///
-/// `run` / `execute_prepared` return `Result<String, String>` rather than a
+/// `run` / `execute_prepared` return `Result<ToolOutcome, String>` rather than a
 /// harness error type on purpose: a tool failing is a normal conversational
 /// event, not a harness failure. The `Err` string goes back to the model as a
 /// `tool_result` with `is_error: true` so it can adapt, rather than aborting
-/// the turn.
+/// the turn. Optional [`ToolMetadata`] rides beside the body for UI/persistence
+/// and is never injected into the Messages API wire as structured content.
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -59,7 +63,7 @@ pub trait Tool: Send + Sync {
     async fn execute_prepared(
         &self,
         prepared: PreparedToolCall,
-    ) -> std::result::Result<String, String> {
+    ) -> std::result::Result<ToolOutcome, String> {
         match prepared.plain_input() {
             Some(input) => self.run(input.clone()).await,
             None => Err(format!(
@@ -69,7 +73,7 @@ pub trait Tool: Send + Sync {
         }
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String>;
+    async fn run(&self, input: Value) -> std::result::Result<ToolOutcome, String>;
 }
 
 /// Cloning shares the tools themselves — cheap, and how a delegated worker gets
@@ -122,7 +126,7 @@ impl ToolRegistry {
     pub async fn execute_prepared(
         &self,
         prepared: PreparedToolCall,
-    ) -> std::result::Result<String, String> {
+    ) -> std::result::Result<ToolOutcome, String> {
         let name = prepared.tool_name.clone();
         match self.tools.iter().find(|t| t.name() == name) {
             Some(tool) => tool.execute_prepared(prepared).await,
@@ -130,7 +134,7 @@ impl ToolRegistry {
         }
     }
 
-    pub async fn run(&self, name: &str, input: Value) -> std::result::Result<String, String> {
+    pub async fn run(&self, name: &str, input: Value) -> std::result::Result<ToolOutcome, String> {
         let prepared = self.prepare(name, input)?;
         self.execute_prepared(prepared).await
     }

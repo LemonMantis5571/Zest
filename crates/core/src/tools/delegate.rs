@@ -18,13 +18,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::outcome::{SkippedProvider, ToolMetadata, ToolOutcome, UsageDelta};
 use super::{Tool, ToolRegistry};
 use crate::agent::Agent;
 use crate::anthropic::types::text_of;
 use crate::provider::registry::ProviderRegistry;
 use crate::provider::StreamEvent;
 use crate::routing::Router;
-use crate::usage::Ledger;
+use crate::usage::{Ledger, ProviderUsage};
 
 pub const DELEGATE_TOOL: &str = "delegate";
 
@@ -86,6 +87,22 @@ impl Delegate {
     }
 }
 
+fn usage_snapshot(ledger: &Option<Arc<Mutex<Ledger>>>, provider_id: &str) -> ProviderUsage {
+    ledger
+        .as_ref()
+        .and_then(|l| l.lock().ok())
+        .and_then(|g| g.get(provider_id).cloned())
+        .unwrap_or_default()
+}
+
+fn usage_delta(before: &ProviderUsage, after: &ProviderUsage) -> UsageDelta {
+    UsageDelta {
+        requests: after.requests.saturating_sub(before.requests),
+        input_tokens: after.input_tokens.saturating_sub(before.input_tokens),
+        output_tokens: after.output_tokens.saturating_sub(before.output_tokens),
+    }
+}
+
 #[async_trait]
 impl Tool for Delegate {
     fn name(&self) -> &str {
@@ -123,7 +140,7 @@ impl Tool for Delegate {
         })
     }
 
-    async fn run(&self, input: Value) -> std::result::Result<String, String> {
+    async fn run(&self, input: Value) -> std::result::Result<ToolOutcome, String> {
         let task = input
             .get("task")
             .and_then(Value::as_str)
@@ -154,12 +171,21 @@ impl Tool for Delegate {
             .clone()
             .unwrap_or_else(|| provider.default_model().to_string());
 
+        // Belt-and-suspenders: router already skips invalid models, but never
+        // dispatch without a final catalogue check.
+        provider
+            .validate_selection(&model, "high")
+            .map_err(|e| format!("delegated model rejected: {e}"))?;
+
+        let before = usage_snapshot(&self.ledger, &provider_id);
+
         let mut worker =
             Agent::new(provider, self.worker_tools.clone()).with_system(self.worker_system.clone());
         if let Some(ledger) = &self.ledger {
             worker = worker.with_ledger(ledger.clone());
         }
         worker.model = model.clone();
+        worker.effort = "high".into();
 
         // The worker's stream is not rendered — interleaving it with the parent's
         // output would be unreadable. Its answer is the tool result.
@@ -181,14 +207,35 @@ impl Tool for Delegate {
             return Err(format!("{provider_id}/{model} returned no text"));
         }
 
+        let after = usage_snapshot(&self.ledger, &provider_id);
+        let skipped: Vec<SkippedProvider> = resolution
+            .skipped
+            .iter()
+            .map(|(id, reason)| SkippedProvider {
+                provider_id: id.clone(),
+                reason: reason.clone(),
+            })
+            .collect();
+
+        let metadata = ToolMetadata::Delegation {
+            provider_id: provider_id.clone(),
+            model: model.clone(),
+            routing_kind: kind.map(str::to_string),
+            skipped: skipped.clone(),
+            usage_delta: usage_delta(&before, &after),
+        };
+
         // Name who answered. The orchestrator is spending several accounts and
         // should be able to see which one produced what.
         let mut header = format!("[{provider_id} · {model}]");
-        for (skipped, reason) in &resolution.skipped {
-            header.push_str(&format!(" (skipped {skipped}: {reason})"));
+        for skip in &skipped {
+            header.push_str(&format!(" (skipped {}: {})", skip.provider_id, skip.reason));
         }
 
-        Ok(format!("{header}\n{answer}"))
+        Ok(ToolOutcome::with_metadata(
+            format!("{header}\n{answer}"),
+            metadata,
+        ))
     }
 }
 
