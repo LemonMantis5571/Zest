@@ -17,7 +17,7 @@
 # Keep .zest/skills/ shareable when present (not ignored).
 
 # --- Gateway binaries (download locally; see README) ---
-/tools/
+/tools/*
 !/tools/.gitkeep
 
 # --- Node (npm workspaces at repo root) ---
