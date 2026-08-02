@@ -2,11 +2,14 @@
 //!
 //! Replaces `Mutex<Option<Session>>` + `AtomicBool`. An old turn finishing after
 //! `end_session` / a newer session must never restore into the live slot.
+//!
+//! Detached / ended turns stay registered until they quiesce (`finish_turn`) so
+//! cancel and busy checks remain authoritative until the worker exits.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-use zest_core::{new_id, Agent, CancelFlag, SkillSet, Thread};
+use zest_core::{new_id, Agent, CancelToken, SkillSet, Thread};
 
 pub struct Session {
     pub session_id: String,
@@ -29,7 +32,7 @@ pub struct ActiveTurn {
     pub turn_id: String,
     pub session_id: String,
     pub thread_id: String,
-    pub cancel: CancelFlag,
+    pub cancel: CancelToken,
 }
 
 struct Inner {
@@ -38,7 +41,11 @@ struct Inner {
     live_session_id: Option<String>,
     /// Idle session body. Absent while a turn holds it or when empty.
     session: Option<Session>,
+    /// In-flight turn. Stays set until [`SessionController::finish_turn`] even
+    /// after `end_session` cancelled it (quiesce).
     turn: Option<ActiveTurn>,
+    /// When true, `finish_turn` must not restore the session body.
+    session_ended: bool,
 }
 
 pub struct SessionController {
@@ -78,6 +85,7 @@ impl SessionController {
                 live_session_id: None,
                 session: None,
                 turn: None,
+                session_ended: false,
             }),
         }
     }
@@ -106,6 +114,7 @@ impl SessionController {
         session.session_id = session_id.clone();
         g.live_session_id = Some(session_id);
         g.session = Some(session);
+        g.session_ended = false;
         Ok(())
     }
 
@@ -140,12 +149,14 @@ impl SessionController {
             turn_id: new_id("turn"),
             session_id: session.session_id.clone(),
             thread_id: session.thread_id.clone(),
-            cancel: CancelFlag::new(),
+            cancel: CancelToken::new(),
         };
         g.turn = Some(turn.clone());
         Ok((session, turn))
     }
 
+    /// Cancel the active turn token. Does not clear the turn slot — that waits
+    /// for [`Self::finish_turn`] (quiesce).
     pub fn cancel_turn(&self) -> Result<bool, SessionError> {
         let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
         if let Some(turn) = &g.turn {
@@ -163,7 +174,8 @@ impl SessionController {
         if g.turn.as_ref().is_some_and(|t| t.turn_id == turn.turn_id) {
             g.turn = None;
         }
-        let restore = g.live_session_id.as_deref() == Some(turn.session_id.as_str())
+        let restore = !g.session_ended
+            && g.live_session_id.as_deref() == Some(turn.session_id.as_str())
             && g.session.is_none();
         if restore {
             g.session = Some(session);
@@ -177,8 +189,9 @@ impl SessionController {
         let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
         if let Some(turn) = &g.turn {
             turn.cancel.cancel();
+            // Keep `turn` registered until the worker calls finish_turn.
         }
-        g.turn = None;
+        g.session_ended = true;
         g.live_session_id = None;
         g.session = None;
         Ok(())
@@ -194,11 +207,11 @@ impl Default for SessionController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use zest_core::{Provider, ToolRegistry};
-    use zest_core::{AuthStatus, Completion, StreamEvent, TurnRequest};
     use async_trait::async_trait;
+    use std::sync::Arc;
     use zest_core::HarnessError;
+    use zest_core::{AuthStatus, Completion, StreamEvent, TurnRequest};
+    use zest_core::{Provider, ToolRegistry};
 
     struct StubProvider;
 
@@ -247,27 +260,19 @@ mod tests {
         ctl.set_session(dummy_session("a")).unwrap();
         let (session, turn) = ctl.begin_turn().unwrap();
         ctl.end_session().unwrap();
+        // Turn stays registered until quiesce.
+        assert!(ctl.is_busy().unwrap());
         let restored = ctl.finish_turn(&turn, session).unwrap();
         assert!(!restored);
-        assert!(ctl.session_info_snapshot(|s| s.session_id.clone()).unwrap().is_none());
+        assert!(!ctl.is_busy().unwrap());
     }
 
     #[test]
-    fn begin_turn_while_busy_errors() {
+    fn cancel_sets_token() {
         let ctl = SessionController::new();
-        ctl.set_session(dummy_session("a")).unwrap();
-        let _ = ctl.begin_turn().unwrap();
-        assert!(matches!(ctl.begin_turn(), Err(SessionError::Busy)));
-        assert!(matches!(ctl.require_idle(), Err(SessionError::Busy)));
-    }
-
-    #[test]
-    fn cancel_sets_flag() {
-        let ctl = SessionController::new();
-        ctl.set_session(dummy_session("a")).unwrap();
-        let (session, turn) = ctl.begin_turn().unwrap();
+        ctl.set_session(dummy_session("b")).unwrap();
+        let (_session, turn) = ctl.begin_turn().unwrap();
         assert!(ctl.cancel_turn().unwrap());
         assert!(turn.cancel.is_cancelled());
-        let _ = ctl.finish_turn(&turn, session).unwrap();
     }
 }

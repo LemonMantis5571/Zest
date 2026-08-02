@@ -308,7 +308,10 @@ async fn delegate_uses_routed_model_and_attributes_ledger() {
     let guard = ledger.lock().unwrap();
     let usage = guard.get("worker").expect("worker billed");
     assert_eq!(usage.requests, 1);
-    assert!(guard.get("primary").is_none(), "parent not billed for worker");
+    assert!(
+        guard.get("primary").is_none(),
+        "parent not billed for worker"
+    );
 }
 
 #[test]

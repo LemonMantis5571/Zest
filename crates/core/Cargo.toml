@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Agent loop, model client, and tool layer for the Zest coding harness."
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait.workspace = true
 blake3.workspace = true

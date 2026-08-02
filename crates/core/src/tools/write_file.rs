@@ -1,5 +1,4 @@
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -10,7 +9,7 @@ use super::prepared::{PreImage, PreparedKind, PreparedToolCall};
 use super::project::ProjectRoot;
 use super::Tool;
 
-const MAX_BYTES: usize = 256 * 1024;
+const MAX_BYTES: usize = 1024 * 1024;
 const PREVIEW_HUNK_LINES: usize = 48;
 const PREVIEW_CHARS: usize = 6_000;
 const PREVIEW_MAX_HUNKS: usize = 8;
@@ -111,8 +110,7 @@ impl WriteFile {
             }
             Ok(meta) if meta.is_dir() => {
                 return Err(
-                    "target changed before write (now a directory); fresh approval required"
-                        .into(),
+                    "target changed before write (now a directory); fresh approval required".into(),
                 );
             }
             Ok(_) => {
@@ -243,105 +241,10 @@ impl Tool for WriteFile {
     }
 }
 
-/// Write `data` via a unique temp file in the target's parent, flush, then
-/// atomically replace the destination (Windows-safe).
+/// Write `data` via centralized atomic persistence (unique temp, flush/sync,
+/// Windows `MoveFileExW` replace without deleting the destination first).
 pub fn atomic_write(target: &Path, data: &[u8]) -> Result<(), String> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| "target has no parent directory".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("create parent failed: {e}"))?;
-
-    let temp = unique_temp_path(parent, target)?;
-    {
-        let mut file = std::fs::File::create(&temp)
-            .map_err(|e| format!("create temp file failed: {e}"))?;
-        file.write_all(data)
-            .map_err(|e| format!("write temp file failed: {e}"))?;
-        file.flush()
-            .map_err(|e| format!("flush temp file failed: {e}"))?;
-        file.sync_all()
-            .map_err(|e| format!("sync temp file failed: {e}"))?;
-    }
-
-    match atomic_replace(&temp, target) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(e)
-        }
-    }
-}
-
-fn unique_temp_path(parent: &Path, target: &Path) -> Result<PathBuf, String> {
-    let stem = target
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("write");
-    let pid = std::process::id();
-    for attempt in 0..64u32 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let name = format!(".zest-{stem}-{pid}-{nanos}-{attempt}.tmp");
-        let candidate = parent.join(name);
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err("could not allocate a unique temp file name".into())
-}
-
-fn atomic_replace(temp: &Path, target: &Path) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        replace_windows(temp, target)
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(temp, target).map_err(|e| format!("atomic replace failed: {e}"))
-    }
-}
-
-#[cfg(windows)]
-fn replace_windows(temp: &Path, target: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-
-    extern "system" {
-        fn MoveFileExW(
-            lp_existing_file_name: *const u16,
-            lp_new_file_name: *const u16,
-            dw_flags: u32,
-        ) -> i32;
-    }
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-
-    let from: Vec<u16> = temp
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let to: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(format!(
-            "atomic replace failed: {}",
-            std::io::Error::last_os_error()
-        ))
-    } else {
-        Ok(())
-    }
+    crate::fsutil::atomic_write(target, data).map_err(|e| e.to_string())
 }
 
 /// Real unified hunks via `similar`, bounded by line/char budgets. Always
@@ -529,9 +432,7 @@ pub fn bounded_unified_diff(path: &str, old: &str, new: &str, existed: bool) -> 
     }
 
     if hunks_omitted > 0 {
-        out.push_str(&format!(
-            "… {hunks_omitted} hunk(s) omitted from preview\n"
-        ));
+        out.push_str(&format!("… {hunks_omitted} hunk(s) omitted from preview\n"));
     } else if lines_shown >= PREVIEW_HUNK_LINES || out.len() >= PREVIEW_CHARS {
         // Single large hunk truncated — still a clear omission signal.
         if !out.contains("omitted") && !out.contains("truncated") {
@@ -594,7 +495,10 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("wrote note.txt"));
-        assert_eq!(std::fs::read_to_string(dir.join("note.txt")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[tokio::test]
@@ -606,9 +510,21 @@ mod tests {
             .prepare_call(json!({ "path": "a.txt", "content": "new\nkeep\n" }))
             .unwrap();
         assert_eq!(prepared.preview.path, "a.txt");
-        assert!(prepared.preview.diff.contains("-old"), "{}", prepared.preview.diff);
-        assert!(prepared.preview.diff.contains("+new"), "{}", prepared.preview.diff);
-        assert!(prepared.preview.diff.contains("@@"), "{}", prepared.preview.diff);
+        assert!(
+            prepared.preview.diff.contains("-old"),
+            "{}",
+            prepared.preview.diff
+        );
+        assert!(
+            prepared.preview.diff.contains("+new"),
+            "{}",
+            prepared.preview.diff
+        );
+        assert!(
+            prepared.preview.diff.contains("@@"),
+            "{}",
+            prepared.preview.diff
+        );
         assert!(prepared.preview.summary.contains("Overwrite"));
     }
 
@@ -650,7 +566,10 @@ mod tests {
         std::fs::write(dir.join("new.txt"), "race\n").unwrap();
         let err = tool.execute_prepared(prepared).await.unwrap_err();
         assert!(err.contains("appeared after approval"), "{err}");
-        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "race\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "race\n"
+        );
     }
 
     #[tokio::test]

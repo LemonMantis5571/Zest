@@ -169,13 +169,12 @@ fn block_index(ev: &Value) -> usize {
 /// Get the block at `idx`, creating an empty one of `kind` if a delta somehow
 /// arrives before its `content_block_start`. Shouldn't happen; don't panic if it does.
 fn entry<'a>(blocks: &'a mut BTreeMap<usize, Value>, idx: usize, kind: &str) -> &'a mut Value {
-    if !blocks.contains_key(&idx) {
+    blocks.entry(idx).or_insert_with(|| {
         let mut map = serde_json::Map::new();
         map.insert("type".to_string(), Value::String(kind.to_string()));
         map.insert(kind.to_string(), Value::String(String::new()));
-        blocks.insert(idx, Value::Object(map));
-    }
-    blocks.get_mut(&idx).expect("inserted above")
+        Value::Object(map)
+    })
 }
 
 fn append_str(block: &mut Value, field: &str, s: &str) {
@@ -334,10 +333,17 @@ data: {"type":"message_stop"}
 
         let block = &completion.content[0];
         assert_eq!(block["type"], "thinking");
-        assert_eq!(block["thinking"], "1071 = 2 x 462 + 147\n462 = 3 x 147 + 21");
+        assert_eq!(
+            block["thinking"],
+            "1071 = 2 x 462 + 147\n462 = 3 x 147 + 21"
+        );
         // Dropping or altering this makes the *next* request fail, not this one.
         assert_eq!(block["signature"], "EqQBCgIYAhIM1gbcDa9GJwZA2b3h");
-        assert_eq!(seen.len(), 2, "one event per thinking delta, none for signature");
+        assert_eq!(
+            seen.len(),
+            2,
+            "one event per thinking delta, none for signature"
+        );
     }
 
     #[test]

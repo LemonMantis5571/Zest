@@ -4,6 +4,14 @@ Track notable changes here.
 
 ## 2026-08-02
 
+- Milestone 0 (Stable Windows Alpha): provider-immutable threads + project-scoped sticky
+  prefs map; typed thread load outcomes (refuse newer formats); centralized atomic
+  persistence; async `CancelToken` with HTTP abort, `message_stop` requirement, idle/
+  connect timeouts; sensitive direct-file grep approval + redacted persisted wire history;
+  prompt/skill/read/write bounds; desktop Stop control, Strict Mode subscription dispose,
+  delta merge, settings load failures, canonical project root; `verify.ps1` gate
+  (`npm ci` → ui test/lint/build → fmt/clippy/test → binding drift → audit → RustSec);
+  doctor `--live` reloads ledger from disk before success.
 - Docs: fresh-install README for https://github.com/LemonMantis5571/Zest, CONTRIBUTING,
   expanded `.gitignore` (secrets, `.zest` state, `tools/`, Node, OS junk).
 - System prompt: custom `.zest/system.md` is authoritative (placed first; softens
