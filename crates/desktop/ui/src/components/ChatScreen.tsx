@@ -29,9 +29,11 @@ import type { ChatMessage, SessionInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function shortRoot(root: string): string {
-  const normalized = root.replace(/\\/g, "/");
+  // Windows canonicalize() can yield \\?\D:\... — strip for display.
+  const cleaned = root.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+  const normalized = cleaned.replace(/\\/g, "/");
   const parts = normalized.split("/").filter(Boolean);
-  if (parts.length <= 2) return root;
+  if (parts.length <= 2) return cleaned;
   return parts.slice(-2).join("/");
 }
 
@@ -211,7 +213,7 @@ export function ChatScreen({
                               <div className="relative">
                                 <Markdown>{msg.text}</Markdown>
                                 {msg.streaming ? (
-                                  <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-primary align-text-bottom" />
+                                  <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-foreground/70 align-text-bottom" />
                                 ) : null}
                               </div>
                               {!msg.streaming ? (
