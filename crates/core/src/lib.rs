@@ -16,6 +16,7 @@ pub mod fsutil;
 pub mod gateway;
 pub mod persist;
 pub mod prefs;
+pub mod profile;
 pub mod prompt;
 pub mod provider;
 pub mod routing;
@@ -52,6 +53,9 @@ pub use gateway::{
 };
 pub use persist::{PersistPriority, PersistWorker, DELTA_CHECKPOINT_MS};
 pub use prefs::{ProjectSessionState, ProviderSessionPrefs};
+pub use profile::{
+    derive as derive_profile_stats, ChatFacts, DayPoint, ProfileStats,
+};
 pub use prompt::{
     compose_for_project, compose_system, compose_system_with_docs, custom_system_path, env_context,
     load_custom_system, load_project_docs, save_custom_system, truncate_chars, DEFAULT_SYSTEM,

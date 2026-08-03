@@ -2,6 +2,28 @@
 
 Track notable changes here.
 
+## 2026-08-03 — A profile screen, honest about what it can and cannot know
+
+Clicking the avatar now opens a profile screen instead of the Settings panel: a stat strip
+(tokens, busiest day, longest chat, current and longest streak), a 27-week heatmap, and activity
+and per-provider breakdowns. Editing your name and avatar still lives in Settings — the profile
+reports, it does not duplicate the form.
+
+The interesting part is what it refuses to pretend.
+
+- **Chats are retroactive, tokens are not.** Chat counts and streaks come from thread files, so
+  they light up with real history on an existing install. Tokens come from new daily ledger
+  buckets, which start empty because the ledger only ever held cumulative totals — there is no
+  spend history to backfill.
+- **So the two are kept apart.** A day's token figure is nullable: "before metering" renders
+  differently from "metered, spent nothing", the heatmap defaults to chat activity, and the token
+  view stays disabled until there is a metered day. One blended number would have shown a year of
+  empty cells and called it zero usage.
+- **Days end when your clock says they do.** The webview hands core its UTC offset at startup;
+  without it, this user's day would end at 6pm and streaks would look broken. Date maths is
+  `civil_from_days` written out rather than a new dependency, tested against the epoch, leap
+  days, and the 1900/2000/2100 century rules.
+
 ## 2026-08-03 — The gateway ships with Zest, and a dead port says so
 
 "Claude needs Connect again before chat" turned out to have nothing to do with Claude. Nothing
