@@ -48,19 +48,29 @@ node -v              # v24.16.0 (nvm use / nvs use if needed)
 npm -v               # 11.13.0
 ```
 
-### 3. Gateway (Codex)
+### 3. Gateway (Codex, Claude)
 
-1. Download the **Windows amd64** [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) release.
-2. Extract to `tools/CLIProxyAPI/` (gitignored — not in the repo).
-3. Configure `tools/CLIProxyAPI/config.yaml`:
-   - listen on `127.0.0.1:8317`
-   - add an `api-keys` entry (any strong random string)
-4. Put the **same** key in a repo-root `.env`:
+Zest bundles [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT) as
+a Tauri sidecar and starts it on demand, so a downloaded Zest needs no separate
+install. Fetch the binary once before building:
 
 ```powershell
-copy .env.example .env
-# Edit .env → ZEST_GATEWAY_KEY=<same key as api-keys>
+.\scripts\fetch-gateway.ps1
 ```
+
+That downloads the release for your target, verifies its SHA256 against the
+published `checksums.txt`, and drops it in `crates/desktop/binaries/`
+(gitignored — ~64MB). Add `-Target <triple>` to fetch sidecars for other
+platforms from the same machine.
+
+On first run Zest writes a loopback-only `config.yaml` with a freshly generated
+key into `%APPDATA%\zest\gateway\`, pointed at the same `~/.cli-proxy-api`
+credential store the vendor CLIs use — so sign-ins that already happened still
+work. Nothing to configure and no `.env` needed.
+
+**Already have a hand-installed gateway?** It keeps winning. A
+`tools/CLIProxyAPI/` checkout with its own `config.yaml` is used as-is, and an
+existing `ZEST_GATEWAY_KEY` is never overwritten.
 
 5. Start the gateway and complete Codex OAuth **through the proxy** (not only `codex login`):
 
@@ -103,10 +113,9 @@ Default config (`zest.toml`): provider `codex`, model `gpt-5.6-sol`. Tools are s
 
 ## First chat checklist
 
-1. Gateway running on `127.0.0.1:8317`
-2. `.env` has `ZEST_GATEWAY_KEY`
-3. Codex signed in via gateway (`~/.cli-proxy-api` session present)
-4. `npm run ui:build` already succeeded
+1. `.\scripts\fetch-gateway.ps1` has run (Zest starts the gateway itself)
+2. Codex signed in via gateway (`~/.cli-proxy-api` session present)
+3. `npm run ui:build` already succeeded
 5. Open desktop → provider **Codex** shows Signed in → **Continue**
 6. Ask something that needs a file (`What's in README.md?`) — you should see tools stream
 
@@ -426,9 +435,9 @@ skip live doctor — do not invent a green result.
 | Symptom | Fix |
 |---------|-----|
 | Desktop blank / old UI | `npm install && npm run ui:build`, then rebuild desktop |
-| `ZEST_GATEWAY_KEY is not set` | Copy `.env.example` → `.env` and match gateway `api-keys` |
+| `ZEST_GATEWAY_KEY is not set` | Only for a hand-installed gateway: match `.env` to its `api-keys`. A bundled gateway generates its own. |
 | Codex not Signed in | Run `.\scripts\codex-login-gateway.ps1` or Connect in the picker |
-| Connection refused `:8317` | `.\scripts\start-gateway.ps1` |
+| Connection refused `:8317` | Zest starts the gateway itself; if it persists, check the binary exists (`.\scripts\fetch-gateway.ps1`) |
 | Model rejected / Luna missing | Rebuild with current core (Codex has a built-in Sol/Terra/Luna catalogue) |
 | Custom persona ignored | **Save** in Settings, then send a **new** message (or New chat) |
 | Can't reach gateway / connect errors | Start CLIProxyAPI (`.\scripts\start-gateway.ps1`); empty system prompt is fine |

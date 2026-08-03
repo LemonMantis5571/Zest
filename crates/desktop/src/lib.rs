@@ -22,10 +22,11 @@ use ts_rs::TS;
 use zest_core::routing_edit::{routing_document, validate_rules, RuleInput};
 use zest_core::{
     can_start_login, compose_system_with_docs, descriptor_for_picker_id, descriptor_from_config,
-    detect_all, display_path, env_context, load_custom_system, load_project_docs, new_id, probe,
-    save_custom_system, start_login as core_start_login, truncate_chars, uses_gateway_auth,
-    ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, Config,
-    HarnessError, Ledger, PersistPriority, PersistWorker, ProjectSessionState, ProviderRegistry,
+    detect_all, display_path, ensure_gateway_running, env_context, load_custom_system,
+    load_project_docs, new_id, probe, save_custom_system, start_login as core_start_login,
+    truncate_chars, uses_gateway_auth, ApprovalDecision, ApprovalMode, ApprovalPolicy,
+    ApprovalRequest, Approver, AuthStatus, Config, GatewayState, HarnessError, Ledger,
+    PersistPriority, PersistWorker, ProjectSessionState, ProviderConfig, ProviderRegistry,
     ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
     ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
     DEFAULT_SYSTEM,
@@ -553,27 +554,83 @@ fn usage_snapshot() -> UsageSnapshot {
 /// after a sign-in and again before opening a gateway chat.
 #[tauri::command]
 async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    prove_provider_serves(&state, &id).await
+    prove_provider_serves(&state, &id)
+        .await
+        .map_err(|e| e.user_message())
 }
 
-async fn prove_provider_serves(state: &State<'_, AppState>, id: &str) -> Result<(), String> {
+/// Why a provider could not be proven able to serve.
+///
+/// Kept typed rather than pre-formatted so callers can still tell a credential
+/// problem from everything else. Deciding that by matching on a message string
+/// is how "the gateway is not running" came to be reported as a bad session.
+enum ProbeFailure {
+    /// Configuration, workspace, or gateway startup — no turn was attempted, so
+    /// this says nothing about the account.
+    Setup(String),
+    /// A real turn was attempted and failed.
+    Turn(HarnessError),
+}
+
+impl ProbeFailure {
+    fn user_message(&self) -> String {
+        match self {
+            Self::Setup(message) => message.clone(),
+            Self::Turn(err) => format_turn_error(err),
+        }
+    }
+
+    /// Whether signing in again is actually the fix.
+    fn needs_reconnect(&self) -> bool {
+        matches!(self, Self::Turn(err) if err.is_auth_problem())
+    }
+}
+
+async fn prove_provider_serves(
+    state: &State<'_, AppState>,
+    id: &str,
+) -> Result<(), ProbeFailure> {
     zest_core::load_env();
-    let root = resolve_workspace_root(state)?;
-    let config = Config::find(&root).map_err(|e| e.to_string())?;
+    let root = resolve_workspace_root(state).map_err(ProbeFailure::Setup)?;
+    let config = Config::find(&root).map_err(|e| ProbeFailure::Setup(e.to_string()))?;
     let (registry, skipped) = ProviderRegistry::from_config(&config);
 
     let provider = registry.get(id).ok_or_else(|| {
-        skipped
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| format!("{id} could not be loaded: {}", s.reason))
-            .unwrap_or_else(|| format!("provider `{id}` is not configured"))
+        ProbeFailure::Setup(
+            skipped
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| format!("{id} could not be loaded: {}", s.reason))
+                .unwrap_or_else(|| format!("provider `{id}` is not configured")),
+        )
     })?;
+
+    // Start the local gateway rather than probing a port nothing is listening on.
+    // Its being down is the ordinary state after a reboot, not a user error, and
+    // Zest launches this same binary to sign in — so it can launch it to serve.
+    if let Some(base_url) = local_gateway_url(&config, id) {
+        if let GatewayState::Unavailable(reason) = ensure_gateway_running(&base_url).await {
+            return Err(ProbeFailure::Setup(format!(
+                "The model gateway is installed but did not come up.\n\n{reason}"
+            )));
+        }
+    }
 
     let model = provider.default_model().to_string();
     probe(provider.as_ref(), &model)
         .await
-        .map_err(|e| format_turn_error(&e))
+        .map_err(ProbeFailure::Turn)
+}
+
+/// The `base_url` of a gateway-kind provider, for gateway supervision.
+///
+/// `None` for a native provider: it has no local process behind it, so there is
+/// nothing to start and nothing to blame for being down.
+fn local_gateway_url(config: &Config, id: &str) -> Option<String> {
+    match config.providers.get(id)? {
+        ProviderConfig::Gateway { base_url, .. } => Some(base_url.clone()),
+        ProviderConfig::Anthropic { .. } => None,
+    }
 }
 
 #[tauri::command]
@@ -921,13 +978,22 @@ async fn start_session(
     // Gateway "Signed in" is only a file check. Prove the account can serve
     // before opening chat — otherwise a cooled-down Claude session looks ready
     // and the first user message fails with 503 auth_unavailable.
+    //
+    // Only a *credential* failure earns the "Connect again" wording. Attaching it
+    // to every failure told people to re-run OAuth when the real problem was a
+    // gateway that was not running, which signing in again cannot fix.
     if uses_gateway_auth(&id) {
-        prove_provider_serves(&state, &id).await.map_err(|e| {
-            format!(
-                "{label} needs Connect again before chat — the gateway has a \
-session file but cannot use it yet.\n\n{e}",
-                label = slot.label
-            )
+        prove_provider_serves(&state, &id).await.map_err(|failure| {
+            let detail = failure.user_message();
+            if failure.needs_reconnect() {
+                format!(
+                    "{label} needs Connect again before chat — the gateway has a \
+session file but cannot use it yet.\n\n{detail}",
+                    label = slot.label
+                )
+            } else {
+                detail
+            }
         })?;
     }
 
@@ -2222,10 +2288,14 @@ fn normalize_effort(effort: &str) -> String {
 /// usual alpha failure mode and should not look like a missing system prompt.
 fn format_turn_error(err: &HarnessError) -> String {
     match err {
-        HarnessError::Http(http) if http.is_connect() || http.is_timeout() => {
+        // Asked as a question, not matched as a variant. Connect failures are
+        // retried, so by the time one is formatted it is wrapped in `Exhausted`
+        // — matching `Http` directly made this branch unreachable and sent every
+        // dead-gateway turn to the auth arm below.
+        _ if err.is_unreachable() => {
             format!(
                 "Can't reach the model gateway (usually CLIProxyAPI on http://127.0.0.1:8317). \
-Start it with scripts/start-gateway.ps1, then try again.\n\n{err}"
+Zest tried to start it and it still isn't answering — check scripts/start-gateway.ps1.\n\n{err}"
             )
         }
         // Lead with what to do. The raw envelope still follows, because the
@@ -2247,7 +2317,8 @@ credentials it can't currently use. Reconnect below, then resend.\n\n{}",
 /// Returns `None` when the body is not the shape we expect, so the caller falls
 /// back to the raw text rather than swallowing an error it failed to parse.
 fn api_error_message(err: &HarnessError) -> Option<String> {
-    let HarnessError::Api { status, body } = err else {
+    // `root()` so an exhausted retry still yields the envelope underneath it.
+    let HarnessError::Api { status, body } = err.root() else {
         return None;
     };
     let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
@@ -2265,8 +2336,114 @@ fn tool_risk_wire(risk: ToolRisk) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exhausted(inner: HarnessError) -> HarnessError {
+        HarnessError::Exhausted {
+            attempts: 3,
+            source: Box::new(inner),
+        }
+    }
+
+    /// The bug this guards: a gateway that was not running produced a Setup
+    /// failure, and the picker told the user to Connect again — an OAuth flow
+    /// that cannot start a process.
+    #[test]
+    fn a_setup_failure_never_asks_for_a_new_sign_in() {
+        let failure = ProbeFailure::Setup("The model gateway did not come up".into());
+        assert!(!failure.needs_reconnect());
+        assert_eq!(
+            failure.user_message(),
+            "The model gateway did not come up",
+            "a setup message is shown as written"
+        );
+    }
+
+    #[test]
+    fn a_cooled_down_session_still_asks_for_a_new_sign_in() {
+        // Three failed attempts must not hide the auth envelope underneath.
+        let failure = ProbeFailure::Turn(exhausted(HarnessError::Api {
+            status: 503,
+            body: r#"{"error":{"message":"auth_unavailable: no auth available (providers=claude)"}}"#
+                .into(),
+        }));
+        assert!(failure.needs_reconnect());
+        let message = failure.user_message();
+        assert!(message.contains("needs signing in again"), "{message}");
+        // The provider's own wording survives, because the body stayed parseable.
+        assert!(message.contains("auth_unavailable"), "{message}");
+    }
+
+    #[test]
+    fn an_overloaded_gateway_is_not_a_sign_in_problem() {
+        let failure = ProbeFailure::Turn(exhausted(HarnessError::Api {
+            status: 529,
+            body: r#"{"error":{"message":"overloaded_error"}}"#.into(),
+        }));
+        assert!(!failure.needs_reconnect());
+    }
+
+    /// A native provider has no local process behind it, so there is nothing to
+    /// start and nothing to blame for being down.
+    #[test]
+    fn only_gateway_providers_are_supervised() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-sol"
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            local_gateway_url(&config, "codex").as_deref(),
+            Some("http://127.0.0.1:8317")
+        );
+        assert_eq!(local_gateway_url(&config, "anthropic"), None);
+        assert_eq!(local_gateway_url(&config, "missing"), None);
+    }
+}
+
+/// Point core at the gateway binary shipped beside the app.
+///
+/// Tauri places an `externalBin` sidecar next to the main executable and strips
+/// the target-triple suffix, so the bundled path is predictable. Setting the
+/// same variable a developer would set by hand keeps core with one way to find
+/// the binary, and leaves an explicit override in charge when there is one.
+fn adopt_bundled_gateway() {
+    if std::env::var_os("ZEST_CLIPROXY_PATH").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+    let name = if cfg!(windows) {
+        "cli-proxy-api.exe"
+    } else {
+        "cli-proxy-api"
+    };
+    let candidate = dir.join(name);
+    if candidate.is_file() {
+        std::env::set_var("ZEST_CLIPROXY_PATH", candidate);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before load_env: a bundled install has no `.env`, and provisioning needs
+    // to know whether a binary exists before it decides to write a config.
+    adopt_bundled_gateway();
     zest_core::load_env();
 
     tauri::Builder::default()

@@ -219,17 +219,21 @@ fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Dura
 
 /// Make an exhausted retry visible in the message the user actually reads.
 ///
+/// Wraps rather than reformats. Editing the failure into a string used to cost
+/// two things: `Http` lost `is_connect()`, so a gateway that was not running
+/// reported as a broken session, and the suffix appended to an `Api` body left
+/// it no longer parseable as the JSON error envelope it is.
+///
 /// `Cancelled` is passed through untouched: the caller branches on that variant
-/// to distinguish "the user stopped it" from "it broke", and flattening it into
-/// a generic error would report a deliberate Stop as a failure.
+/// to distinguish "the user stopped it" from "it broke", and wrapping it would
+/// report a deliberate Stop as a failure.
 fn annotate_attempts(error: HarnessError, attempts: u32) -> HarnessError {
     match error {
         HarnessError::Cancelled => HarnessError::Cancelled,
-        HarnessError::Api { status, body } => HarnessError::Api {
-            status,
-            body: format!("{body} (failed after {attempts} attempts)"),
+        other => HarnessError::Exhausted {
+            attempts,
+            source: Box::new(other),
         },
-        other => HarnessError::Other(format!("{other} (failed after {attempts} attempts)")),
     }
 }
 
@@ -385,6 +389,37 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
         let message = err.to_string();
         assert!(message.contains("failed after 3 attempts"), "{message}");
+        // Giving up must not rewrite the body: it is the API's error envelope,
+        // and the desktop parses it to show the provider's own wording.
+        assert!(
+            matches!(err.root(), HarnessError::Api { status: 529, body } if body == "boom"),
+            "{err:?}"
+        );
+    }
+
+    /// A refused connection is the most common alpha failure — the local gateway
+    /// is simply not running. It is retried, so it always reaches the annotation
+    /// path, and it must still be recognisable as a transport failure afterwards.
+    /// Formatting it into a string was reporting it as a bad Claude session.
+    #[tokio::test]
+    async fn a_dead_port_stays_classified_as_unreachable() {
+        // Bind then drop, so the port is real but nothing is accepting on it.
+        let addr = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(format!("http://{addr}"));
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        let err = client.stream(&request(), &mut sink).await.unwrap_err();
+
+        assert!(err.is_unreachable(), "{err:?}");
+        assert!(
+            !err.is_auth_problem(),
+            "must not send the user through a sign-in: {err}"
+        );
+        assert!(err.to_string().contains("failed after"), "{err}");
     }
 
     #[tokio::test]

@@ -744,3 +744,47 @@ fallback incorrectly and send operators on a wild goose chase.
 Impact: Documented in `memory/recurring-corrections.md`. Prefer neutral coding-agent
 system framing for Antigravity-backed models; avoid copying third-party agent identity
 blocks into `.zest/system.md` without checking.
+
+### 2026-08-03 — Zest bundles the gateway instead of asking users to install it
+
+Decision: Ship CLIProxyAPI (MIT) as a Tauri `externalBin` sidecar, provision its config on
+first run, and start it on demand. Do **not** implement native subscription OAuth. This is the
+deliberate revisit the 2026-08-01 provider-trait entry called for when it softened "no shipped
+runtime dependencies" from a rule to a target.
+
+Reason: Native OAuth was investigated and is worse than it looks. Anthropic moved the token
+endpoint from `console.anthropic.com/v1/oauth/token` to `platform.claude.com/v1/oauth/token`
+and the old one 404s; other projects are currently broken by exactly that. The `client_id`
+cannot be looked up — the standing advice is to extract it from your own binary, and tokens
+minted under one `client_id` cannot be refreshed under another. Worse, refreshing the shared
+`~/.cli-proxy-api` store from two processes can rotate a refresh token out from under the
+gateway, which still has to run for Codex regardless. Bundling reaches the same user-visible
+goal — nothing to install — without owning a contract that has already churned once this year.
+
+Impact: `crates/core/src/gateway.rs` owns supervision and provisioning. `cliproxy_exe()` finds
+the binary; `cliproxy_install()` still means "hand-installed, with its own config", and that
+config keeps winning so existing setups do not change behaviour. A generated key is written to
+`%APPDATA%\zest\gateway\` and exported as `ZEST_GATEWAY_KEY` only when the environment did not
+already provide one. `auth-dir` stays `~/.cli-proxy-api` so existing sign-ins are not orphaned.
+Login and serving now resolve through the same `gateway::runtime()`, so credentials cannot land
+in an `auth-dir` the serving process does not read. Sidecars are fetched by
+`scripts/fetch-gateway.ps1` with SHA256 verification against the release `checksums.txt`, and
+CLIProxyAPI's MIT text ships in `crates/desktop/licenses/`.
+
+### 2026-08-03 — Retry annotation wraps the error instead of reformatting it
+
+Decision: `HarnessError::Exhausted { attempts, source }` wraps the final failure. Classifiers
+(`is_auth_problem`, `is_unreachable`) ask `root()`, and callers ask predicates rather than
+matching variants.
+
+Reason: `annotate_attempts` used to format the error into a string, which destroyed
+`reqwest::Error::is_connect()`. Because a refused connection is transient it always exhausted
+its retries, so the flattening always happened — making the desktop's "can't reach the gateway"
+branch unreachable dead code, and sending every dead-gateway turn to the auth arm instead. The
+observed result was "Claude needs Connect again before chat" when nothing was listening on
+`:8317` and the session was perfectly fine. Appending to an `Api` body also left it unparseable
+as the JSON envelope it is, so the provider's own wording was lost too.
+
+Impact: `error.rs`, `anthropic/client.rs`, and `desktop/lib.rs`. The desktop probe now returns a
+typed `ProbeFailure` rather than a pre-formatted string, so "Connect again" appears only when
+`is_auth_problem()` is actually true. Regression tests cover a real dead port end to end.
