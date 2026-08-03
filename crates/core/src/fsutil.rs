@@ -121,6 +121,25 @@ fn replace_windows(temp: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Strip the Windows `\\?\` extended-path prefix for anything a person reads.
+///
+/// `canonicalize()` on Windows returns paths like `\\?\D:\Code\zest`. That form
+/// is correct for filesystem APIs and looks broken everywhere else, so it must
+/// not reach UI copy or an error message.
+pub fn display_path(path: &Path) -> String {
+    display_path_str(&path.display().to_string())
+}
+
+pub fn display_path_str(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +155,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn display_path_strips_windows_extended_prefix() {
+        assert_eq!(display_path_str(r"\\?\D:\Code\zest"), r"D:\Code\zest");
+        assert_eq!(
+            display_path_str(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+        assert_eq!(display_path_str(r"D:\Code\zest"), r"D:\Code\zest");
+        assert_eq!(display_path_str("/home/u/code"), "/home/u/code");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 pub mod approval;
+pub mod bash;
 pub mod delegate;
+pub mod edit_file;
 pub mod glob_files;
 pub mod grep;
 pub mod list_dir;
@@ -10,6 +12,7 @@ pub mod read_file;
 pub mod read_skill;
 pub mod sensitive;
 pub mod walk;
+pub mod web_search;
 pub mod write_file;
 
 use std::path::Path;
@@ -22,12 +25,15 @@ use crate::anthropic::types::ToolDef;
 use crate::skills::SkillSet;
 
 use self::approval::ToolRisk;
+use self::bash::Bash;
+use self::edit_file::EditFile;
 use self::glob_files::GlobFiles;
 use self::grep::Grep;
 use self::list_dir::ListDir;
 use self::prepared::PreparedToolCall;
 use self::read_file::ReadFile;
 use self::read_skill::ReadSkill;
+use self::web_search::WebSearch;
 use self::write_file::WriteFile;
 
 pub use self::outcome::{SkippedProvider, ToolMetadata, ToolOutcome, UsageDelta};
@@ -101,6 +107,9 @@ impl ToolRegistry {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.input_schema(),
+                // Set by the provider, which is the only layer that knows
+                // whether the endpoint understands caching.
+                cache_control: None,
             })
             .collect()
     }
@@ -141,7 +150,8 @@ impl ToolRegistry {
 }
 
 /// Register the project-scoped read-only tools (`read_file`, `list_dir`, `glob`,
-/// `grep`). Order is stable so prompt-cache prefixes stay warm.
+/// `grep`) plus network `web_search`. Order is stable so prompt-cache prefixes
+/// stay warm.
 pub fn register_read_tools(
     registry: &mut ToolRegistry,
     root: impl AsRef<Path>,
@@ -151,6 +161,7 @@ pub fn register_read_tools(
     registry.register(Arc::new(ListDir::new(root)?));
     registry.register(Arc::new(GlobFiles::new(root)?));
     registry.register(Arc::new(Grep::new(root)?));
+    registry.register(Arc::new(WebSearch::new()));
     Ok(())
 }
 
@@ -159,13 +170,32 @@ pub fn register_skill_tools(registry: &mut ToolRegistry, skills: Arc<RwLock<Skil
     registry.register(Arc::new(ReadSkill::new(skills)));
 }
 
-/// Register project-scoped write tools (`write_file`). Requires an [`Approver`]
-/// on the agent — without one, gated calls are denied.
+/// Register project-scoped write tools (`write_file`, `edit_file`). Requires an
+/// [`Approver`] on the agent — without one, gated calls are denied.
+///
+/// `edit_file` goes last so adding it shifts the cached prompt prefix exactly
+/// once rather than displacing every tool after it.
 pub fn register_write_tools(
     registry: &mut ToolRegistry,
     root: impl AsRef<Path>,
 ) -> std::io::Result<()> {
+    let root = root.as_ref();
     registry.register(Arc::new(WriteFile::new(root)?));
+    registry.register(Arc::new(EditFile::new(root)?));
+    Ok(())
+}
+
+/// Register `bash`, scoped to `root`.
+///
+/// Separate from the write tools because it is separately configurable and
+/// separately refusable: a front-end with no [`Approver`] should not offer it
+/// at all, since every non-allowlisted command would be auto-denied.
+pub fn register_exec_tools(
+    registry: &mut ToolRegistry,
+    root: impl AsRef<Path>,
+    settings: self::bash::BashSettings,
+) -> std::io::Result<()> {
+    registry.register(Arc::new(Bash::new(root)?.with_settings(settings)));
     Ok(())
 }
 
@@ -185,10 +215,54 @@ mod characterization {
         let dir = scratch("read-risk");
         let mut reg = ToolRegistry::new();
         register_read_tools(&mut reg, &dir).unwrap();
-        for name in ["read_file", "list_dir", "glob", "grep"] {
+        for name in ["read_file", "list_dir", "glob", "grep", "web_search"] {
             assert_eq!(reg.risk(name), Some(ToolRisk::Read), "{name}");
             assert!(!reg.risk(name).unwrap().requires_approval(), "{name}");
         }
+    }
+
+    #[test]
+    fn write_tools_register_in_cache_stable_order() {
+        let dir = scratch("write-order");
+        let mut reg = ToolRegistry::new();
+        register_read_tools(&mut reg, &dir).unwrap();
+        register_write_tools(&mut reg, &dir).unwrap();
+        assert_eq!(
+            reg.names(),
+            vec![
+                "read_file",
+                "list_dir",
+                "glob",
+                "grep",
+                "web_search",
+                "write_file",
+                "edit_file",
+            ]
+        );
+    }
+
+    #[test]
+    fn edit_tool_prepare_reuses_the_write_path() {
+        let dir = scratch("edit-prep");
+        std::fs::write(dir.join("f.txt"), "before\n").unwrap();
+        let mut reg = ToolRegistry::new();
+        register_write_tools(&mut reg, &dir).unwrap();
+        assert_eq!(reg.risk("edit_file"), Some(ToolRisk::Write));
+        let prepared = reg
+            .prepare(
+                "edit_file",
+                serde_json::json!({
+                    "path": "f.txt",
+                    "old_string": "before",
+                    "new_string": "after"
+                }),
+            )
+            .unwrap();
+        // Dispatch must come back to edit_file, not to write_file, even though
+        // the prepared kind is shared.
+        assert_eq!(prepared.tool_name, "edit_file");
+        assert_eq!(prepared.risk, ToolRisk::Write);
+        assert!(prepared.preview.diff.contains("+after"));
     }
 
     #[test]

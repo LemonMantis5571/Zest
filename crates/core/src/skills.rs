@@ -67,6 +67,28 @@ impl SkillSet {
         self.by_name.get(name)
     }
 
+    /// Look a skill up as a slash command.
+    ///
+    /// Case-insensitive, because the user is typing this rather than the model
+    /// emitting it. Names are unique by construction (`by_name` is a map, and
+    /// project skills replace user ones on a clash).
+    pub fn command(&self, typed: &str) -> Option<&Skill> {
+        let typed = typed.trim();
+        self.by_name.get(typed).or_else(|| {
+            self.by_name
+                .values()
+                .find(|s| s.name.eq_ignore_ascii_case(typed))
+        })
+    }
+
+    /// Names + descriptions for the composer's command panel.
+    pub fn command_names(&self) -> Vec<(String, String)> {
+        self.by_name
+            .values()
+            .map(|s| (s.name.clone(), s.description.clone()))
+            .collect()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Skill> {
         self.by_name.values()
     }

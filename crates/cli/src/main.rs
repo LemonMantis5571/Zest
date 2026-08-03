@@ -4,20 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use zest_core::{
-    detect_all, AuthStatus, Config, Ledger, ProviderConfig, Routing, RuntimeBuilder, StreamEvent,
-    Target, Thread, ThreadStore, ToolMetadata, DEFAULT_MODEL, DELEGATE_TOOL,
+    detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, Ledger,
+    ProviderConfig, Routing, RuntimeBuilder, StreamEvent, Target, Thread, ThreadStore,
+    ToolMetadata, ToolRisk, DEFAULT_MODEL, DEFAULT_SYSTEM, DELEGATE_TOOL,
 };
-
-const SYSTEM: &str = "\
-You are Zest, a coding agent running in a terminal inside the user's project. You \
-have project tools (list_dir, glob, grep, read_file, write_file) scoped to that \
-project. Explore and read files before answering questions about them rather than \
-inferring from names. write_file requires approval; the CLI currently auto-denies \
-writes (use the desktop app to allow them). Keep responses focused and concise.";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+    zest_core::load_env();
 
     match std::env::args().nth(1).as_deref() {
         // Terminal form of the launch picker.
@@ -65,9 +59,11 @@ async fn main() -> anyhow::Result<()> {
     let runtime = RuntimeBuilder::new(&root)
         .with_config(config)
         .with_effort(effort)
-        .with_system(SYSTEM)
+        .with_system(DEFAULT_SYSTEM)
         .enable_delegate(true)
         .register_write_tools(true)
+        .register_exec_tools(true)
+        .with_approver(Arc::new(PromptApprover))
         .build()?;
 
     let mut agent = runtime.agent;
@@ -87,8 +83,8 @@ async fn main() -> anyhow::Result<()> {
         println!("also configured: {}", others.join(", "));
         println!("delegate: enabled (multi-provider workers)");
     }
-    println!("tools: list_dir, glob, grep, read_file, write_file");
-    println!("note: write_file is gated; CLI auto-denies writes (desktop can Allow once)");
+    println!("tools: {}", agent.tool_names().join(", "));
+    println!("note: writes and non-read-only commands prompt here for y/N");
     println!("ctrl-c to quit\n");
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -177,6 +173,7 @@ async fn run_doctor_live() -> anyhow::Result<()> {
         .with_ledger(ledger.clone())
         .enable_delegate(false)
         .register_write_tools(false)
+        .register_exec_tools(false)
         .build()?;
 
     println!(
@@ -332,6 +329,7 @@ async fn run_doctor_dual() -> anyhow::Result<()> {
         .with_ledger(ledger.clone())
         .enable_delegate(true)
         .register_write_tools(false)
+        .register_exec_tools(false)
         .build()?;
 
     if runtime.registry.len() < 2 {
@@ -454,7 +452,7 @@ async fn run_doctor_dual() -> anyhow::Result<()> {
     thread.title = Some("doctor --live --dual".into());
     thread.agent_messages = agent.messages.clone();
     // Project a synthetic delegate card so v2 metadata round-trips.
-    thread.apply_assistant_start("a-doctor");
+    thread.apply_assistant_start("a-doctor", None);
     thread.apply_tool_start("a-doctor", "tool-delegate", DELEGATE_TOOL);
     thread.apply_tool_result(
         "a-doctor",
@@ -567,9 +565,14 @@ fn gateway_override() -> Option<Config> {
             default: Some(Target {
                 provider: "gateway".to_string(),
                 model: None,
+                effort: None,
             }),
             rules: Vec::new(),
+            // A one-off ZEST_BASE_URL override declares a single gateway, so
+            // there is never a second provider to delegate to.
+            delegation: false,
         },
+        tools: Default::default(),
     })
 }
 
@@ -622,6 +625,57 @@ fn compact(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+/// Terminal approval gate: print what is about to happen and read y/n.
+///
+/// Anything that is not an explicit yes is a no, including EOF — a piped or
+/// detached stdin must not be able to approve a write or a shell command by
+/// falling off the end of input.
+struct PromptApprover;
+
+#[async_trait::async_trait]
+impl Approver for PromptApprover {
+    async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
+        let ApprovalRequest {
+            tool_name,
+            risk,
+            preview,
+            ..
+        } = request;
+
+        println!("\n\x1b[33m? {tool_name}\x1b[0m {}", preview.summary);
+        if !preview.diff.trim().is_empty() {
+            // Diffs can be long; the preview is already bounded by the tool.
+            println!("\x1b[90m{}\x1b[0m", preview.diff.trim_end());
+        }
+        print!("  allow this {}? [y/N] ", risk_word(*risk));
+        let _ = std::io::stdout().flush();
+
+        let mut line = String::new();
+        let read = tokio::task::spawn_blocking(move || {
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf).map(|_| buf)
+        })
+        .await;
+        if let Ok(Ok(buf)) = read {
+            line = buf;
+        }
+
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => ApprovalDecision::AllowOnce,
+            _ => ApprovalDecision::Deny,
+        }
+    }
+}
+
+fn risk_word(risk: ToolRisk) -> &'static str {
+    match risk {
+        ToolRisk::Exec => "command",
+        ToolRisk::Write => "write",
+        ToolRisk::Sensitive => "sensitive read",
+        ToolRisk::Read => "call",
     }
 }
 

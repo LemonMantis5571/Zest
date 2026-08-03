@@ -115,7 +115,7 @@ pub fn detect_all() -> Vec<ProviderSlot> {
 /// spend. Otherwise fall back to the Codex CLI's `auth.json`.
 pub fn detect_codex() -> AuthStatus {
     if find_cliproxy().is_some() {
-        return if gateway_auth_present() {
+        return if gateway_auth_for("codex") {
             AuthStatus::Ready { account: None }
         } else {
             AuthStatus::NotLoggedIn {
@@ -169,10 +169,23 @@ pub fn gateway_auth_present() -> bool {
     false
 }
 
-/// Claude Code keeps credentials outside a plain file on some platforms (an OS
-/// keychain on macOS, not a readable file on Windows), so a missing file is not
-/// evidence of being logged out.
+/// Claude readiness for Zest's default path.
+///
+/// When a local CLIProxyAPI install is present, Ready means a Claude credential
+/// file exists under `~/.cli-proxy-api` (presence only). Otherwise fall back to
+/// the Claude Code CLI store — which on some platforms lives outside a readable
+/// file, so a missing credentials file is not treated as logged out.
 pub fn detect_claude() -> AuthStatus {
+    if find_cliproxy().is_some() {
+        return if gateway_auth_for("claude") {
+            AuthStatus::Ready { account: None }
+        } else {
+            AuthStatus::NotLoggedIn {
+                fix: "Connect in Zest (Claude sign-in)".into(),
+            }
+        };
+    }
+
     let Some(dir) = home_dir().map(|h| h.join(".claude")) else {
         return AuthStatus::Unknown {
             reason: "no home directory".into(),
@@ -193,6 +206,31 @@ pub fn detect_claude() -> AuthStatus {
             reason: "Claude is installed but stores credentials outside a readable file".into(),
         },
     }
+}
+
+/// True when `~/.cli-proxy-api` has a well-formed JSON whose name starts with
+/// `prefix` (e.g. `"claude"` → `claude-….json`). Presence only.
+fn gateway_auth_for(prefix: &str) -> bool {
+    let Some(dir) = home_dir().map(|h| h.join(".cli-proxy-api")) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    let needle = format!("{prefix}-");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.to_ascii_lowercase().starts_with(&needle) && well_formed_json(&path) == Some(true) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Antigravity keeps a data directory under `~/.gemini/antigravity`. The Gemini
@@ -256,23 +294,17 @@ pub fn login_command(provider_id: &str) -> Option<(&'static str, &'static [&'sta
     }
 }
 
-/// Resolve what Connect should spawn. Codex prefers a local CLIProxyAPI binary
-/// when `tools/CLIProxyAPI` (or `ZEST_CLIPROXY_PATH`) is available.
+/// Resolve what Connect should spawn. Codex and Claude prefer a local CLIProxyAPI
+/// binary when `tools/CLIProxyAPI` (or `ZEST_CLIPROXY_PATH`) is available.
 pub fn resolve_login(provider_id: &str) -> Option<LoginSpawn> {
     match provider_id {
         "codex" => {
-            if let Some((exe, config)) = find_cliproxy() {
-                return Some(LoginSpawn {
-                    program: exe,
-                    args: vec![
-                        "-config".into(),
-                        config.to_string_lossy().into_owned(),
-                        "-codex-login".into(),
-                    ],
-                    browser_title: "Sign in with ChatGPT",
-                    browser_body:
-                        "Finish in your browser. This window will update when you’re done.",
-                });
+            if let Some(spawn) = cliproxy_login(
+                "-codex-login",
+                "Sign in with ChatGPT",
+                "Finish in your browser. This window will update when you’re done.",
+            ) {
+                return Some(spawn);
             }
             Some(LoginSpawn {
                 program: PathBuf::from("codex"),
@@ -281,14 +313,41 @@ pub fn resolve_login(provider_id: &str) -> Option<LoginSpawn> {
                 browser_body: "Finish in your browser. This window will update when you’re done.",
             })
         }
-        "claude" => Some(LoginSpawn {
-            program: PathBuf::from("claude"),
-            args: vec!["login".into()],
-            browser_title: "Sign in with Claude",
-            browser_body: "Finish in your browser. This window will update when you’re done.",
-        }),
+        "claude" => {
+            if let Some(spawn) = cliproxy_login(
+                "-claude-login",
+                "Sign in with Claude",
+                "Finish in your browser. This window will update when you’re done.",
+            ) {
+                return Some(spawn);
+            }
+            Some(LoginSpawn {
+                program: PathBuf::from("claude"),
+                args: vec!["login".into()],
+                browser_title: "Sign in with Claude",
+                browser_body: "Finish in your browser. This window will update when you’re done.",
+            })
+        }
         _ => None,
     }
+}
+
+fn cliproxy_login(
+    flag: &str,
+    browser_title: &'static str,
+    browser_body: &'static str,
+) -> Option<LoginSpawn> {
+    let (exe, config) = find_cliproxy()?;
+    Some(LoginSpawn {
+        program: exe,
+        args: vec![
+            "-config".into(),
+            config.to_string_lossy().into_owned(),
+            flag.into(),
+        ],
+        browser_title,
+        browser_body,
+    })
 }
 
 /// Spawn the vendor/gateway login flow with no console window. Credentials stay

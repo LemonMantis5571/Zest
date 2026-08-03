@@ -12,7 +12,9 @@ use super::sensitive::is_sensitive_path;
 use super::Tool;
 
 const MAX_MATCHES: usize = 100;
-const MAX_FILE_BYTES: usize = 64 * 1024;
+/// Matched to `read_file`'s cap: a file the model can read whole must not have
+/// its later half be silently unsearchable.
+const MAX_FILE_BYTES: usize = 256 * 1024;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_LINE_CHARS: usize = 400;
 

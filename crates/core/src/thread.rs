@@ -160,6 +160,12 @@ pub enum StoredMessage {
         tools: Vec<ToolPart>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Slash command that produced this turn. Persisted so a reopened chat
+        /// still frames the answer the way it was framed when written —
+        /// otherwise an old plan silently degrades to plain text and looks
+        /// like a rendering bug. Optional, so older threads load unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
         #[serde(default)]
         streaming: bool,
     },
@@ -447,6 +453,7 @@ impl Thread {
             thinking: String::new(),
             tools: Vec::new(),
             error: None,
+            command: None,
             streaming: true,
         });
     }
@@ -464,8 +471,13 @@ impl Thread {
     }
 
     /// Create an empty streaming assistant row before the first delta.
-    pub fn apply_assistant_start(&mut self, message_id: &str) {
+    pub fn apply_assistant_start(&mut self, message_id: &str, command: Option<&str>) {
         self.ensure_assistant(message_id);
+        if let Some(name) = command {
+            if let Some(StoredMessage::Assistant { command, .. }) = self.find_mut(message_id) {
+                *command = Some(name.to_string());
+            }
+        }
         self.touch();
     }
 
@@ -751,6 +763,21 @@ impl ThreadStore {
         Ok(thread)
     }
 
+    /// Permanently remove a thread file. Missing files are success (idempotent).
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let tid = ThreadId::parse(id)
+            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        let path = self.path_for(&tid);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(HarnessError::Other(format!(
+                "delete thread {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
     pub fn list(&self) -> Result<Vec<ThreadSummary>> {
         self.list_filtered(None)
     }
@@ -1011,6 +1038,19 @@ mod characterization {
     }
 
     #[test]
+    fn store_delete_removes_file_and_is_idempotent() {
+        let root = scratch("delete");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = store.create_for_provider("codex").unwrap();
+        let path = store.dir().join(format!("{}.json", thread.id));
+        assert!(path.exists());
+        store.delete(&thread.id).unwrap();
+        assert!(!path.exists());
+        store.delete(&thread.id).unwrap(); // idempotent
+        assert!(store.delete("../outside").is_err());
+    }
+
+    #[test]
     fn migrates_legacy_thread_json_without_version() {
         let root = scratch("migrate");
         let store = ThreadStore::open(&root).unwrap();
@@ -1102,6 +1142,48 @@ mod characterization {
                     .unwrap()
                     .contains("approval interrupted"));
                 assert!(tools[1].approval_id.is_none());
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+    /// A plan reopened tomorrow must still look like a plan; otherwise the
+    /// card silently degrades to plain text and reads as a rendering bug.
+    #[test]
+    fn the_command_that_produced_a_turn_survives_a_reload() {
+        let mut thread = Thread::new();
+        thread.apply_assistant_start("a1", Some("plan"));
+        thread.apply_text_delta("a1", "# Plan");
+
+        let json = serde_json::to_string(&thread).unwrap();
+        let back: Thread = serde_json::from_str(&json).unwrap();
+        match &back.messages[0] {
+            StoredMessage::Assistant { command, text, .. } => {
+                assert_eq!(command.as_deref(), Some("plan"));
+                assert_eq!(text, "# Plan");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_turn_stores_no_command_and_older_threads_still_load() {
+        let mut thread = Thread::new();
+        thread.apply_assistant_start("a1", None);
+        let json = serde_json::to_string(&thread).unwrap();
+        // Omitted rather than null, so the field adds nothing to every message.
+        assert!(!json.contains("command"), "{json}");
+
+        // A thread written before the field existed must still deserialize —
+        // the field is new, and old threads on disk have never heard of it.
+        let legacy = r#"{"version":1,"id":"t1","createdAt":1,"updatedAt":1,
+"providerId":"codex","wireFormat":"anthropic_messages","agentMessages":[],
+"messages":[{"role":"assistant","id":"a1","text":"hi","thinking":"",
+"tools":[],"streaming":false}]}"#;
+        let back: Thread = serde_json::from_str(legacy).expect("older threads still load");
+        match &back.messages[0] {
+            StoredMessage::Assistant { command, text, .. } => {
+                assert_eq!(*command, None);
+                assert_eq!(text, "hi");
             }
             other => panic!("expected assistant, got {other:?}"),
         }
