@@ -41,7 +41,14 @@ export const APPROVAL_MODES: {
     label: "Accept edits",
     hint: "Apply file edits; still ask for commands",
   },
-  { id: "plan", label: "Plan", hint: "Read only — no writes, no commands" },
+  // The hint says what the mode produces, not just what it forbids: it runs the
+  // `plan` skill, so "read only" alone would undersell it and leave people
+  // typing `/plan` inside plan mode.
+  {
+    id: "plan",
+    label: "Plan",
+    hint: "Research and write a plan — no writes, no commands",
+  },
   {
     id: "auto",
     label: "Auto",
@@ -79,8 +86,19 @@ export type ToolPart = {
   metadata?: ToolMetadata;
 };
 
+/** Filename chips shown on a sent user bubble (UI-only; may be absent on reload). */
+export type UserAttachmentChip = {
+  name: string;
+  kind: string;
+};
+
 export type ChatMessage =
-  | { id: string; role: "user"; text: string }
+  | {
+      id: string;
+      role: "user";
+      text: string;
+      attachments?: UserAttachmentChip[];
+    }
   | {
       id: string;
       role: "assistant";
