@@ -268,6 +268,39 @@ pub struct Completion {
     pub limits: Option<RateLimitSnapshot>,
 }
 
+/// Send the smallest possible real turn, to find out whether this provider can
+/// actually serve one.
+///
+/// Presence of a credentials file is not the same as a working session: a
+/// gateway can hold an account it has put into cooldown, or a key can be
+/// revoked, and neither shows up on disk. The only honest way to say "signed
+/// in" is to have been served.
+///
+/// Costs a few tokens, so this belongs on an explicit action — after a sign-in,
+/// not on every render.
+pub async fn probe(provider: &dyn Provider, model: &str) -> Result<()> {
+    let request = TurnRequest {
+        model: model.to_string(),
+        system: None,
+        messages: vec![Message::user_text("hi")],
+        tools: Vec::new(),
+        max_tokens: 1,
+        effort: None,
+        // Thinking would ignore max_tokens: 1 and make the cheapest possible
+        // probe an expensive one.
+        thinking: false,
+        cancel: None,
+    };
+    let mut sink = |_: StreamEvent<'_>| {};
+    match provider.stream_turn(&request, &mut sink).await {
+        Ok(_) => Ok(()),
+        // `max_tokens` is the expected way for this to end: the turn was
+        // served, which is the entire question being asked.
+        Err(crate::error::HarnessError::StoppedEarly(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable identifier used by config, routing rules, and the usage ledger.
@@ -299,6 +332,16 @@ pub trait Provider: Send + Sync {
     /// Whether this provider can be used right now. Rendered by the launch
     /// picker, and consulted before routing a task here.
     fn auth_status(&self) -> AuthStatus;
+
+    /// Whether the endpoint honours Anthropic prompt caching (`cache_control`).
+    ///
+    /// Defaults to false, which is the honest answer for anything that is not
+    /// Anthropic's own API. A gateway fronting a GPT or Gemini backend has no
+    /// equivalent, and sending the field there is at best ignored and at worst
+    /// a 400.
+    fn supports_prompt_cache(&self) -> bool {
+        false
+    }
 
     /// The callback must be `Send`: provider futures are `Send` so that delegated
     /// sub-agents can run concurrently on the tokio runtime.

@@ -432,15 +432,20 @@ default = {{ provider = "codex", model = "gpt-a" }}
     assert!(err.to_string().contains("effort"), "unexpected: {err}");
 }
 
+/// Delegation is opt-in: two loaded providers plus routing rules are still not
+/// enough without `[routing] delegation = true`. Spending a second
+/// subscription is a decision, not a consequence of having configured one.
 #[test]
-fn runtime_registers_delegate_when_multiple_providers_load() {
+fn runtime_registers_delegate_only_when_delegation_is_enabled() {
     std::env::set_var("ZEST_ALPHA_MULTI_KEY", "present");
     let dir = scratch("multi");
-    let mut f = std::fs::File::create(dir.join("zest.toml")).unwrap();
-    use std::io::Write;
-    writeln!(
-        f,
-        r#"
+
+    let write_config = |delegation: bool| {
+        use std::io::Write;
+        let mut f = std::fs::File::create(dir.join("zest.toml")).unwrap();
+        writeln!(
+            f,
+            r#"
 [providers.a]
 kind = "gateway"
 base_url = "http://127.0.0.1:1"
@@ -455,26 +460,38 @@ model = "m-b"
 
 [routing]
 default = {{ provider = "a", model = "m-a" }}
+delegation = {delegation}
 
 [[routing.rules]]
 kind = "mechanical"
 provider = "b"
 "#
-    )
-    .unwrap();
-
-    let runtime = RuntimeBuilder::new(&dir)
-        .with_config(Config::find(&dir).unwrap())
-        .with_provider("a")
-        .enable_delegate(true)
-        .register_write_tools(false)
-        .build()
+        )
         .unwrap();
 
-    assert_eq!(runtime.registry.len(), 2);
+        RuntimeBuilder::new(&dir)
+            .with_config(Config::find(&dir).unwrap())
+            .with_provider("a")
+            .enable_delegate(true)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap()
+    };
+
+    let off = write_config(false);
+    assert_eq!(off.registry.len(), 2, "both providers loaded");
     assert!(
-        runtime.agent.tool_names().contains(&DELEGATE_TOOL),
-        "desktop/CLI must expose delegate when multi-provider: {:?}",
-        runtime.agent.tool_names()
+        !off.agent.tool_names().contains(&DELEGATE_TOOL),
+        "delegate must stay hidden while delegation is off: {:?}",
+        off.agent.tool_names()
+    );
+
+    let on = write_config(true);
+    assert_eq!(on.registry.len(), 2);
+    assert!(
+        on.agent.tool_names().contains(&DELEGATE_TOOL),
+        "opting in must expose delegate: {:?}",
+        on.agent.tool_names()
     );
 }

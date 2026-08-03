@@ -48,6 +48,29 @@ pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// A cache breakpoint on the **last** tool covers the whole tool list, which
+    /// is the largest fixed prefix of every request. Omitted entirely unless the
+    /// provider says it understands caching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<Value>,
+}
+
+/// `{"type": "ephemeral"}` — the only cache_control shape in use.
+pub fn ephemeral_cache_control() -> Value {
+    json!({ "type": "ephemeral" })
+}
+
+/// A system prompt as a single cacheable text block.
+///
+/// The API accepts `system` as either a bare string or an array of blocks, and
+/// only the array form can carry `cache_control`. Callers that do not cache keep
+/// sending the string, so nothing changes on providers that would reject it.
+pub fn cached_system_blocks(text: &str) -> Value {
+    json!([{
+        "type": "text",
+        "text": text,
+        "cache_control": ephemeral_cache_control(),
+    }])
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,8 +106,11 @@ pub struct Request {
     /// on Opus 5, so a value tuned for text alone will truncate mid-answer.
     pub max_tokens: u32,
     pub stream: bool,
+    /// Either a bare string or an array of text blocks — see
+    /// [`cached_system_blocks`]. Kept as `Value` so the provider decides which
+    /// shape the endpoint gets.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Value>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,

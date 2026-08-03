@@ -15,5 +15,5 @@ path = "src/main.rs"
 [dependencies]
 zest-core = { path = "../core" }
 anyhow.workspace = true
-dotenvy = "0.15"
+async-trait.workspace = true
 tokio.workspace = true

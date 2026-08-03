@@ -12,10 +12,14 @@
 //! `Agent` no longer carries a flag for it.
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use super::{catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
 use crate::anthropic::client::AnthropicClient;
-use crate::anthropic::types::{OutputConfig, Request, Thinking, DEFAULT_MODEL};
+use crate::anthropic::types::{
+    cached_system_blocks, ephemeral_cache_control, Message, OutputConfig, Request, Thinking,
+    DEFAULT_MODEL,
+};
 use crate::auth::AuthStatus;
 use crate::error::Result;
 
@@ -142,18 +146,51 @@ impl Provider for AnthropicProvider {
         }
     }
 
+    /// Native Anthropic only. `extensions` already means "this really is the
+    /// Messages API, not a translation layer", which is exactly the condition
+    /// under which `cache_control` means anything.
+    fn supports_prompt_cache(&self) -> bool {
+        self.extensions
+    }
+
     async fn stream_turn(
         &self,
         req: &TurnRequest,
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
     ) -> Result<Completion> {
+        let caching = self.supports_prompt_cache();
+
+        let mut tools = req.tools.clone();
+        // One breakpoint on the last tool covers the entire tool list — the
+        // largest fixed prefix any request has.
+        if caching {
+            if let Some(last) = tools.last_mut() {
+                last.cache_control = Some(ephemeral_cache_control());
+            }
+        }
+
+        let system = req.system.as_ref().map(|text| {
+            if caching {
+                // A second breakpoint here extends the cached region to cover
+                // tools + system, which together are stable for a whole session.
+                cached_system_blocks(text)
+            } else {
+                Value::String(text.clone())
+            }
+        });
+
+        let mut messages = req.messages.clone();
+        if caching {
+            mark_conversation_prefix(&mut messages);
+        }
+
         let wire = Request {
             model: req.model.clone(),
             max_tokens: req.max_tokens,
             stream: true,
-            system: req.system.clone(),
-            messages: req.messages.clone(),
-            tools: req.tools.clone(),
+            system,
+            messages,
+            tools,
             thinking: (self.extensions && req.thinking).then(Thinking::default),
             output_config: match (self.extensions, req.effort.as_ref()) {
                 (true, Some(effort)) => Some(OutputConfig {
@@ -166,5 +203,147 @@ impl Provider for AnthropicProvider {
         self.client
             .stream_cancellable(&wire, on_event, req.cancel.as_ref())
             .await
+    }
+}
+
+/// Put a rolling breakpoint near the end of the conversation so the history
+/// that already exists is read from cache instead of reprocessed every turn.
+///
+/// It goes on the **second-to-last** message, not the last. The last message is
+/// the one that just changed; a breakpoint there would write a new cache entry
+/// every turn and read none of it back. One message earlier is the newest point
+/// that was also present on the previous request.
+fn mark_conversation_prefix(messages: &mut [Message]) {
+    let Some(index) = messages.len().checked_sub(2) else {
+        return;
+    };
+    let Some(block) = messages[index].content.last_mut() else {
+        return;
+    };
+    // Only object-shaped blocks take cache_control. Thinking blocks carry a
+    // signature that must round-trip byte for byte, so never touch those.
+    let Some(map) = block.as_object_mut() else {
+        return;
+    };
+    if map.get("type").and_then(Value::as_str) == Some("thinking") {
+        return;
+    }
+    map.insert("cache_control".into(), ephemeral_cache_control());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn conversation(n: usize) -> Vec<Message> {
+        (0..n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Message::user_text(format!("u{i}"))
+                } else {
+                    Message::assistant(vec![json!({ "type": "text", "text": format!("a{i}") })])
+                }
+            })
+            .collect()
+    }
+
+    fn cached_indices(messages: &[Message]) -> Vec<usize> {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.content.iter().any(|b| b.get("cache_control").is_some()))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn rolling_breakpoint_lands_on_the_second_to_last_message() {
+        // The last message is the one that just changed. A breakpoint there
+        // would write a fresh entry every turn and never read one back.
+        let mut messages = conversation(5);
+        mark_conversation_prefix(&mut messages);
+        assert_eq!(cached_indices(&messages), vec![3]);
+    }
+
+    #[test]
+    fn a_single_message_conversation_gets_no_breakpoint() {
+        let mut messages = conversation(1);
+        mark_conversation_prefix(&mut messages);
+        assert!(cached_indices(&messages).is_empty());
+        let mut empty: Vec<Message> = Vec::new();
+        mark_conversation_prefix(&mut empty);
+    }
+
+    #[test]
+    fn a_thinking_block_is_never_annotated() {
+        // Thinking blocks carry a signature that must echo back byte for byte;
+        // adding a key to one would invalidate the next request.
+        let mut messages = vec![
+            Message::assistant(vec![
+                json!({ "type": "thinking", "thinking": "hmm", "signature": "sig" }),
+            ]),
+            Message::user_text("next"),
+        ];
+        mark_conversation_prefix(&mut messages);
+        assert!(cached_indices(&messages).is_empty());
+        assert_eq!(messages[0].content[0]["signature"], "sig");
+    }
+
+    #[test]
+    fn gateway_sends_a_plain_string_system_and_no_cache_control() {
+        let provider =
+            AnthropicProvider::gateway("codex", "k".into(), "http://x", "gpt-5.6-sol").unwrap();
+        assert!(!provider.supports_prompt_cache());
+    }
+
+    #[test]
+    fn native_provider_reports_cache_support() {
+        let provider = AnthropicProvider::native("k".into()).unwrap();
+        assert!(provider.supports_prompt_cache());
+    }
+
+    /// Serializing the wire request is the only way to prove the shape the API
+    /// actually receives, including that untouched fields stay absent.
+    #[test]
+    fn cached_system_serializes_as_a_block_array() {
+        let plain = Request {
+            model: "m".into(),
+            max_tokens: 1,
+            stream: true,
+            system: Some(Value::String("hello".into())),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            thinking: None,
+            output_config: None,
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert_eq!(json["system"], json!("hello"));
+
+        let cached = Request {
+            system: Some(cached_system_blocks("hello")),
+            ..plain
+        };
+        let json = serde_json::to_value(&cached).unwrap();
+        assert_eq!(json["system"][0]["text"], json!("hello"));
+        assert_eq!(
+            json["system"][0]["cache_control"]["type"],
+            json!("ephemeral")
+        );
+    }
+
+    #[test]
+    fn tool_defs_omit_cache_control_entirely_when_unset() {
+        let def = crate::anthropic::types::ToolDef {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: json!({}),
+            cache_control: None,
+        };
+        let json = serde_json::to_value(&def).unwrap();
+        assert!(
+            json.get("cache_control").is_none(),
+            "a gateway must not see the field at all: {json}"
+        );
     }
 }
