@@ -45,7 +45,8 @@ component, no accounts.
   assumptions.
 - **`zest`** — terminal front-end. One consumer of the core.
 - **`zest-desktop`** — Tauri shell: provider picker, Connect (vendor OAuth spawn), and chat session
-  UI. Webview is a Vite + React + shadcn build under `crates/desktop/ui/` (Node is build/dev only).
+  UI (projects sidebar, attachments, approvals/diffs, context meter). Webview is a Vite + React +
+  shadcn build under `crates/desktop/ui/` (Node is build/dev only).
 - **Anthropic Messages API** — the wire protocol implemented natively today, over raw HTTP + SSE.
   No SDK.
 
@@ -77,8 +78,11 @@ Planned, and the actual point of the project:
 - **No shipped runtime dependencies, long term.** A proxy is acceptable while bootstrapping
   providers and should not survive into a release; supervising a second process is the problem a
   single binary exists to avoid.
-- **The permission layer gates dangerous tools.** `write_file` ships with an approval gate and
-  atomic replace; `bash` / exec stay disabled until an OS-backed Windows sandbox exists.
+- **The permission layer gates dangerous tools.** `write_file` and `edit_file` ship with an
+  approval gate and atomic replace. `bash` ships behind the same gate: a small set of
+  genuinely read-only, metacharacter-free commands (`cargo check`, `git status`, …) runs
+  unattended; everything else shows the exact command line and waits. There is no OS sandbox
+  — see `memory/decisions.md` for why that bar was dropped rather than waited on.
 
 ## Preferred Style
 
