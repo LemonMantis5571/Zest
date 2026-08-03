@@ -788,3 +788,39 @@ as the JSON envelope it is, so the provider's own wording was lost too.
 Impact: `error.rs`, `anthropic/client.rs`, and `desktop/lib.rs`. The desktop probe now returns a
 typed `ProbeFailure` rather than a pre-formatted string, so "Connect again" appears only when
 `is_auth_problem()` is actually true. Regression tests cover a real dead port end to end.
+
+### 2026-08-03 — The profile shows two reaches, and says which is which
+
+Decision: The profile screen derives chat statistics from thread files (retroactive) and token
+statistics from new daily ledger buckets (forward-only), and never blends them. `DayPoint.tokens`
+is `Option<u64>`, so "this day predates metering" is a different value from "this day spent
+nothing". The heatmap defaults to chat activity, and the token view is disabled until there is a
+metered day.
+
+Reason: The obvious implementation — one number per day — would have shown a year of empty cells
+on every existing install and called it zero usage. The ledger only ever held cumulative
+per-provider totals, so there is no token history to backfill and inventing one would be a lie
+about spend. Chat history, by contrast, is already on disk in every thread file.
+
+Impact: `crates/core/src/profile.rs` is pure and takes `today` as an argument, so streak
+arithmetic is tested without a clock. `Ledger` gained `daily: BTreeMap<String, DayUsage>` capped
+at `DAILY_RETENTION_DAYS` (400); an older ledger deserializes with it empty. Lifetime totals stay
+larger than the sum of the daily buckets on an existing install, which is correct rather than a
+disagreement, and the UI labels them differently.
+
+### 2026-08-03 — Day boundaries come from the webview, not from UTC
+
+Decision: `usage::set_local_offset_minutes` is a process global that the desktop sets at startup
+from `-new Date().getTimezoneOffset()`. Every day key — heatmap cells, streaks, which bucket a
+turn lands in — is computed against it. The CLI leaves it at zero (UTC).
+
+Reason: The ledger is written from deep inside the agent loop, which knows nothing about the
+user's clock, and Rust's standard library has no local timezone. Bucketing in UTC would end this
+user's day at 6pm: evening work would land on tomorrow and a streak would look broken. A date
+crate was not worth it for one function, so `civil_from_days` (Hinnant) is written out with tests
+covering the epoch, leap days, and the 1900/2000/2100 century rules.
+
+Impact: `usage.rs` owns the day helpers and `profile.rs` uses them, so the persisted buckets and
+the derived streaks agree on where a day starts. The front end formats bare ISO dates from local
+parts rather than `new Date(iso)`, which would parse them as UTC midnight and show the previous
+day west of Greenwich.

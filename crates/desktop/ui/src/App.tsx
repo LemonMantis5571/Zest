@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AuthSuccess } from "@/components/AuthSuccess";
 import { ChatScreen } from "@/components/ChatScreen";
+import { ProfileScreen } from "@/components/ProfileScreen";
 import { ProviderPicker } from "@/components/ProviderPicker";
 import { WaitingScreen } from "@/components/WaitingScreen";
 import { toast, Toaster } from "@/components/ui/toast";
@@ -44,7 +45,7 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type Screen = "boot" | "picker" | "waiting" | "auth-success" | "chat";
+type Screen = "boot" | "picker" | "waiting" | "auth-success" | "chat" | "profile";
 
 function isReady(row: ProviderRow) {
   // Soft memory: a recent failed probe beats filesystem "Signed in".
@@ -179,6 +180,8 @@ const backend = getBackend();
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("boot");
+  /** Bumped to ask ChatScreen to open Settings at the User section. */
+  const [settingsRequest, setSettingsRequest] = useState(0);
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pickerError, setPickerError] = useState<string | null>(null);
@@ -509,6 +512,11 @@ export default function App() {
   useEffect(() => {
     if (bootStarted.current) return;
     bootStarted.current = true;
+
+    // Before any turn is recorded: core buckets usage by day, and only the
+    // webview knows what day it is here. Failing is not worth blocking boot —
+    // the cost is buckets landing on UTC days instead of local ones.
+    void backend.setLocalOffset().catch(() => {});
 
     if (backend.mode === "fixture") {
       void (async () => {
@@ -1243,6 +1251,24 @@ export default function App() {
             approvalMode={approvalModeState}
             onApprovalModeChange={onApprovalModeChange}
             onBuildPlan={() => void onBuildPlan()}
+            onOpenProfile={() => setScreen("profile")}
+            settingsRequest={settingsRequest}
+          />
+        ) : null}
+
+        {screen === "profile" ? (
+          <ProfileScreen
+            profile={profile}
+            providerLabel={
+              providers.find((p) => p.id === session?.provider)?.label ?? session?.provider
+            }
+            onBack={() => setScreen("chat")}
+            onEditProfile={() => {
+              // Editing name and avatar stays in Settings; the profile screen
+              // reports, it does not duplicate the form.
+              setScreen("chat");
+              setSettingsRequest((n) => n + 1);
+            }}
           />
         ) : null}
       </div>
