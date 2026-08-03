@@ -1,32 +1,33 @@
-# React + TypeScript + Vite
+# Zest desktop UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Vite + React + TypeScript webview for `zest-desktop` (Tauri). Built assets land in `dist/` and are
+loaded by the Rust shell.
 
-Currently, two official plugins are available:
+## Commands
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+From repo root (preferred):
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```powershell
+npm install
+npm run ui:build      # tsc + vite → dist/
+npm run ui:test
+npm run desktop:dev   # Tauri + Vite HMR
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+From this directory: `npm run build` / `npm test` / `npm run lint`.
+
+## Layout notes
+
+- **Projects sidebar** — `ChatHistorySidebar` + `list_chat_projects` / `open_project_chat`
+- **Chat** — `ChatScreen`, `chatReducer`, streaming events, approvals, `DiffViewer`
+- **Composer** — attachments, paste images, folder/branch/context footer
+- **Settings** — provider, user profile, system prompt, skills, usage
+- **Backend** — `lib/backend.ts` switches Tauri invoke vs `?fixture=1` offline smoke
+
+## Conventions
+
+- No Base UI Menu/Portal (WebView crash risk) — plain positioned panels
+- Interactive controls: `cursor-pointer` (global CSS + shared `Button`)
+- Generated DTOs under `src/lib/generated/` (see that folder’s README for ts-rs)
+
+This is not a standalone Vite template app; treat it as part of the Zest desktop crate.

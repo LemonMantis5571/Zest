@@ -2,12 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  ApprovalChoice,
+  ApprovalMode,
+  CommandView,
+  RoutingRule,
+  RoutingView,
+  AttachmentInput,
   ChatEvent,
+  ContextUsage,
   LoginStarted,
+  PreparedAttachment,
   ProviderRow,
   SessionInfo,
+  ProjectChats,
   ThreadSummary,
   UsageSnapshot,
+  UserProfile,
+  WorkspacePickResult,
 } from "./types";
 
 export function listProviders() {
@@ -51,6 +62,22 @@ export function listThreads() {
   return invoke<ThreadSummary[]>("list_threads");
 }
 
+export function listChatProjects() {
+  return invoke<ProjectChats[]>("list_chat_projects");
+}
+
+export function openProjectChat(options: {
+  root: string;
+  threadId?: string | null;
+  newThread?: boolean;
+}) {
+  return invoke<SessionInfo>("open_project_chat", {
+    root: options.root,
+    threadId: options.threadId ?? null,
+    newThread: options.newThread ?? null,
+  });
+}
+
 export function loadThread(id: string) {
   return invoke<SessionInfo>("load_thread", { id });
 }
@@ -59,16 +86,94 @@ export function newThread() {
   return invoke<SessionInfo>("new_thread");
 }
 
-export function sendMessage(text: string) {
-  return invoke<void>("send_message", { text });
+export function deleteThread(id: string, projectPath?: string | null) {
+  return invoke<SessionInfo>("delete_thread", {
+    id,
+    projectPath: projectPath ?? null,
+  });
+}
+
+export function sendMessage(text: string, attachments?: AttachmentInput[]) {
+  return invoke<void>("send_message", {
+    text,
+    attachments: attachments ?? null,
+  });
+}
+
+export function getWorkspaceFolder() {
+  return invoke<string>("get_workspace_folder");
+}
+
+export function pickWorkspaceFolder() {
+  return invoke<WorkspacePickResult | null>("pick_workspace_folder");
+}
+
+export function pickFiles() {
+  return invoke<PreparedAttachment[]>("pick_files");
+}
+
+export function preparePastedImage(options: {
+  dataBase64: string;
+  mediaType: string;
+  name?: string;
+}) {
+  return invoke<PreparedAttachment>("prepare_pasted_image", {
+    dataBase64: options.dataBase64,
+    mediaType: options.mediaType,
+    name: options.name ?? null,
+  });
+}
+
+export function gitBranch() {
+  return invoke<string | null>("git_branch");
+}
+
+export function contextUsage() {
+  return invoke<ContextUsage>("context_usage");
+}
+
+export function getUserProfile() {
+  return invoke<UserProfile>("get_user_profile");
+}
+
+export function setUserProfile(profile: UserProfile) {
+  return invoke<UserProfile>("set_user_profile", { profile });
 }
 
 export function cancelTurn() {
   return invoke<void>("cancel_turn");
 }
 
-export function resolveApproval(approvalId: string, allow: boolean) {
-  return invoke<void>("resolve_approval", { approvalId, allow });
+export function resolveApproval(approvalId: string, decision: ApprovalChoice) {
+  return invoke<void>("resolve_approval", { approvalId, decision });
+}
+
+export function setApprovalMode(mode: ApprovalMode) {
+  return invoke<string>("set_approval_mode", { mode });
+}
+
+export function verifyProvider(id: string) {
+  return invoke<void>("verify_provider", { id });
+}
+
+export function listCommands() {
+  return invoke<CommandView[]>("list_commands");
+}
+
+export function routingConfig() {
+  return invoke<RoutingView>("routing_config");
+}
+
+export function suggestedRouting() {
+  return invoke<RoutingRule[]>("suggested_routing");
+}
+
+export function setRoutingConfig(delegation: boolean, rules: RoutingRule[]) {
+  return invoke<RoutingView>("set_routing_config", { delegation, rules });
+}
+
+export function approvalMode() {
+  return invoke<string>("approval_mode");
 }
 
 export function endSession() {

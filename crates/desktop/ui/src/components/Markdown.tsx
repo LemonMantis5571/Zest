@@ -1,9 +1,11 @@
 import type { Components } from "react-markdown";
-import type { ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { CodeBlock } from "@/components/CodeBlock";
+import { linkClassName } from "@/lib/linkify";
+import { splitBlocks } from "@/lib/markdownBlocks";
 import { cn } from "@/lib/utils";
 
 function codeText(children: ReactNode): string {
@@ -27,12 +29,7 @@ const components: Components = {
   ),
   em: ({ children }) => <em className="italic">{children}</em>,
   a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="text-primary underline-offset-2 hover:underline"
-    >
+    <a href={href} target="_blank" rel="noreferrer" className={linkClassName}>
       {children}
     </a>
   ),
@@ -112,8 +109,37 @@ type Props = {
   className?: string;
 };
 
-/** GFM markdown for assistant (and muted thinking) bodies. */
-export function Markdown({ children, className }: Props) {
+/**
+ * One top-level markdown block.
+ *
+ * Memoized separately from its neighbours: while a message streams, only its
+ * trailing block changes, so every settled block above skips re-parsing
+ * entirely. That is the difference between O(n²) and O(n) over a long answer.
+ */
+const Block = memo(function Block({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+/**
+ * GFM markdown for assistant (and muted thinking) bodies.
+ *
+ * Memoized twice over, and both levels are load-bearing rather than
+ * micro-optimisations:
+ *
+ * - **This component** skips messages the reducer did not touch. Without it one
+ *   streaming message re-parses every *finished* message in the transcript on
+ *   every frame, so a long chat degrades as it grows.
+ * - **Each block** skips the settled part of the message being streamed. A
+ *   single growing string means re-parsing the whole document per frame; blocks
+ *   mean re-parsing only the tail.
+ */
+export const Markdown = memo(function Markdown({ children, className }: Props) {
+  const blocks = useMemo(() => splitBlocks(children), [children]);
+
   return (
     <div
       className={cn(
@@ -121,9 +147,9 @@ export function Markdown({ children, className }: Props) {
         className
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {children}
-      </ReactMarkdown>
+      {blocks.map((block) => (
+        <Block key={block.key} text={block.text} />
+      ))}
     </div>
   );
-}
+});

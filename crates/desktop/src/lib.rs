@@ -4,45 +4,48 @@
 //! Chat drives the same `Agent` loop as the CLI, streaming events into the UI.
 //! Thread projection is persisted under `<workspace>/.zest/threads/`.
 
+mod attachments;
+mod context_meter;
 mod session;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde::Serialize;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
+use zest_core::routing_edit::{routing_document, validate_rules, RuleInput};
 use zest_core::{
-    can_start_login, compose_system, descriptor_for_picker_id, descriptor_from_config, detect_all,
-    load_custom_system, new_id, save_custom_system, start_login as core_start_login,
-    truncate_chars, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, HarnessError,
-    Ledger, PersistPriority, PersistWorker, ProjectSessionState, ProviderSlot, RuntimeBuilder,
-    SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadLoadError, ThreadStore,
-    ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
+    can_start_login, compose_system_with_docs, descriptor_for_picker_id, descriptor_from_config,
+    detect_all, display_path, env_context, load_custom_system, load_project_docs, new_id,
+    save_custom_system, start_login as core_start_login, truncate_chars, ApprovalDecision,
+    ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, Config, HarnessError,
+    Ledger, PersistPriority, PersistWorker, ProjectSessionState, ProviderRegistry, ProviderSlot,
+    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadLoadError,
+    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
 };
 
+use attachments::{
+    build_user_content, format_display_message, has_images, has_usable_attachment,
+    prepare_image_bytes, prepare_paths, AttachmentInput, PreparedAttachment,
+};
+use context_meter::{estimate_context, ContextUsageView};
 use session::{Session, SessionController, SessionError};
 
 /// Providers shown in the launch picker. BYOK stays terminal-only for now.
 const PICKER_IDS: &[&str] = &["codex", "claude", "antigravity"];
 
-const SYSTEM: &str = "\
-You are Zest, a coding agent running in a desktop app inside the user's project. You \
-have project tools (list_dir, glob, grep, read_file, write_file) scoped to that \
-project. Explore and read files before answering questions about them rather than \
-inferring from names. write_file requires the user to Allow once before it runs. \
-Keep responses focused and concise.";
-
 /// Turn-scoped pending approval waiters (not persisted).
 struct ApprovalHub {
     /// Active turn that may own waiters. Resolves outside this turn are rejected.
     active_turn: Mutex<Option<String>>,
-    senders: Mutex<HashMap<String, oneshot::Sender<bool>>>,
-    receivers: Mutex<HashMap<String, oneshot::Receiver<bool>>>,
+    senders: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
+    receivers: Mutex<HashMap<String, oneshot::Receiver<ApprovalDecision>>>,
 }
 
 impl ApprovalHub {
@@ -70,21 +73,23 @@ impl ApprovalHub {
         }
     }
 
-    async fn wait(&self, approval_id: &str) -> bool {
+    /// Anything that is not an explicit allow — a dropped sender, a poisoned
+    /// lock, an unknown id — resolves to Deny.
+    async fn wait(&self, approval_id: &str) -> ApprovalDecision {
         let rx = {
             let mut receivers = match self.receivers.lock() {
                 Ok(g) => g,
-                Err(_) => return false,
+                Err(_) => return ApprovalDecision::Deny,
             };
             receivers.remove(approval_id)
         };
         match rx {
-            Some(rx) => rx.await.unwrap_or(false),
-            None => false,
+            Some(rx) => rx.await.unwrap_or(ApprovalDecision::Deny),
+            None => ApprovalDecision::Deny,
         }
     }
 
-    fn resolve(&self, approval_id: &str, allow: bool) -> Result<(), String> {
+    fn resolve(&self, approval_id: &str, decision: ApprovalDecision) -> Result<(), String> {
         let turn_alive = self
             .active_turn
             .lock()
@@ -100,7 +105,7 @@ impl ApprovalHub {
         let tx = senders
             .remove(approval_id)
             .ok_or_else(|| "no pending approval with that id".to_string())?;
-        let _ = tx.send(allow);
+        let _ = tx.send(decision);
         Ok(())
     }
 
@@ -108,7 +113,7 @@ impl ApprovalHub {
     fn clear(&self) {
         if let Ok(mut senders) = self.senders.lock() {
             for (_, tx) in senders.drain() {
-                let _ = tx.send(false);
+                let _ = tx.send(ApprovalDecision::Deny);
             }
         }
         if let Ok(mut receivers) = self.receivers.lock() {
@@ -131,18 +136,25 @@ impl Approver for HubApprover {
     }
 
     async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
-        if self.hub.wait(&request.approval_id).await {
-            ApprovalDecision::AllowOnce
-        } else {
-            ApprovalDecision::Deny
-        }
+        self.hub.wait(&request.approval_id).await
     }
 }
+
+/// The desktop opens in Auto: writes apply, allowlisted commands run, anything
+/// else asks. Core's own default is Manual — see `ApprovalMode` — because a
+/// library with no wired-up gate must not be permissive. Choosing the product
+/// default here is the front-end's job.
+const DESKTOP_DEFAULT_MODE: ApprovalMode = ApprovalMode::Auto;
 
 struct AppState {
     sessions: SessionController,
     approvals: Arc<ApprovalHub>,
     persist: Mutex<Option<PersistWorker>>,
+    /// Preferred project root (folder picker / last-workspace). Falls back to cwd.
+    workspace_root: Mutex<Option<PathBuf>>,
+    /// Mode + session grants. Outlives any one project so switching folders
+    /// does not silently reset the user's chosen permission level.
+    policy: Arc<Mutex<ApprovalPolicy>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,6 +227,28 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         None => (false, descriptor_for_picker_id(slot.id)),
     };
 
+    // Being signed in is not the same as being reachable. A vendor CLI can hold
+    // a perfectly good session for a provider this project has no entry for,
+    // and offering it as ready meant Continue failed *after* the click with
+    // "not configured". Say so on the row instead.
+    let (status_kind, status_label, detail) = if configured {
+        (status_kind, status_label, detail)
+    } else {
+        let where_to = zest_core::user_config_path()
+            .map(|p| display_path(p.as_path()))
+            .unwrap_or_else(|| "~/.zest/zest.toml".to_string());
+        (
+            "unconfigured".to_string(),
+            "Not configured".to_string(),
+            match slot.status {
+                AuthStatus::Ready { .. } => {
+                    format!("Signed in, but no provider entry — add one to {where_to}")
+                }
+                _ => format!("No provider entry in zest.toml or {where_to}"),
+            },
+        )
+    };
+
     ProviderView {
         id: slot.id.to_string(),
         label: slot.label.to_string(),
@@ -222,7 +256,9 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         status_kind,
         status_label,
         detail,
-        selectable: slot.status.selectable(),
+        // Both halves are required: a signed-in provider with no config cannot
+        // serve a turn, and a configured provider with no sign-in cannot either.
+        selectable: slot.status.selectable() && configured,
         can_connect: can_start_login(slot.id),
         configured,
         default_model: descriptor.default_model,
@@ -368,6 +404,11 @@ enum ChatEvent {
         thread_id: String,
         turn_id: String,
         message_id: String,
+        /// Slash command that produced this turn, when one did. The UI titles
+        /// the answer with it — Rust decides, because only Rust knows whether
+        /// a leading `/token` matched a real skill.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
     },
     TextDelta {
         session_id: String,
@@ -430,6 +471,11 @@ enum ChatEvent {
         turn_id: String,
         message_id: String,
         message: String,
+        /// Provider to offer a Reconnect for, when the failure is one that only
+        /// signing in again can fix. `None` for everything else — a Reconnect
+        /// button on a rate limit would send the user through OAuth for nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reconnect_provider: Option<String>,
     },
     Cancelled {
         session_id: String,
@@ -467,16 +513,16 @@ fn map_session_err(e: SessionError) -> String {
     desktop_err(e.code(), e.message())
 }
 
-fn load_workspace_config() -> Config {
-    match workspace_root() {
+fn load_workspace_config(state: &AppState) -> Config {
+    match resolve_workspace_root(state) {
         Ok(root) => Config::find(&root).unwrap_or_else(|_| Config::env_fallback()),
         Err(_) => Config::env_fallback(),
     }
 }
 
 #[tauri::command]
-fn list_providers() -> Vec<ProviderView> {
-    let config = load_workspace_config();
+fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
+    let config = load_workspace_config(&state);
     detect_all()
         .iter()
         .filter(|s| PICKER_IDS.contains(&s.id))
@@ -485,13 +531,40 @@ fn list_providers() -> Vec<ProviderView> {
 }
 
 #[tauri::command]
-fn refresh_providers() -> Vec<ProviderView> {
-    list_providers()
+fn refresh_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
+    list_providers(state)
 }
 
 #[tauri::command]
 fn usage_snapshot() -> UsageSnapshot {
     Ledger::load().snapshot()
+}
+
+/// Send one minimal turn to prove the provider can actually serve.
+///
+/// A credentials file on disk is not a working session — the gateway can hold
+/// an account it has put in cooldown, and that never shows up locally. Called
+/// after a sign-in so "Signed in" is something observed rather than assumed.
+/// Costs a few tokens, which is why it is not on every render.
+#[tauri::command]
+async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    zest_core::load_env();
+    let root = resolve_workspace_root(&state)?;
+    let config = Config::find(&root).map_err(|e| e.to_string())?;
+    let (registry, skipped) = ProviderRegistry::from_config(&config);
+
+    let provider = registry.get(&id).ok_or_else(|| {
+        skipped
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| format!("{id} could not be loaded: {}", s.reason))
+            .unwrap_or_else(|| format!("provider `{id}` is not configured"))
+    })?;
+
+    let model = provider.default_model().to_string();
+    zest_core::probe(provider.as_ref(), &model)
+        .await
+        .map_err(|e| format_turn_error(&e))
 }
 
 #[tauri::command]
@@ -503,28 +576,106 @@ fn start_login(id: String) -> Result<LoginStarted, String> {
     })
 }
 
-fn workspace_root() -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    cwd.canonicalize().or(Ok(cwd))
-}
-
-/// Strip the Windows `\\?\` extended-path prefix for UI display.
-///
-/// `canonicalize()` on Windows returns paths like `\\?\D:\Code\zest`. That form
-/// is correct for the filesystem APIs but looks broken in Settings copy.
-fn display_path(path: &std::path::Path) -> String {
-    let raw = path.display().to_string();
-    display_path_str(&raw)
-}
-
-fn display_path_str(raw: &str) -> String {
-    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
-        rest.to_string()
-    } else {
-        raw.to_string()
+fn canonicalize_dir(path: PathBuf) -> Result<PathBuf, String> {
+    if !path.is_dir() {
+        return Err(format!("not a directory: {}", path.display()));
     }
+    path.canonicalize().or(Ok(path))
+}
+
+fn cwd_workspace() -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    canonicalize_dir(cwd)
+}
+
+fn load_persisted_workspace() -> Option<PathBuf> {
+    let path = dirs::config_dir()?.join("zest").join("last-workspace");
+    let value = std::fs::read_to_string(path).ok()?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    let candidate = PathBuf::from(value);
+    canonicalize_dir(candidate).ok()
+}
+
+fn persist_workspace(root: &Path) -> Result<(), String> {
+    let path = zest_config_dir()?.join("last-workspace");
+    std::fs::write(&path, display_path(root)).map_err(|e| e.to_string())?;
+    remember_workspace(root);
+    Ok(())
+}
+
+const KNOWN_WORKSPACES_FILE: &str = "known-workspaces.json";
+const MAX_KNOWN_WORKSPACES: usize = 40;
+
+fn known_workspaces_path() -> Result<PathBuf, String> {
+    Ok(zest_config_dir()?.join(KNOWN_WORKSPACES_FILE))
+}
+
+fn load_known_workspaces() -> Vec<PathBuf> {
+    let Ok(path) = known_workspaces_path() else {
+        return Vec::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(list) = serde_json::from_str::<Vec<String>>(&raw) else {
+        return Vec::new();
+    };
+    list.into_iter()
+        .filter_map(|s| {
+            let p = PathBuf::from(s.trim());
+            if p.as_os_str().is_empty() {
+                return None;
+            }
+            canonicalize_dir(p).ok()
+        })
+        .collect()
+}
+
+fn remember_workspace(root: &Path) {
+    let Ok(root) = canonicalize_dir(root.to_path_buf()) else {
+        return;
+    };
+    let mut list = load_known_workspaces();
+    list.retain(|p| p != &root);
+    list.insert(0, root);
+    list.truncate(MAX_KNOWN_WORKSPACES);
+    let display: Vec<String> = list.iter().map(|p| display_path(p)).collect();
+    if let Ok(path) = known_workspaces_path() {
+        if let Ok(raw) = serde_json::to_string_pretty(&display) {
+            let _ = std::fs::write(path, raw);
+        }
+    }
+}
+
+fn resolve_workspace_root(state: &AppState) -> Result<PathBuf, String> {
+    if let Ok(guard) = state.workspace_root.lock() {
+        if let Some(root) = guard.as_ref() {
+            return Ok(root.clone());
+        }
+    }
+    if let Some(persisted) = load_persisted_workspace() {
+        if let Ok(mut guard) = state.workspace_root.lock() {
+            *guard = Some(persisted.clone());
+        }
+        return Ok(persisted);
+    }
+    cwd_workspace()
+}
+
+fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String> {
+    let root = canonicalize_dir(root)?;
+    persist_workspace(&root)?;
+    if let Ok(mut guard) = state.workspace_root.lock() {
+        *guard = Some(root.clone());
+    }
+    // Drop any stale persist worker bound to the previous project.
+    if let Ok(mut guard) = state.persist.lock() {
+        *guard = None;
+    }
+    Ok(root)
 }
 
 fn open_store(root: &std::path::Path) -> Result<ThreadStore, String> {
@@ -645,8 +796,12 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
         ChatEvent::User {
             message_id, text, ..
         } => thread.apply_user(message_id, text),
-        ChatEvent::AssistantStart { message_id, .. } => {
-            thread.apply_assistant_start(message_id);
+        ChatEvent::AssistantStart {
+            message_id,
+            command,
+            ..
+        } => {
+            thread.apply_assistant_start(message_id, command.as_deref());
         }
         ChatEvent::TextDelta {
             message_id, text, ..
@@ -741,7 +896,7 @@ fn start_session(
     model: Option<String>,
     effort: Option<String>,
 ) -> Result<SessionInfo, String> {
-    let _ = dotenvy::dotenv();
+    zest_core::load_env();
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
 
@@ -756,31 +911,19 @@ fn start_session(
 
     persist_choice(&id)?;
 
-    let root = workspace_root()?;
+    let root = resolve_workspace_root(&state)?;
     let config = Config::find(&root).map_err(|e| e.to_string())?;
 
     let prefs = ProjectSessionState::load(&root, &id).get(&id);
 
-    let model = model
-        .filter(|m| !m.trim().is_empty())
-        .or(prefs.model)
-        .or_else(|| {
-            config.default_target().and_then(|t| {
-                if t.provider == id {
-                    t.model.clone()
-                } else {
-                    None
-                }
-            })
-        })
-        .or_else(|| std::env::var("ZEST_MODEL").ok());
-
-    let effort = effort
+    // Only what the caller explicitly asked for is `explicit`. The sticky
+    // values go in as *remembered*, which RuntimeBuilder drops instead of
+    // erroring when they do not fit this provider — otherwise one stale entry
+    // makes the provider impossible to select and therefore impossible to fix.
+    let explicit_model = model.filter(|m| !m.trim().is_empty());
+    let explicit_effort = effort
         .filter(|e| !e.trim().is_empty())
-        .or(prefs.effort)
-        .or_else(|| std::env::var("ZEST_EFFORT").ok())
-        .unwrap_or_else(|| "high".to_string());
-    let effort = normalize_effort(&effort);
+        .map(|e| normalize_effort(&e));
 
     let store = open_store(&root)?;
     let (mut thread, load_warning) = resolve_thread(&root, &store, &id)?;
@@ -794,16 +937,24 @@ fn start_session(
     let mut builder = RuntimeBuilder::new(&root)
         .with_config(config)
         .with_provider(&id)
-        .with_effort(&effort)
-        .with_system(SYSTEM)
+        .with_system(DEFAULT_SYSTEM)
         .with_approver(approver)
+        .with_policy(state.policy.clone())
+        .with_remembered_options(prefs.model, prefs.effort)
         .enable_delegate(true)
-        .register_write_tools(true);
-    if let Some(model) = model {
+        .register_write_tools(true)
+        // Every non-allowlisted command reaches HubApprover, which is the same
+        // card `write_file` already uses.
+        .register_exec_tools(true);
+    if let Some(model) = explicit_model {
         builder = builder.with_model(model);
+    }
+    if let Some(effort) = explicit_effort {
+        builder = builder.with_effort(effort);
     }
 
     let runtime = builder.build().map_err(|e| e.to_string())?;
+    let runtime_warnings = runtime.warnings.clone();
     let mut agent = runtime.agent;
     agent.messages = thread.agent_messages.clone();
 
@@ -828,12 +979,24 @@ fn start_session(
         .set_session(session)
         .map_err(map_session_err)?;
 
+    // A dropped preference is worth saying out loud — otherwise the picker just
+    // shows a different model than last time with no explanation.
+    let warning = merge_warnings(load_warning, runtime_warnings);
+
     let info = state
         .sessions
-        .session_info_snapshot(|s| session_info_from(s, load_warning))
+        .session_info_snapshot(|s| session_info_from(s, warning.clone()))
         .map_err(map_session_err)?
         .ok_or_else(|| map_session_err(SessionError::NoSession))?;
     Ok(info)
+}
+
+/// Join a thread-load warning with any runtime warnings into the single slot
+/// `SessionInfo` has for them.
+fn merge_warnings(load_warning: Option<String>, runtime: Vec<String>) -> Option<String> {
+    let mut all: Vec<String> = load_warning.into_iter().collect();
+    all.extend(runtime);
+    (!all.is_empty()).then(|| all.join("; "))
 }
 
 #[tauri::command]
@@ -907,6 +1070,121 @@ fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadSummary>, String
         .and_then(|r| r)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectChats {
+    name: String,
+    path: String,
+    active: bool,
+    threads: Vec<ThreadSummary>,
+}
+
+fn project_display_name(root: &Path) -> String {
+    root.file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| display_path(root))
+}
+
+/// Chats grouped by known project folders (MRU), for the sidebar.
+#[tauri::command]
+fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, String> {
+    let (provider_id, active_root) = state
+        .sessions
+        .with_session_mut(|session| {
+            remember_workspace(&session.root);
+            (session.provider_id.clone(), session.root.clone())
+        })
+        .map_err(map_session_err)?;
+
+    let mut roots = load_known_workspaces();
+    if !roots.iter().any(|p| p == &active_root) {
+        roots.insert(0, active_root.clone());
+    }
+
+    let mut out = Vec::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let threads = match open_store(&root) {
+            Ok(store) => store.list_for_provider(&provider_id).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let active = root == active_root;
+        out.push(ProjectChats {
+            name: project_display_name(&root),
+            path: display_path(&root),
+            active,
+            threads,
+        });
+    }
+
+    // Active project first; then by newest thread activity.
+    out.sort_by(|a, b| match (a.active, b.active) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => {
+            let a_t = a.threads.first().map(|t| t.updated_at).unwrap_or(0);
+            let b_t = b.threads.first().map(|t| t.updated_at).unwrap_or(0);
+            b_t.cmp(&a_t).then_with(|| a.name.cmp(&b.name))
+        }
+    });
+    Ok(out)
+}
+
+/// Switch project (and optional thread) while keeping the current provider.
+#[tauri::command]
+fn open_project_chat(
+    state: State<'_, AppState>,
+    root: String,
+    thread_id: Option<String>,
+    new_thread: Option<bool>,
+) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+
+    let provider_id = state
+        .sessions
+        .session_info_snapshot(|s| s.provider_id.clone())
+        .map_err(map_session_err)?
+        .or_else(last_provider)
+        .ok_or_else(|| desktop_err("invalid", "no provider — connect one first"))?;
+
+    let root = set_workspace_root(&state, PathBuf::from(root.trim()))?;
+
+    let had_session = state
+        .sessions
+        .session_info_snapshot(|_| ())
+        .map_err(map_session_err)?
+        .is_some();
+    if had_session {
+        state.sessions.end_session().map_err(map_session_err)?;
+        state.approvals.clear();
+    }
+
+    if new_thread.unwrap_or(false) {
+        let store = open_store(&root)?;
+        let thread = store
+            .create_for_provider(&provider_id)
+            .map_err(|e| e.to_string())?;
+        persist_provider_thread(&root, &provider_id, &thread.id)?;
+    } else if let Some(tid) = thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        // Pin sticky thread before start_session resolves it.
+        let store = open_store(&root)?;
+        let _ = store
+            .load_for_provider(tid, &provider_id)
+            .map_err(|e| e.to_string())?;
+        persist_provider_thread(&root, &provider_id, tid)?;
+    }
+
+    start_session(state, provider_id, None, None)
+}
+
 #[tauri::command]
 fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
@@ -952,19 +1230,89 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
         .and_then(|r| r)
 }
 
+/// Delete a saved chat. If it is the active thread, switches the session to a
+/// fresh empty thread for the same provider. `project_path` deletes from another
+/// known project without switching the open workspace.
+#[tauri::command]
+fn delete_thread(
+    state: State<'_, AppState>,
+    id: String,
+    project_path: Option<String>,
+) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    state.approvals.clear();
+
+    state
+        .sessions
+        .with_session_mut(|session| -> Result<SessionInfo, String> {
+            let target_root = match project_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+                None => session.root.clone(),
+            };
+            let store = open_store(&target_root)?;
+            // Ownership check — never delete another provider's thread.
+            let _ = store
+                .load_for_provider(&id, &session.provider_id)
+                .map_err(|e| e.to_string())?;
+            store.delete(&id).map_err(|e| e.to_string())?;
+
+            // Compare via display paths — `session.root` may be `\\?\…` while the
+            // sidebar sends a stripped path that still canonicalizes differently.
+            let same_project = display_path(&session.root) == display_path(&target_root)
+                || session.root == target_root;
+            if same_project && session.thread_id == id {
+                let thread = store
+                    .create_for_provider(&session.provider_id)
+                    .map_err(|e| e.to_string())?;
+                session.agent.clear_messages();
+                session.thread_id = thread.id.clone();
+                session.thread = thread;
+                persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
+            }
+            Ok(session_info_from(session, None))
+        })
+        .map_err(map_session_err)
+        .and_then(|r| r)
+}
+
 #[tauri::command]
 async fn send_message(
     app: AppHandle,
     state: State<'_, AppState>,
     text: String,
+    attachments: Option<Vec<AttachmentInput>>,
 ) -> Result<(), String> {
     let text = text.trim().to_string();
-    if text.is_empty() {
+    let attachments = attachments.unwrap_or_default();
+    if text.is_empty() && !has_usable_attachment(&attachments) {
         return Err(desktop_err("invalid", "empty message"));
     }
 
+    // The transcript keeps what was typed; only the model sees an expansion.
+    let display_text = format_display_message(&text, &attachments);
+    if build_user_content(&text, &attachments).is_empty() {
+        return Err(desktop_err("invalid", "empty message"));
+    }
+    let multimodal = has_images(&attachments);
+
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
     state.approvals.begin_turn(&turn.turn_id);
+
+    // Slash commands resolve against the session's skills, so this has to come
+    // after the session is in hand. An unknown command expands to itself.
+    let (prompt, command) = match session.skills.read() {
+        Ok(skills) => {
+            let expansion = zest_core::expand_command(&text, &skills);
+            (expansion.prompt, expansion.command)
+        }
+        // A poisoned lock must not lose the message — send it verbatim.
+        Err(_) => (text.clone(), None),
+    };
+    let user_blocks = build_user_content(&prompt, &attachments);
     let worker = match ensure_persist(&state, &session.root) {
         Ok(w) => w,
         Err(e) => {
@@ -985,7 +1333,7 @@ async fn send_message(
         thread_id: thread_id.clone(),
         turn_id: turn_id.clone(),
         message_id: user_message_id,
-        text: text.clone(),
+        text: display_text,
     };
     apply_event_to_thread(&mut session.thread, &user_event);
     let assistant_start = ChatEvent::AssistantStart {
@@ -993,6 +1341,7 @@ async fn send_message(
         thread_id: thread_id.clone(),
         turn_id: turn_id.clone(),
         message_id: assistant_message_id.clone(),
+        command: command.clone(),
     };
     apply_event_to_thread(&mut session.thread, &assistant_start);
     if let Err(e) = worker
@@ -1108,10 +1457,30 @@ async fn send_message(
             let _ = app.emit("chat-event", &event);
         };
 
-        session
-            .agent
-            .send_cancellable(&text, &mut on_event, Some(&cancel))
-            .await
+        if multimodal {
+            session
+                .agent
+                .send_blocks_cancellable(user_blocks, &mut on_event, Some(&cancel))
+                .await
+        } else {
+            // Text-only path keeps prior wire shape (single text block).
+            let agent_text = user_blocks
+                .iter()
+                .find_map(|b| {
+                    (b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .then(|| {
+                            b.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .flatten()
+                })
+                .unwrap_or_default();
+            session
+                .agent
+                .send_cancellable(&agent_text, &mut on_event, Some(&cancel))
+                .await
+        }
     };
 
     session.thread = match Arc::try_unwrap(live_thread) {
@@ -1158,7 +1527,9 @@ async fn send_message(
                 thread_id: thread_id.clone(),
                 turn_id: turn_id.clone(),
                 message_id: assistant_message_id.clone(),
-                message: e.to_string(),
+                message: format_turn_error(e),
+                // Only for failures that signing in again actually fixes.
+                reconnect_provider: e.is_auth_problem().then(|| session.provider_id.clone()),
             }
         }
     };
@@ -1212,9 +1583,42 @@ fn cancel_turn(state: State<'_, AppState>) -> Result<(), String> {
 fn resolve_approval(
     state: State<'_, AppState>,
     approval_id: String,
-    allow: bool,
+    decision: String,
 ) -> Result<(), String> {
-    state.approvals.resolve(&approval_id, allow)
+    // Unknown strings deny rather than default to allow: a UI/backend version
+    // skew must fail closed.
+    let decision = match decision.as_str() {
+        "once" => ApprovalDecision::AllowOnce,
+        "session" => ApprovalDecision::AllowSession,
+        "deny" => ApprovalDecision::Deny,
+        other => return Err(format!("unknown approval decision `{other}`")),
+    };
+    state.approvals.resolve(&approval_id, decision)
+}
+
+/// Switch the permission mode for the live session.
+///
+/// Grants made under the previous mode are dropped by `ApprovalPolicy`. The
+/// policy outlives any one project, so switching folders keeps the mode.
+#[tauri::command]
+fn set_approval_mode(state: State<'_, AppState>, mode: String) -> Result<String, String> {
+    let mode = ApprovalMode::parse(&mode).ok_or_else(|| format!("unknown mode `{mode}`"))?;
+    state
+        .policy
+        .lock()
+        .map_err(|_| "approval policy lock poisoned".to_string())?
+        .set_mode(mode);
+    Ok(mode.as_str().to_string())
+}
+
+#[tauri::command]
+fn approval_mode(state: State<'_, AppState>) -> Result<String, String> {
+    let mode = state
+        .policy
+        .lock()
+        .map_err(|_| "approval policy lock poisoned".to_string())?
+        .mode();
+    Ok(mode.as_str().to_string())
 }
 
 #[tauri::command]
@@ -1273,12 +1677,16 @@ fn set_system_prompt(
                     .map_err(|_| "skill registry lock poisoned".to_string())?;
                 *guard = skills;
             }
+            // Must mirror RuntimeBuilder::build exactly — docs and environment
+            // included — or saving Settings would quietly strip them.
             let composed = {
                 let guard = session
                     .skills
                     .read()
                     .map_err(|_| "skill registry lock poisoned".to_string())?;
-                compose_system(&session.base_system, &custom, &guard)
+                let docs = load_project_docs(&session.root);
+                let body = compose_system_with_docs(&session.base_system, &custom, &docs, &guard);
+                format!("{body}\n\n{}", env_context(&session.root))
             };
             session.agent.system = Some(composed);
             system_prompt_info(session)
@@ -1287,19 +1695,216 @@ fn set_system_prompt(
         .and_then(|r| r)
 }
 
-#[tauri::command]
-fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillSummary>, String> {
-    state
-        .sessions
-        .with_session_mut(|session| {
-            let guard = session
-                .skills
-                .read()
-                .map_err(|_| "skill registry lock poisoned".to_string())?;
-            Ok(guard.summaries())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "RoutingRuleView.ts", rename_all = "camelCase")
+)]
+pub struct RoutingRuleView {
+    pub kind: String,
+    pub provider: String,
+    /// Empty means "the provider's own default model".
+    #[serde(default)]
+    pub model: String,
+    /// Empty means `high`.
+    #[serde(default)]
+    pub effort: String,
+    /// Extra framing for this worker. Empty means the generic worker contract.
+    #[serde(default)]
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "RoutingView.ts", rename_all = "camelCase")
+)]
+pub struct RoutingView {
+    pub delegation: bool,
+    pub rules: Vec<RoutingRuleView>,
+    /// Every configured provider with its real catalogue, so the editor can
+    /// offer only pairs that exist rather than free text.
+    pub providers: Vec<ProviderModelsView>,
+    /// Where a save will be written.
+    pub config_path: String,
+    /// `[routing].default` provider (config). UI same-account warnings use the
+    /// open session's provider instead — the picker can start a chat on Claude
+    /// even when this default is still Codex.
+    pub default_provider: String,
+    /// True when the active project has its own zest.toml, which **replaces**
+    /// the user one — editing here would then have no effect on this project.
+    pub project_scoped: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ProviderModelsView.ts", rename_all = "camelCase")
+)]
+pub struct ProviderModelsView {
+    pub id: String,
+    pub default_model: String,
+    pub models: Vec<String>,
+    /// Efforts accepted by the default model, for the effort dropdown.
+    pub efforts: Vec<String>,
+}
+
+fn routing_view(state: &State<'_, AppState>) -> Result<RoutingView, String> {
+    let root = resolve_workspace_root(state)?;
+    let config = Config::find(&root).map_err(|e| e.to_string())?;
+    let user_path = zest_core::user_config_path()
+        .map(|p| display_path(p.as_path()))
+        .unwrap_or_else(|| "~/.zest/zest.toml".to_string());
+
+    let providers = config
+        .providers
+        .iter()
+        .map(|(id, entry)| {
+            let descriptor = descriptor_from_config(id, entry);
+            let efforts = descriptor
+                .models
+                .iter()
+                .find(|m| m.id == descriptor.default_model)
+                .map(|m| m.efforts.clone())
+                .unwrap_or_default();
+            ProviderModelsView {
+                id: id.clone(),
+                default_model: descriptor.default_model,
+                models: descriptor.models.into_iter().map(|m| m.id).collect(),
+                efforts,
+            }
         })
-        .map_err(map_session_err)
-        .and_then(|r| r)
+        .collect();
+
+    Ok(RoutingView {
+        default_provider: config
+            .default_target()
+            .map(|t| t.provider)
+            .unwrap_or_default(),
+        delegation: config.routing.delegation,
+        rules: config
+            .routing
+            .rules
+            .iter()
+            .map(|r| RoutingRuleView {
+                kind: r.kind.clone(),
+                provider: r.provider.clone(),
+                model: r.model.clone().unwrap_or_default(),
+                effort: r.effort.clone().unwrap_or_default(),
+                prompt: r.prompt.clone().unwrap_or_default(),
+            })
+            .collect(),
+        providers,
+        config_path: user_path,
+        project_scoped: root.join(zest_core::config::CONFIG_FILE).is_file(),
+    })
+}
+
+#[tauri::command]
+fn routing_config(state: State<'_, AppState>) -> Result<RoutingView, String> {
+    routing_view(&state)
+}
+
+/// Rules to start from, derived from the providers actually configured.
+///
+/// Returned rather than saved: a preset the user has not looked at should not
+/// silently become their routing policy.
+#[tauri::command]
+fn suggested_routing(state: State<'_, AppState>) -> Result<Vec<RoutingRuleView>, String> {
+    let root = resolve_workspace_root(&state)?;
+    let config = Config::find(&root).map_err(|e| e.to_string())?;
+    Ok(zest_core::routing_edit::suggest_rules(&config)
+        .into_iter()
+        .map(|r| RoutingRuleView {
+            kind: r.kind,
+            provider: r.provider,
+            model: r.model.unwrap_or_default(),
+            effort: r.effort.unwrap_or_default(),
+            prompt: r.prompt.unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Persist delegation + rules to the **user** config.
+///
+/// Validated against the live provider catalogues first: an unroutable rule
+/// would otherwise fail much later, mid-delegation, on a turn already paid for.
+#[tauri::command]
+fn set_routing_config(
+    state: State<'_, AppState>,
+    delegation: bool,
+    rules: Vec<RoutingRuleView>,
+) -> Result<RoutingView, String> {
+    let root = resolve_workspace_root(&state)?;
+    let config = Config::find(&root).map_err(|e| e.to_string())?;
+
+    let inputs: Vec<RuleInput> = rules
+        .into_iter()
+        .map(|r| RuleInput {
+            kind: r.kind,
+            provider: r.provider,
+            model: Some(r.model).filter(|m| !m.trim().is_empty()),
+            effort: Some(r.effort).filter(|e| !e.trim().is_empty()),
+            prompt: Some(r.prompt).filter(|p| !p.trim().is_empty()),
+        })
+        .collect();
+
+    validate_rules(&config, &inputs)?;
+
+    let path = zest_core::user_config_path()
+        .ok_or_else(|| "cannot locate the user config directory".to_string())?;
+    let updated = routing_document(&path, delegation, &inputs)?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    zest_core::atomic_write(&path, updated.as_bytes()).map_err(|e| e.to_string())?;
+
+    routing_view(&state)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "CommandView.ts", rename_all = "camelCase")
+)]
+pub struct CommandView {
+    pub name: String,
+    pub description: String,
+}
+
+/// Slash commands available here — one per discovered skill.
+///
+/// Workspace-based for the same reason as [`list_skills`]: the composer must be
+/// able to list commands while a turn is still streaming.
+#[tauri::command]
+fn list_commands(state: State<'_, AppState>) -> Result<Vec<CommandView>, String> {
+    let root = resolve_workspace_root(&state)?;
+    Ok(SkillSet::discover(&root)
+        .command_names()
+        .into_iter()
+        .map(|(name, description)| CommandView { name, description })
+        .collect())
+}
+
+#[tauri::command]
+/// Discovered from the workspace rather than the live session.
+///
+/// `begin_turn` *takes* the session out of the controller, so anything that
+/// reaches through it is unreadable while a turn runs — which made opening
+/// Settings mid-turn fail with "a turn is already in progress". Skills come
+/// from disk, and disk is readable whenever.
+fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillSummary>, String> {
+    let root = resolve_workspace_root(&state)?;
+    Ok(SkillSet::discover(&root).summaries())
 }
 
 fn system_prompt_info(session: &Session) -> Result<SystemPromptInfo, String> {
@@ -1340,8 +1945,275 @@ fn last_provider() -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+#[tauri::command]
+fn get_workspace_folder(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(display_path(&resolve_workspace_root(&state)?))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspacePickResult {
+    path: String,
+    /// True when an open session was closed so the UI must start a new one.
+    session_ended: bool,
+}
+
+/// Native folder picker. Stores preference for the next `start_session`.
+/// Returns `null` when the user cancels. Ends an idle open session so tools
+/// stay scoped to the new root.
+#[tauri::command]
+fn pick_workspace_folder(
+    state: State<'_, AppState>,
+) -> Result<Option<WorkspacePickResult>, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    let mut dialog = rfd::FileDialog::new().set_title("Open project folder");
+    if let Ok(current) = resolve_workspace_root(&state) {
+        dialog = dialog.set_directory(current);
+    }
+    let Some(folder) = dialog.pick_folder() else {
+        return Ok(None);
+    };
+    let root = set_workspace_root(&state, folder)?;
+    let had_session = state
+        .sessions
+        .session_info_snapshot(|_| ())
+        .ok()
+        .flatten()
+        .is_some();
+    let session_ended = if had_session {
+        state.sessions.end_session().map_err(map_session_err)?;
+        state.approvals.clear();
+        true
+    } else {
+        false
+    };
+    Ok(Some(WorkspacePickResult {
+        path: display_path(&root),
+        session_ended,
+    }))
+}
+
+/// Native multi-file picker. PDFs are extracted via pdf-inspector.
+#[tauri::command]
+fn pick_files(state: State<'_, AppState>) -> Result<Vec<PreparedAttachment>, String> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Attach files")
+        .add_filter(
+            "Documents",
+            &[
+                "pdf", "md", "txt", "rs", "ts", "tsx", "js", "jsx", "json", "toml", "yaml", "yml",
+                "py", "go", "java", "c", "h", "cpp", "cs", "html", "css", "svg", "csv", "log",
+            ],
+        )
+        .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+        .add_filter("PDF", &["pdf"])
+        .add_filter("All files", &["*"]);
+    if let Ok(current) = resolve_workspace_root(&state) {
+        dialog = dialog.set_directory(current);
+    }
+    let Some(paths) = dialog.pick_files() else {
+        return Ok(Vec::new());
+    };
+    Ok(prepare_paths(&paths))
+}
+
+/// Paste / drop path: raw image bytes from the webview (base64).
+#[tauri::command]
+fn prepare_pasted_image(
+    data_base64: String,
+    media_type: String,
+    name: Option<String>,
+) -> Result<PreparedAttachment, String> {
+    let raw = data_base64
+        .split(',')
+        .next_back()
+        .unwrap_or(data_base64.as_str());
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.trim())
+        .map_err(|e| format!("invalid image data: {e}"))?;
+    let name = name.unwrap_or_else(|| {
+        let ext = match media_type.to_ascii_lowercase().as_str() {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        format!("paste-{}.{}", zest_core::new_id("img"), ext)
+    });
+    Ok(prepare_image_bytes(&bytes, &media_type, &name))
+}
+
+#[tauri::command]
+fn git_branch(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let root = resolve_workspace_root(&state)?;
+    Ok(read_git_branch(&root))
+}
+
+fn read_git_branch(root: &Path) -> Option<String> {
+    let head = root.join(".git").join("HEAD");
+    let contents = std::fs::read_to_string(head).ok()?;
+    let line = contents.lines().next()?.trim();
+    if let Some(branch) = line.strip_prefix("ref: refs/heads/") {
+        return Some(branch.to_string());
+    }
+    // Detached HEAD — short hash.
+    if line.len() >= 7 && line.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(format!("{}…", &line[..7]));
+    }
+    None
+}
+
+#[tauri::command]
+fn context_usage(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
+    state
+        .sessions
+        .with_session_mut(|session| estimate_context(&session.agent))
+        .map_err(map_session_err)
+}
+
+/// Wire view for the UI. Avatar bytes live in `avatar.jpg`, not in JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserProfile {
+    display_name: String,
+    /// data:image/...;base64,... for display / optimized upload; empty clears file.
+    #[serde(default)]
+    avatar_data_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserProfileDisk {
+    display_name: String,
+}
+
+/// Soft cap for optimized avatar payloads (JPEG ~128px is typically far smaller).
+const MAX_AVATAR_DATA_URL_CHARS: usize = 80_000;
+const MAX_AVATAR_BYTES: usize = 48_000;
+
+fn user_profile_path() -> Result<PathBuf, String> {
+    Ok(zest_config_dir()?.join("user-profile.json"))
+}
+
+fn user_avatar_path() -> Result<PathBuf, String> {
+    Ok(zest_config_dir()?.join("avatar.jpg"))
+}
+
+fn load_avatar_data_url() -> Result<String, String> {
+    let path = user_avatar_path()?;
+    match std::fs::read(&path) {
+        Ok(bytes) if !bytes.is_empty() => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            Ok(format!("data:image/jpeg;base64,{b64}"))
+        }
+        Ok(_) => Ok(String::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn write_avatar_from_data_url(data_url: &str) -> Result<(), String> {
+    let path = user_avatar_path()?;
+    let trimmed = data_url.trim();
+    if trimmed.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    if trimmed.chars().count() > MAX_AVATAR_DATA_URL_CHARS {
+        return Err("avatar too large after optimize (pick a smaller image)".into());
+    }
+    let b64 = trimmed
+        .split(',')
+        .next_back()
+        .ok_or_else(|| "invalid avatar data URL".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("invalid avatar encoding: {e}"))?;
+    if bytes.is_empty() {
+        return Err("empty avatar".into());
+    }
+    if bytes.len() > MAX_AVATAR_BYTES {
+        return Err("avatar too large after optimize (max ~48KB)".into());
+    }
+    if !bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Err("avatar must be JPEG (optimize in the UI before save)".into());
+    }
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_user_profile() -> Result<UserProfile, String> {
+    let path = user_profile_path()?;
+    let display_name = match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            let disk: UserProfileDisk = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            disk.display_name
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok(UserProfile {
+        display_name,
+        avatar_data_url: load_avatar_data_url()?,
+    })
+}
+
+#[tauri::command]
+fn set_user_profile(profile: UserProfile) -> Result<UserProfile, String> {
+    write_avatar_from_data_url(&profile.avatar_data_url)?;
+    let path = user_profile_path()?;
+    let disk = UserProfileDisk {
+        display_name: profile.display_name.trim().to_string(),
+    };
+    let raw = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
+    std::fs::write(&path, raw).map_err(|e| e.to_string())?;
+    Ok(UserProfile {
+        display_name: disk.display_name,
+        avatar_data_url: load_avatar_data_url()?,
+    })
+}
+
 fn normalize_effort(effort: &str) -> String {
     zest_core::normalize_effort(effort)
+}
+
+/// User-facing turn errors. Connection refused to the local gateway is the
+/// usual alpha failure mode and should not look like a missing system prompt.
+fn format_turn_error(err: &HarnessError) -> String {
+    match err {
+        HarnessError::Http(http) if http.is_connect() || http.is_timeout() => {
+            format!(
+                "Can't reach the model gateway (usually CLIProxyAPI on http://127.0.0.1:8317). \
+Start it with scripts/start-gateway.ps1, then try again.\n\n{err}"
+            )
+        }
+        // Lead with what to do. The raw envelope still follows, because the
+        // detail in it ("cooldown", a provider id) is what makes an unusual
+        // failure diagnosable — but it should not be the first thing read.
+        _ if err.is_auth_problem() => {
+            format!(
+                "That account needs signing in again — the gateway is holding \
+credentials it can't currently use. Reconnect below, then resend.\n\n{}",
+                api_error_message(err).unwrap_or_else(|| err.to_string())
+            )
+        }
+        _ => err.to_string(),
+    }
+}
+
+/// Pull `error.message` out of an API error envelope.
+///
+/// Returns `None` when the body is not the shape we expect, so the caller falls
+/// back to the raw text rather than swallowing an error it failed to parse.
+fn api_error_message(err: &HarnessError) -> Option<String> {
+    let HarnessError::Api { status, body } = err else {
+        return None;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    let message = parsed.get("error")?.get("message")?.as_str()?;
+    Some(format!("{status}: {message}"))
 }
 
 /// Wire label for approval / chat-event payloads (snake_case string).
@@ -1356,13 +2228,15 @@ fn tool_risk_wire(risk: ToolRisk) -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = dotenvy::dotenv();
+    zest_core::load_env();
 
     tauri::Builder::default()
         .manage(AppState {
             sessions: SessionController::new(),
             approvals: Arc::new(ApprovalHub::new()),
             persist: Mutex::new(None),
+            workspace_root: Mutex::new(load_persisted_workspace()),
+            policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
         })
         .invoke_handler(tauri::generate_handler![
             list_providers,
@@ -1370,20 +2244,38 @@ pub fn run() {
             usage_snapshot,
             last_provider,
             start_login,
+            verify_provider,
             start_session,
             update_session_options,
             reset_session_options,
             list_threads,
+            list_chat_projects,
+            open_project_chat,
             load_thread,
             new_thread,
+            delete_thread,
             send_message,
             cancel_turn,
             resolve_approval,
+            set_approval_mode,
+            approval_mode,
             end_session,
             session_info,
             get_system_prompt,
             set_system_prompt,
-            list_skills
+            list_skills,
+            list_commands,
+            routing_config,
+            suggested_routing,
+            set_routing_config,
+            get_workspace_folder,
+            pick_workspace_folder,
+            pick_files,
+            prepare_pasted_image,
+            git_branch,
+            context_usage,
+            get_user_profile,
+            set_user_profile
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zest desktop");
@@ -1415,16 +2307,6 @@ mod characterization {
         assert_eq!(normalize_effort("extra_high"), "xhigh");
         assert_eq!(normalize_effort("nonsense"), "high");
         assert_eq!(normalize_effort("max"), "max");
-    }
-
-    #[test]
-    fn display_path_strips_windows_extended_prefix() {
-        assert_eq!(display_path_str(r"\\?\D:\Code\zest"), r"D:\Code\zest");
-        assert_eq!(
-            display_path_str(r"\\?\UNC\server\share\repo"),
-            r"\\server\share\repo"
-        );
-        assert_eq!(display_path_str(r"D:\Code\zest"), r"D:\Code\zest");
     }
 
     #[test]
@@ -1479,6 +2361,7 @@ mod characterization {
                 thread_id: tid.into(),
                 turn_id: turn.into(),
                 message_id: "a1".into(),
+                command: None,
             },
         );
         apply_event_to_thread(
@@ -1503,18 +2386,110 @@ mod characterization {
         assert_eq!(thread.messages.len(), 2);
     }
 
+    fn slot(id: &'static str, status: AuthStatus) -> ProviderSlot {
+        ProviderSlot {
+            id,
+            label: id,
+            method: "test sign-in",
+            status,
+        }
+    }
+
+    fn config_with(ids: &[&str]) -> Config {
+        let mut toml = String::new();
+        for id in ids {
+            toml.push_str(&format!(
+                "[providers.{id}]\nkind = \"gateway\"\nbase_url = \"http://127.0.0.1:8317\"\nmodel = \"m\"\n\n"
+            ));
+        }
+        Config::parse(&toml).expect("valid test config")
+    }
+
+    /// The reported failure: the picker offered Claude as ready because a CLI
+    /// session existed, then Continue died with "not configured".
+    #[test]
+    fn a_signed_in_provider_with_no_config_is_not_selectable() {
+        let config = config_with(&["codex"]);
+        let view = provider_view_from_slot(
+            &slot("claude", AuthStatus::Ready { account: None }),
+            &config,
+        );
+
+        assert!(!view.selectable, "must not be offered as usable");
+        assert!(!view.configured);
+        assert_eq!(view.status_kind, "unconfigured");
+        assert_eq!(view.status_label, "Not configured");
+        // The row has to say what to do, since the green "Signed in" it used to
+        // show sent the user looking at their Claude login instead.
+        assert!(view.detail.contains("Signed in, but"), "{}", view.detail);
+        assert!(view.detail.contains("zest.toml"), "{}", view.detail);
+    }
+
+    #[test]
+    fn a_signed_in_configured_provider_stays_selectable() {
+        let config = config_with(&["codex", "claude"]);
+        let view = provider_view_from_slot(
+            &slot("claude", AuthStatus::Ready { account: None }),
+            &config,
+        );
+        assert!(view.selectable);
+        assert!(view.configured);
+        assert_eq!(view.status_kind, "ready");
+        assert_eq!(view.status_label, "Signed in");
+    }
+
+    #[test]
+    fn a_configured_provider_without_a_sign_in_is_still_not_selectable() {
+        // Both halves are required; config alone cannot serve a turn either.
+        let config = config_with(&["claude"]);
+        let view = provider_view_from_slot(
+            &slot(
+                "claude",
+                AuthStatus::NotLoggedIn {
+                    fix: "claude login".into(),
+                },
+            ),
+            &config,
+        );
+        assert!(!view.selectable);
+        assert!(view.configured);
+    }
+
     #[tokio::test]
     async fn approval_hub_prepare_resolve_and_unknown_id() {
         let hub = ApprovalHub::new();
         hub.begin_turn("turn-1");
         hub.prepare("ap1");
-        hub.resolve("ap1", true).unwrap();
-        assert!(hub.wait("ap1").await);
+        hub.resolve("ap1", ApprovalDecision::AllowOnce).unwrap();
+        assert_eq!(hub.wait("ap1").await, ApprovalDecision::AllowOnce);
 
-        assert!(hub.resolve("missing", false).is_err());
-        assert!(!hub.wait("never-prepared").await);
+        assert!(hub.resolve("missing", ApprovalDecision::Deny).is_err());
+        // Never prepared: no waiter, and the answer must be Deny, not a default
+        // that happens to look permissive.
+        assert_eq!(hub.wait("never-prepared").await, ApprovalDecision::Deny);
 
         hub.clear();
-        assert!(hub.resolve("ap2", true).is_err());
+        assert!(hub.resolve("ap2", ApprovalDecision::AllowOnce).is_err());
+    }
+
+    #[tokio::test]
+    async fn approval_hub_carries_a_session_grant_through() {
+        // The three-way decision has to survive the channel — collapsing it to
+        // a bool is what this widening exists to prevent.
+        let hub = ApprovalHub::new();
+        hub.begin_turn("turn-1");
+        hub.prepare("ap-session");
+        hub.resolve("ap-session", ApprovalDecision::AllowSession)
+            .unwrap();
+        assert_eq!(hub.wait("ap-session").await, ApprovalDecision::AllowSession);
+    }
+
+    #[tokio::test]
+    async fn clearing_the_hub_denies_pending_waiters() {
+        let hub = ApprovalHub::new();
+        hub.begin_turn("turn-1");
+        hub.prepare("ap-pending");
+        hub.clear();
+        assert_eq!(hub.wait("ap-pending").await, ApprovalDecision::Deny);
     }
 }

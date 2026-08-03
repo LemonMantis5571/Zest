@@ -13,6 +13,11 @@ export default defineConfig({
       "@": path.resolve(root, "./src"),
     },
   },
+  // Emit the Shiki worker as a real ES module file rather than a blob, so the
+  // production CSP can stay at `worker-src 'self'` without allowing `blob:`.
+  worker: {
+    format: "es",
+  },
   clearScreen: false,
   server: {
     port: 1420,

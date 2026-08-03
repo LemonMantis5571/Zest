@@ -32,6 +32,30 @@ function defaultNewId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+/**
+ * Thinking chunks often arrive as separate sentences without a separator.
+ * Insert a blank line when a capitalised chunk follows a finished word.
+ *
+ * Summarized thinking arrives as a run of `**Title**` blocks. Concatenated
+ * naively, one block's closing `**` meets the next block's opening `**` and
+ * fuses into `****`, which is not valid emphasis — the reader sees literal
+ * asterisks welding two headings together.
+ */
+export function joinThinkingStream(prev: string, delta: string): string {
+  if (!prev) return delta;
+  if (!delta) return prev;
+  // Check the marker boundary before the whitespace shortcut: the fused case
+  // has no whitespace on either side, which is precisely why it fuses.
+  if (/\*\*$/.test(prev) && /^\*\*/.test(delta)) {
+    return `${prev}\n\n${delta}`;
+  }
+  if (/\s$/.test(prev) || /^\s/.test(delta)) return prev + delta;
+  if (/[A-Za-z0-9)]$/.test(prev) && /^[A-Z]/.test(delta)) {
+    return `${prev}\n\n${delta}`;
+  }
+  return prev + delta;
+}
+
 function eventSessionId(event: ChatEvent): string | undefined {
   return event.session_id;
 }
@@ -170,9 +194,15 @@ export function reduceChatEvent(
     }
     case "assistant_start": {
       const ensured = ensureAssistant(state, event.message_id, newId);
+      const withCommand = event.command
+        ? patchAssistant(ensured.state, ensured.id, (m) => ({
+            ...m,
+            command: event.command ?? undefined,
+          }))
+        : ensured.state;
       return {
         state: {
-          ...ensured.state,
+          ...withCommand,
           currentTurnId: event.turn_id,
           sending: true,
           activeAssistantId: ensured.id,
@@ -196,7 +226,7 @@ export function reduceChatEvent(
       return {
         state: patchAssistant(ensured.state, ensured.id, (m) => ({
           ...m,
-          thinking: m.thinking + event.text,
+          thinking: joinThinkingStream(m.thinking, event.text),
           streaming: true,
         })),
         effects,
@@ -231,6 +261,9 @@ export function reduceChatEvent(
               status: event.isError ? "error" : "done",
               summary: event.summary,
               approvalId: undefined,
+              // Keep path/diff so completed writes stay clickable in DiffViewer.
+              path: t.path,
+              diff: t.diff,
               metadata: event.metadata ?? t.metadata,
             };
           }),
@@ -310,6 +343,8 @@ export function reduceChatEvent(
             ...m,
             streaming: false,
             error: event.message,
+            // Only set when signing in again is the actual fix.
+            reconnectProvider: event.reconnect_provider ?? undefined,
           })),
           activeAssistantId: null,
           sending: false,
