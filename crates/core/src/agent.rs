@@ -18,12 +18,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::anthropic::types::{tool_result, tool_uses, Message};
+use crate::anthropic::types::{tool_result, tool_uses, Message, Usage};
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
 use crate::provider::{Provider, StreamEvent, TurnRequest};
 use crate::thread::new_id;
-use crate::tools::approval::{ApprovalDecision, ApprovalRequest, Approver, DenyApprover, ToolRisk};
+use crate::tools::approval::{
+    ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover, PolicyOutcome,
+    ToolRisk,
+};
+use crate::tools::prepared::PreparedToolCall;
 use crate::tools::ToolRegistry;
 use crate::usage::Ledger;
 
@@ -37,6 +41,9 @@ pub struct Agent {
     ledger: Option<Arc<Mutex<Ledger>>>,
     /// Gate for write/exec tools. Defaults to deny-all when unset.
     approver: Arc<dyn Approver>,
+    /// Mode + session grants, consulted before the approver is ever called.
+    /// Shared so a front-end can flip the mode mid-session.
+    policy: Arc<Mutex<ApprovalPolicy>>,
     pub model: String,
     /// Budgets reasoning *and* text together on providers that think. Streaming
     /// means there is no HTTP timeout pressure, so this is a ceiling rather than
@@ -46,6 +53,8 @@ pub struct Agent {
     pub effort: String,
     pub system: Option<String>,
     pub messages: Vec<Message>,
+    /// Last completed turn's usage (input fills the context window estimate).
+    pub last_usage: Option<Usage>,
     /// Tool-use ids whose results must be redacted when persisting wire history.
     sensitive_tool_ids: Vec<String>,
 }
@@ -58,11 +67,13 @@ impl Agent {
             tools,
             ledger: None,
             approver: Arc::new(DenyApprover),
+            policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
             model,
             max_tokens: 32_000,
             effort: "high".to_string(),
             system: None,
             messages: Vec::new(),
+            last_usage: None,
             sensitive_tool_ids: Vec::new(),
         }
     }
@@ -87,6 +98,16 @@ impl Agent {
     pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
         self.approver = approver;
         self
+    }
+
+    /// Share the permission policy so a front-end can change mode mid-session.
+    pub fn with_policy(mut self, policy: Arc<Mutex<ApprovalPolicy>>) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn policy(&self) -> Arc<Mutex<ApprovalPolicy>> {
+        self.policy.clone()
     }
 
     pub fn clear_messages(&mut self) {
@@ -138,11 +159,38 @@ impl Agent {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
     ) -> Result<()> {
+        self.send_user_cancellable(Message::user_text(user_input), on_event, cancel)
+            .await
+    }
+
+    /// Multimodal / structured user turn (text + image blocks, etc.).
+    pub async fn send_blocks_cancellable(
+        &mut self,
+        content: Vec<serde_json::Value>,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Result<()> {
+        if content.is_empty() {
+            return Err(HarnessError::Other("empty user content".into()));
+        }
+        self.send_user_cancellable(Message::user_blocks(content), on_event, cancel)
+            .await
+    }
+
+    async fn send_user_cancellable(
+        &mut self,
+        user_message: Message,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> Result<()> {
         let mut staged = self.messages.clone();
-        staged.push(Message::user_text(user_input));
+        staged.push(user_message);
         // Track which tool_use ids were sensitive so tool_result redaction can
         // strip them from durable history while live memory keeps the body.
         let mut turn_sensitive: Vec<String> = Vec::new();
+        // Overwritten each provider round; only the final end_turn value is kept.
+        #[allow(unused_assignments)]
+        let mut last_usage: Option<Usage> = None;
 
         loop {
             Self::check_cancel(cancel)?;
@@ -173,6 +221,7 @@ impl Agent {
                     ledger.record(self.provider.id(), &completion);
                 }
             }
+            last_usage = Some(completion.usage.clone());
 
             Self::check_cancel(cancel)?;
 
@@ -185,6 +234,7 @@ impl Agent {
                     self.sensitive_tool_ids.extend(turn_sensitive);
                     // Live memory keeps real tool bodies; persist path redacts.
                     self.messages = staged;
+                    self.last_usage = last_usage;
                     return Ok(());
                 }
 
@@ -196,36 +246,36 @@ impl Agent {
                         ));
                     }
 
+                    Self::check_cancel(cancel)?;
+                    let outcomes = self.execute_tool_calls(&calls, on_event, cancel).await;
+                    Self::check_cancel(cancel)?;
+
+                    // Emission and wire order both follow the order the model
+                    // asked in, never completion order.
                     let mut results = Vec::with_capacity(calls.len());
-                    for call in calls {
-                        Self::check_cancel(cancel)?;
-                        let (body, is_error, risk, metadata) =
-                            self.execute_tool_call(&call, on_event, cancel).await;
-                        if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-                            return Err(HarnessError::Cancelled);
-                        }
-                        if risk == ToolRisk::Sensitive {
+                    for (call, outcome) in calls.iter().zip(outcomes) {
+                        if outcome.risk == ToolRisk::Sensitive {
                             turn_sensitive.push(call.id.clone());
                         }
-                        let summary = if risk == ToolRisk::Sensitive {
+                        let summary = if outcome.risk == ToolRisk::Sensitive {
                             "sensitive content (hidden)".to_string()
                         } else if let Some(label) =
-                            metadata.as_ref().and_then(|m| m.delegation_label())
+                            outcome.metadata.as_ref().and_then(|m| m.delegation_label())
                         {
                             // Prefer the short provenance label; full body stays on wire.
                             label
                         } else {
-                            summarize_tool_body(&body)
+                            summarize_tool_body(&outcome.body)
                         };
                         on_event(StreamEvent::ToolCallResult {
                             name: &call.name,
                             id: &call.id,
                             summary: &summary,
-                            is_error,
-                            metadata,
+                            is_error: outcome.is_error,
+                            metadata: outcome.metadata,
                         });
                         // Live staged history keeps the real body for the model.
-                        results.push(tool_result(&call.id, &body, is_error));
+                        results.push(tool_result(&call.id, &outcome.body, outcome.is_error));
                     }
 
                     // One user message carrying every result.
@@ -265,37 +315,143 @@ impl Agent {
         }
     }
 
-    async fn execute_tool_call(
+    /// Run every tool the model asked for, returning one outcome per call **in
+    /// call order** regardless of the order they finish in.
+    ///
+    /// Ungated calls run concurrently. They are independent by construction —
+    /// the model issued them all before seeing any result — so serializing them
+    /// only ever costs wall-clock, and a one-second `web_search` should not
+    /// stall three instant file reads.
+    ///
+    /// Gated calls stay strictly sequential and run after the concurrent batch.
+    /// Two reasons: the user must see one approval card at a time, and two
+    /// writes to the same path must never race. Running them last also means a
+    /// read in the same batch observes the pre-write file deterministically,
+    /// rather than depending on who won.
+    async fn execute_tool_calls(
         &self,
-        call: &crate::anthropic::types::ToolUse,
+        calls: &[crate::anthropic::types::ToolUse],
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
-    ) -> (String, bool, ToolRisk, Option<crate::tools::ToolMetadata>) {
+    ) -> Vec<ToolCallOutcome> {
+        let mut slots: Vec<Option<ToolCallOutcome>> = (0..calls.len()).map(|_| None).collect();
+
         if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-            return (
-                "turn cancelled before tool ran".into(),
-                true,
-                ToolRisk::Read,
-                None,
+            return slots
+                .into_iter()
+                .map(|_| ToolCallOutcome::failed("turn cancelled before tool ran", ToolRisk::Read))
+                .collect();
+        }
+
+        // Prepare once, up front, for every call: preview, path, and pre-image
+        // fingerprint must be the same plan that later executes. Preparing the
+        // whole batch is also what tells us which calls need a human.
+        let mut auto: Vec<(usize, PreparedToolCall)> = Vec::new();
+        let mut gated: Vec<(usize, PreparedToolCall)> = Vec::new();
+        for (index, call) in calls.iter().enumerate() {
+            match self.tools.prepare(&call.name, call.input.clone()) {
+                Ok(prepared) if prepared.risk.requires_approval() => gated.push((index, prepared)),
+                Ok(prepared) => auto.push((index, prepared)),
+                Err(message) => {
+                    slots[index] = Some(ToolCallOutcome::failed(
+                        format!("cannot prepare `{}`: {message}", call.name),
+                        ToolRisk::Read,
+                    ));
+                }
+            }
+        }
+
+        if !auto.is_empty() {
+            let planned: Vec<(usize, ToolRisk)> = auto.iter().map(|(i, p)| (*i, p.risk)).collect();
+            let running = auto
+                .into_iter()
+                .map(|(_, prepared)| self.tools.execute_prepared(prepared));
+
+            let finished = tokio::select! {
+                biased;
+                _ = wait_cancel(cancel) => None,
+                results = futures_util::future::join_all(running) => Some(results),
+            };
+
+            match finished {
+                Some(results) => {
+                    for ((index, risk), exec) in planned.into_iter().zip(results) {
+                        slots[index] = Some(match exec {
+                            Ok(outcome) => ToolCallOutcome {
+                                body: outcome.body,
+                                is_error: false,
+                                risk,
+                                metadata: outcome.metadata,
+                            },
+                            Err(message) => ToolCallOutcome::failed(message, risk),
+                        });
+                    }
+                }
+                None => {
+                    for (index, risk) in planned {
+                        slots[index] = Some(ToolCallOutcome::failed(
+                            "turn cancelled before tool finished",
+                            risk,
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (index, prepared) in gated {
+            slots[index] = Some(
+                self.run_gated_call(&calls[index], prepared, on_event, cancel)
+                    .await,
             );
         }
 
-        // Prepare once before approval so preview, path, and pre-image fingerprint
-        // are the same plan that will execute.
-        let prepared = match self.tools.prepare(&call.name, call.input.clone()) {
-            Ok(prepared) => prepared,
-            Err(message) => {
-                return (
-                    format!("cannot prepare `{}`: {message}", call.name),
-                    true,
-                    ToolRisk::Read,
-                    None,
-                );
-            }
-        };
+        slots
+            .into_iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                slot.unwrap_or_else(|| {
+                    ToolCallOutcome::failed(
+                        format!(
+                            "internal error: no outcome recorded for `{}`",
+                            calls[index].name
+                        ),
+                        ToolRisk::Read,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// One approval-gated call: prompt, wait, then execute if allowed.
+    async fn run_gated_call(
+        &self,
+        call: &crate::anthropic::types::ToolUse,
+        prepared: PreparedToolCall,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> ToolCallOutcome {
+        if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
+            return ToolCallOutcome::failed("turn cancelled before tool ran", prepared.risk);
+        }
 
         let risk = prepared.risk;
-        if risk.requires_approval() {
+        // The target is what the user was actually shown — a file path, or the
+        // command line itself — so a session grant covers exactly that.
+        let target = prepared.preview.path.clone();
+
+        let outcome = match self.policy.lock() {
+            Ok(policy) => policy.decide(&call.name, &target, risk, prepared.auto_eligible),
+            // A poisoned lock must not become an open door.
+            Err(_) => PolicyOutcome::Ask,
+        };
+
+        match outcome {
+            PolicyOutcome::Allow => return self.run_prepared(prepared, risk, cancel).await,
+            PolicyOutcome::Block(reason) => return ToolCallOutcome::failed(reason, risk),
+            PolicyOutcome::Ask => {}
+        }
+
+        {
             let mut preview = prepared.preview.clone();
             // Hide sensitive diffs/summaries from durable UI cards.
             if risk == ToolRisk::Sensitive {
@@ -335,38 +491,77 @@ impl Agent {
 
             match decision {
                 ApprovalDecision::AllowOnce => {}
+                ApprovalDecision::AllowSession => {
+                    // Record against the exact target that was on the card.
+                    if let Ok(mut policy) = self.policy.lock() {
+                        policy.trust(&call.name, &target);
+                    }
+                }
                 ApprovalDecision::Deny => {
                     if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-                        return ("turn cancelled during approval".into(), true, risk, None);
+                        return ToolCallOutcome::failed("turn cancelled during approval", risk);
                     }
-                    return (
+                    return ToolCallOutcome::failed(
                         format!(
                             "user denied permission to run `{}` ({summary_for_deny})",
                             call.name
                         ),
-                        true,
                         risk,
-                        None,
                     );
                 }
             }
 
             if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
-                return ("turn cancelled during approval".into(), true, risk, None);
+                return ToolCallOutcome::failed("turn cancelled during approval", risk);
             }
         }
 
+        self.run_prepared(prepared, risk, cancel).await
+    }
+
+    /// Execute an approved call, racing the cancel token.
+    async fn run_prepared(
+        &self,
+        prepared: PreparedToolCall,
+        risk: ToolRisk,
+        cancel: Option<&CancelToken>,
+    ) -> ToolCallOutcome {
         let exec = tokio::select! {
             biased;
             _ = wait_cancel(cancel) => {
-                return ("turn cancelled before tool finished".into(), true, risk, None);
+                return ToolCallOutcome::failed("turn cancelled before tool finished", risk);
             }
             result = self.tools.execute_prepared(prepared) => result,
         };
 
         match exec {
-            Ok(outcome) => (outcome.body, false, risk, outcome.metadata),
-            Err(message) => (message, true, risk, None),
+            Ok(outcome) => ToolCallOutcome {
+                body: outcome.body,
+                is_error: false,
+                risk,
+                metadata: outcome.metadata,
+            },
+            Err(message) => ToolCallOutcome::failed(message, risk),
+        }
+    }
+}
+
+/// One tool call's result, kept beside the risk that produced it so the caller
+/// can decide about redaction and UI summaries without re-querying the registry.
+struct ToolCallOutcome {
+    body: String,
+    is_error: bool,
+    risk: ToolRisk,
+    metadata: Option<crate::tools::ToolMetadata>,
+}
+
+impl ToolCallOutcome {
+    fn failed(body: impl Into<String>, risk: ToolRisk) -> Self {
+        Self {
+            body: body.into(),
+            is_error: true,
+            risk,
+            metadata: None,
         }
     }
 }
@@ -491,6 +686,235 @@ mod tests {
         assert!(matches!(err, HarnessError::Other(_)));
         assert_eq!(agent.messages.len(), prior_len);
         assert_eq!(agent.messages[0].role, "user");
+    }
+
+    /// A tool that sleeps for `delay_ms` and reports its own name, so a batch
+    /// can be arranged to finish in the reverse of the order it was called in.
+    struct SlowTool {
+        name: &'static str,
+        delay_ms: u64,
+        /// Records completion order across the whole batch.
+        finished: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for SlowTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "test tool"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object", "properties": {} })
+        }
+        async fn run(
+            &self,
+            _input: serde_json::Value,
+        ) -> std::result::Result<crate::tools::ToolOutcome, String> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            if let Ok(mut f) = self.finished.lock() {
+                f.push(self.name);
+            }
+            Ok(crate::tools::ToolOutcome::text(self.name.to_string()))
+        }
+    }
+
+    /// Emits a `tool_use` turn on the first call and `end_turn` afterwards, so
+    /// the agent runs exactly one batch of tools.
+    struct ToolCallingProvider {
+        calls: AtomicUsize,
+        tools: Vec<&'static str>,
+    }
+
+    #[async_trait]
+    impl Provider for ToolCallingProvider {
+        fn id(&self) -> &str {
+            "fake"
+        }
+        fn default_model(&self) -> &str {
+            "fake-model"
+        }
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+        async fn stream_turn(
+            &self,
+            _req: &TurnRequest,
+            _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            if n > 0 {
+                return Ok(Completion {
+                    content: vec![json!({ "type": "text", "text": "done" })],
+                    stop_reason: Some("end_turn".into()),
+                    usage: Usage::default(),
+                    limits: None,
+                });
+            }
+            let content = self
+                .tools
+                .iter()
+                .map(|name| {
+                    json!({ "type": "tool_use", "id": format!("call_{name}"), "name": name, "input": {} })
+                })
+                .collect();
+            Ok(Completion {
+                content,
+                stop_reason: Some("tool_use".into()),
+                usage: Usage::default(),
+                limits: None,
+            })
+        }
+    }
+
+    /// The invariant that makes concurrency safe: tools may finish in any
+    /// order, but `tool_result` blocks must come back in the order the model
+    /// asked for them.
+    #[tokio::test]
+    async fn parallel_tool_results_keep_call_order() {
+        let finished = Arc::new(Mutex::new(Vec::new()));
+        let mut tools = ToolRegistry::new();
+        // Called slow → medium → fast; they finish in exactly the reverse.
+        for (name, delay) in [("slow", 60u64), ("medium", 30), ("fast", 1)] {
+            tools.register(Arc::new(SlowTool {
+                name,
+                delay_ms: delay,
+                finished: finished.clone(),
+            }));
+        }
+
+        let provider: Arc<dyn Provider> = Arc::new(ToolCallingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec!["slow", "medium", "fast"],
+        });
+        let mut agent = Agent::new(provider, tools);
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        agent.send("go", &mut sink).await.unwrap();
+
+        assert_eq!(
+            finished.lock().unwrap().clone(),
+            vec!["fast", "medium", "slow"],
+            "tools must actually have run concurrently and finished out of order"
+        );
+
+        // user, assistant(tool_use), user(tool_result x3), assistant(end_turn)
+        let results = &agent.messages[2];
+        assert_eq!(results.role, "user");
+        let ids: Vec<&str> = results
+            .content
+            .iter()
+            .map(|b| b["tool_use_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["call_slow", "call_medium", "call_fast"]);
+        let bodies: Vec<&str> = results
+            .content
+            .iter()
+            .map(|b| b["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(bodies, vec!["slow", "medium", "fast"]);
+    }
+
+    /// Wall-clock proof, not just ordering: three 80 ms tools overlap.
+    #[tokio::test]
+    async fn independent_tools_overlap_instead_of_serializing() {
+        let finished = Arc::new(Mutex::new(Vec::new()));
+        let mut tools = ToolRegistry::new();
+        for name in ["a", "b", "c"] {
+            tools.register(Arc::new(SlowTool {
+                name,
+                delay_ms: 80,
+                finished: finished.clone(),
+            }));
+        }
+        let provider: Arc<dyn Provider> = Arc::new(ToolCallingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec!["a", "b", "c"],
+        });
+        let mut agent = Agent::new(provider, tools);
+        let mut sink = |_ev: StreamEvent<'_>| {};
+
+        let started = std::time::Instant::now();
+        agent.send("go", &mut sink).await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(finished.lock().unwrap().len(), 3);
+        // Serial would be ~240 ms. Generous bound so a loaded CI box does not
+        // flake, but still far below the serial floor.
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "tools serialized: {elapsed:?}"
+        );
+    }
+
+    /// Gated tools must not join the concurrent batch — one approval card at a
+    /// time, and no two writes racing for the same path.
+    #[tokio::test]
+    async fn gated_tools_run_sequentially_after_the_concurrent_batch() {
+        use crate::tools::approval::AllowApprover;
+        use crate::tools::prepared::PreparedToolCall;
+
+        struct GatedTool {
+            name: &'static str,
+            order: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl crate::tools::Tool for GatedTool {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn description(&self) -> &str {
+                "gated test tool"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({ "type": "object", "properties": {} })
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::Write
+            }
+            fn prepare(
+                &self,
+                input: serde_json::Value,
+            ) -> std::result::Result<PreparedToolCall, String> {
+                Ok(PreparedToolCall::plain(self.name, ToolRisk::Write, input))
+            }
+            async fn run(
+                &self,
+                _input: serde_json::Value,
+            ) -> std::result::Result<crate::tools::ToolOutcome, String> {
+                if let Ok(mut o) = self.order.lock() {
+                    o.push(format!("enter:{}", self.name));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                if let Ok(mut o) = self.order.lock() {
+                    o.push(format!("exit:{}", self.name));
+                }
+                Ok(crate::tools::ToolOutcome::text(self.name.to_string()))
+            }
+        }
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut tools = ToolRegistry::new();
+        for name in ["w1", "w2"] {
+            tools.register(Arc::new(GatedTool {
+                name,
+                order: order.clone(),
+            }));
+        }
+        let provider: Arc<dyn Provider> = Arc::new(ToolCallingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec!["w1", "w2"],
+        });
+        let mut agent = Agent::new(provider, tools).with_approver(Arc::new(AllowApprover));
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        agent.send("go", &mut sink).await.unwrap();
+
+        assert_eq!(
+            order.lock().unwrap().clone(),
+            vec!["enter:w1", "exit:w1", "enter:w2", "exit:w2"],
+            "gated writes must not overlap"
+        );
     }
 
     #[tokio::test]

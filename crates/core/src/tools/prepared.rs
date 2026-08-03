@@ -47,6 +47,12 @@ pub struct PreparedToolCall {
     pub tool_name: String,
     pub risk: ToolRisk,
     pub preview: ApprovalPreview,
+    /// The tool vouches for *this* invocation as read-only.
+    ///
+    /// Only `bash` sets it, for a command that matches the allowlist and holds
+    /// no shell metacharacters. It is an input to the mode policy, never a
+    /// bypass: Manual mode still asks, and Plan mode still refuses.
+    pub auto_eligible: bool,
     pub(crate) kind: PreparedKind,
 }
 
@@ -54,7 +60,9 @@ pub struct PreparedToolCall {
 pub(crate) enum PreparedKind {
     /// Ordinary tool: execute with this input after optional approval.
     Plain { input: Value },
-    /// `write_file` bound to path + pre-image.
+    /// A whole-file replacement bound to path + pre-image. Shared by
+    /// `write_file` and `edit_file` — an edit is computed up front, so by the
+    /// time it reaches the approval gate it is the same kind of commitment.
     WriteFile {
         absolute_path: PathBuf,
         relative_path: String,
@@ -74,6 +82,7 @@ impl PreparedToolCall {
                 summary: format!("{tool_name} requires approval"),
                 diff: String::new(),
             },
+            auto_eligible: false,
             kind: PreparedKind::Plain { input },
         }
     }
@@ -88,7 +97,39 @@ impl PreparedToolCall {
             tool_name: tool_name.into(),
             risk,
             preview,
+            auto_eligible: false,
             kind: PreparedKind::Plain { input },
+        }
+    }
+
+    /// Mark this specific invocation as read-only, for the mode policy to use.
+    pub fn auto_eligible(mut self, eligible: bool) -> Self {
+        self.auto_eligible = eligible;
+        self
+    }
+
+    /// A prepared whole-file replacement. `tool_name` decides which tool the
+    /// registry dispatches execution back to, so `edit_file` keeps its own
+    /// identity in the UI while sharing the write path.
+    pub fn write_kind(
+        tool_name: impl Into<String>,
+        absolute_path: PathBuf,
+        relative_path: String,
+        content: String,
+        preimage: PreImage,
+        preview: ApprovalPreview,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            risk: ToolRisk::Write,
+            preview,
+            auto_eligible: false,
+            kind: PreparedKind::WriteFile {
+                absolute_path,
+                relative_path,
+                content,
+                preimage,
+            },
         }
     }
 
@@ -99,17 +140,14 @@ impl PreparedToolCall {
         preimage: PreImage,
         preview: ApprovalPreview,
     ) -> Self {
-        Self {
-            tool_name: "write_file".into(),
-            risk: ToolRisk::Write,
+        Self::write_kind(
+            "write_file",
+            absolute_path,
+            relative_path,
+            content,
+            preimage,
             preview,
-            kind: PreparedKind::WriteFile {
-                absolute_path,
-                relative_path,
-                content,
-                preimage,
-            },
-        }
+        )
     }
 
     pub fn plain_input(&self) -> Option<&Value> {

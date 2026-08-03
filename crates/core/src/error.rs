@@ -38,4 +38,145 @@ pub enum HarnessError {
     Other(String),
 }
 
+impl HarnessError {
+    /// Whether this failure means the provider's credentials need renewing.
+    ///
+    /// The distinction that matters: a rate limit will pass on its own, a bad
+    /// request needs a code change, but *this* class only clears when someone
+    /// signs in again — so it is the only one worth putting a Reconnect button
+    /// on. A gateway is the usual source, and it reports the problem in the
+    /// body rather than the status: CLIProxyAPI answers 503 `auth_unavailable`
+    /// for an account it holds but cannot use, which is indistinguishable from
+    /// "temporarily overloaded" unless the body is read.
+    pub fn is_auth_problem(&self) -> bool {
+        let Self::Api { status, body } = self else {
+            return false;
+        };
+        if matches!(status, 401 | 403) {
+            return true;
+        }
+        let body = body.to_ascii_lowercase();
+        [
+            "auth_unavailable",
+            "authentication_error",
+            "invalid_api_key",
+            "no auth available",
+            "unauthorized",
+            "invalid x-api-key",
+        ]
+        .iter()
+        .any(|needle| body.contains(needle))
+    }
+
+    /// Whether a failure that happened **before any output streamed** is worth
+    /// another attempt.
+    ///
+    /// Deliberately narrow. Once bytes have reached the caller a retry would
+    /// duplicate them, so this is only ever consulted on the request itself.
+    /// 529 is Anthropic's overloaded signal; 429 is rate limiting; the rest are
+    /// ordinary gateway flapping.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Http(e) => e.is_timeout() || e.is_connect(),
+            Self::Api { status, .. } => matches!(status, 408 | 429 | 500 | 502 | 503 | 529),
+            _ => false,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, HarnessError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_classification_is_narrow() {
+        for status in [408, 429, 500, 502, 503, 529] {
+            assert!(
+                HarnessError::Api {
+                    status,
+                    body: String::new()
+                }
+                .is_transient(),
+                "{status} should retry"
+            );
+        }
+        // A bad request or a bad key will fail identically every time.
+        for status in [400, 401, 403, 404, 413, 422] {
+            assert!(
+                !HarnessError::Api {
+                    status,
+                    body: String::new()
+                }
+                .is_transient(),
+                "{status} must not retry"
+            );
+        }
+        assert!(!HarnessError::Cancelled.is_transient());
+        // A 503 is retryable *and* can be an auth problem; the two questions
+        // are independent, and the body is what tells them apart.
+        assert!(HarnessError::Api {
+            status: 503,
+            body: r#"{"error":{"message":"auth_unavailable: no auth available"}}"#.into()
+        }
+        .is_transient());
+        assert!(!HarnessError::PrematureEof.is_transient());
+        // Mid-stream failures must never retry — output already reached the UI.
+        assert!(!HarnessError::Stream {
+            kind: "overloaded_error".into(),
+            message: "busy".into()
+        }
+        .is_transient());
+    }
+
+    #[test]
+    fn auth_problems_are_recognised_by_body_not_just_status() {
+        // The one that actually happened: CLIProxyAPI holds a Claude session it
+        // cannot use and reports 503, which looks like ordinary overload.
+        let real = HarnessError::Api {
+            status: 503,
+            body: r#"{"type":"error","error":{"type":"api_error","message":"auth_unavailable: no auth available (providers=claude, model=claude-opus-5); check Claude auth/key session and cooldown state"}}"#.into(),
+        };
+        assert!(real.is_auth_problem());
+
+        for (status, body) in [
+            (401u16, "{}"),
+            (403, "{}"),
+            (400, r#"{"error":{"type":"authentication_error"}}"#),
+            (400, r#"{"error":{"message":"invalid x-api-key"}}"#),
+        ] {
+            assert!(
+                HarnessError::Api {
+                    status,
+                    body: body.into()
+                }
+                .is_auth_problem(),
+                "{status} {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_failures_do_not_offer_a_reconnect() {
+        // Signing in again fixes none of these, so suggesting it would send the
+        // user through an OAuth flow for nothing.
+        for (status, body) in [
+            (503u16, r#"{"error":{"message":"overloaded_error"}}"#),
+            (429, r#"{"error":{"message":"rate_limit_error"}}"#),
+            (400, r#"{"error":{"message":"max_tokens is too large"}}"#),
+            (404, r#"{"error":{"message":"model not found"}}"#),
+        ] {
+            assert!(
+                !HarnessError::Api {
+                    status,
+                    body: body.into()
+                }
+                .is_auth_problem(),
+                "{status} {body}"
+            );
+        }
+        assert!(!HarnessError::Cancelled.is_auth_problem());
+        assert!(!HarnessError::StreamIdleTimeout.is_auth_problem());
+    }
+}

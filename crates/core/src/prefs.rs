@@ -89,17 +89,23 @@ impl ProjectSessionState {
     }
 
     fn migrate_legacy(&mut self, root: &Path, active_provider: &str) {
-        if self.providers.contains_key(active_provider) {
-            // Already have a slot — still allow filling missing fields from legacy.
-        }
-
         let project = root.join(".zest");
-        let legacy_thread =
-            read_trimmed(project.join(LEGACY_THREAD)).or_else(|| read_user_legacy(LEGACY_THREAD));
-        let legacy_model =
-            read_trimmed(project.join(LEGACY_MODEL)).or_else(|| read_user_legacy(LEGACY_MODEL));
-        let legacy_effort =
-            read_trimmed(project.join(LEGACY_EFFORT)).or_else(|| read_user_legacy(LEGACY_EFFORT));
+
+        // Only project-level legacy scalars are migrated. The user-level copies
+        // in the config dir used to be a fallback here, and that was wrong in a
+        // way worth recording: nothing deletes them, they carry no provider
+        // attribution, and `last-model` / `last-provider` are written by
+        // different code at different times — so they are not a matched pair
+        // and cannot be assigned to a provider by inspection.
+        //
+        // Read as a fallback they applied to *every* provider in *every*
+        // project forever, so a Codex model landed in the Claude slot and made
+        // Claude unselectable. A one-time upgrade convenience is not worth a
+        // permanent cross-provider leak; the project-level files stay because
+        // they are deleted after migrating and so are genuinely once.
+        let legacy_thread = read_trimmed(project.join(LEGACY_THREAD));
+        let legacy_model = read_trimmed(project.join(LEGACY_MODEL));
+        let legacy_effort = read_trimmed(project.join(LEGACY_EFFORT));
 
         if legacy_thread.is_none() && legacy_model.is_none() && legacy_effort.is_none() {
             return;
@@ -141,11 +147,6 @@ fn read_trimmed(path: PathBuf) -> Option<String> {
     let value = std::fs::read_to_string(path).ok()?;
     let value = value.trim().to_string();
     (!value.is_empty()).then_some(value)
-}
-
-fn read_user_legacy(name: &str) -> Option<String> {
-    let path = dirs::config_dir()?.join("zest").join(name);
-    read_trimmed(path)
 }
 
 fn thread_owned_by(root: &Path, thread_id: &str, provider_id: &str) -> bool {
@@ -219,5 +220,39 @@ mod tests {
         let loaded = ProjectSessionState::load(&root, "codex");
         assert_eq!(loaded.get("codex").thread_id.as_deref(), Some("thread-1"));
         assert_eq!(loaded.get("codex").model.as_deref(), Some("gpt-5.6-sol"));
+    }
+    /// The reported bug: a second provider inherited the first providers model.
+    ///
+    /// The user-level legacy scalars live in the config dir and are never
+    /// deleted (only the project copies are). Consulting them for every new
+    /// provider slot meant a Codex model landed in the Claude slot and made
+    /// Claude unselectable.
+    #[test]
+    fn user_level_legacy_does_not_leak_into_a_second_provider() {
+        let root = scratch("no-leak");
+        let mut state = ProjectSessionState::default();
+        state.set_model_effort("codex", "gpt-5.6-sol", "high");
+        state.save(&root).unwrap();
+
+        // Loading for a provider that has no slot yet must not invent one from
+        // whatever the single-provider era left behind.
+        let loaded = ProjectSessionState::load(&root, "claude");
+        assert_eq!(
+            loaded.get("claude").model,
+            None,
+            "a new provider slot must start empty, not inherit"
+        );
+        assert_eq!(loaded.get("codex").model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn project_level_legacy_still_migrates_on_a_fresh_map() {
+        let root = scratch("fresh");
+        std::fs::write(root.join(".zest").join(LEGACY_MODEL), "gpt-5.6-sol").unwrap();
+        std::fs::write(root.join(".zest").join(LEGACY_EFFORT), "high").unwrap();
+
+        let loaded = ProjectSessionState::load(&root, "codex");
+        assert_eq!(loaded.get("codex").model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(loaded.get("codex").effort.as_deref(), Some("high"));
     }
 }
