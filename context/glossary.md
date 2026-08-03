@@ -18,5 +18,7 @@
 | Gateway | A server that speaks the Messages API on behalf of another backend | e.g. CLIProxyAPI. Set with `ZEST_BASE_URL`. Dev-only |
 | Anthropic extensions | Request fields only Anthropic understands: `thinking`, `output_config.effort` | Dropped automatically when pointed at a non-Anthropic gateway |
 | Sidecar | A second process shipped alongside and supervised by the app | Explicitly avoided — the reason Zest is one binary |
+| Known workspace | A project folder the desktop has opened and remembered for the Projects sidebar | `~/.zest/known-workspaces.json` (MRU). Threads stay under each project's `.zest/threads/` |
+| Context meter | UI estimate of how full the model context window is | Prefers last-turn `input_tokens`; else char/4 estimate. Compaction not shipped |
 | LimeBot | The author's separate Python personal-assistant project | Design ancestor, not a dependency |
 | Agentic Lemon | The author's scaffolder that generated this documentation structure | `AGENTS.md`, `context/`, `memory/`, `skills/` |
