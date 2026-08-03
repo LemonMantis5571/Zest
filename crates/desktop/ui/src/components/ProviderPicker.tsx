@@ -3,6 +3,7 @@ import { CheckIcon, FolderOpenIcon } from "lucide-react";
 import { AuthShell } from "@/components/AuthShell";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
+import { recentVerifyFailed } from "@/lib/providerVerify";
 import { cn } from "@/lib/utils";
 import type { ProviderRow } from "@/lib/types";
 
@@ -38,7 +39,11 @@ export function ProviderPicker({
   continuing,
 }: Props) {
   const selected = providers.find((p) => p.id === selectedId) ?? null;
-  const ready = selected?.statusKind === "ready" || selected?.statusKind === "unknown";
+  const selectedNeedsConnect =
+    selected != null && recentVerifyFailed(selected.id);
+  const ready =
+    !selectedNeedsConnect &&
+    (selected?.statusKind === "ready" || selected?.statusKind === "unknown");
 
   return (
     <AuthShell>
@@ -89,12 +94,15 @@ export function ProviderPicker({
       >
         {providers.map((p, index) => {
           const selectedRow = p.id === selectedId;
-          const detail =
-            p.statusKind === "ready"
+          const verifyFailed = recentVerifyFailed(p.id);
+          const detail = verifyFailed
+            ? "Last check failed — Connect again"
+            : p.statusKind === "ready"
               ? p.method
               : p.statusKind === "unknown"
                 ? shortenUnknown(p.detail)
                 : p.detail;
+          const statusLabel = verifyFailed ? "Reconnect" : p.statusLabel;
 
           return (
             <li
@@ -117,9 +125,12 @@ export function ProviderPicker({
                 <span
                   className={cn(
                     "justify-self-center size-2 rounded-full transition-colors duration-150",
-                    p.statusKind === "ready" && "bg-[var(--success)]",
-                    p.statusKind === "unknown" && "bg-[#c4c4c4]",
-                    (p.statusKind === "not_logged_in" || p.statusKind === "unconfigured") &&
+                    !verifyFailed && p.statusKind === "ready" && "bg-[var(--success)]",
+                    verifyFailed && "bg-amber-400",
+                    !verifyFailed && p.statusKind === "unknown" && "bg-[#c4c4c4]",
+                    !verifyFailed &&
+                      (p.statusKind === "not_logged_in" ||
+                        p.statusKind === "unconfigured") &&
                       "bg-transparent shadow-[inset_0_0_0_1.5px_var(--muted-foreground)]"
                   )}
                   aria-hidden
@@ -140,10 +151,11 @@ export function ProviderPicker({
                 <span
                   className={cn(
                     "whitespace-nowrap text-[11px] font-medium text-muted-foreground",
-                    p.statusKind === "ready" && "text-[var(--success)]"
+                    !verifyFailed && p.statusKind === "ready" && "text-[var(--success)]",
+                    verifyFailed && "text-amber-400"
                   )}
                 >
-                  {p.statusLabel}
+                  {statusLabel}
                 </span>
               </button>
             </li>
@@ -156,7 +168,9 @@ export function ProviderPicker({
       <footer className="mt-6 flex justify-end gap-2">
         {selected?.canConnect ? (
           <Button type="button" variant="outline" onClick={onConnect}>
-            {selected.statusKind === "ready" ? "Reconnect" : "Connect"}
+            {selected.statusKind === "ready" || selectedNeedsConnect
+              ? "Reconnect"
+              : "Connect"}
           </Button>
         ) : null}
         <Button type="button" disabled={!ready || continuing} onClick={onContinue}>
