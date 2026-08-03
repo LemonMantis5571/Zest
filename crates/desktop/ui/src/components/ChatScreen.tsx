@@ -1,11 +1,16 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   CheckIcon,
   CopyIcon,
-  MenuIcon,
+  FileIcon,
+  FileTextIcon,
+  FolderOpenIcon,
+  ImageIcon,
+  SettingsIcon,
   SquarePenIcon,
 } from "lucide-react";
 
+import { ApprovalStrip } from "@/components/ApprovalStrip";
 import {
   ChatHistorySidebar,
   readSidebarOpen,
@@ -14,11 +19,21 @@ import {
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { Composer } from "@/components/Composer";
 import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
+import { looksLikeDocument } from "@/lib/documentShape";
+import { buildablePlanId } from "@/lib/planActions";
 import { Markdown } from "@/components/Markdown";
+import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { ToolCallRow } from "@/components/ToolCallRow";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
 import { UserAvatarButton } from "@/components/UserAvatarButton";
+import {
+  Attachment,
+  AttachmentContent,
+  AttachmentGroup,
+  AttachmentMedia,
+  AttachmentTitle,
+} from "@/components/ui/attachment";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
@@ -40,7 +55,9 @@ import type {
   ApprovalMode,
   ChatMessage,
   PreparedAttachment,
+  ProviderRow,
   SessionInfo,
+  ToolPart,
   UserProfile,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -73,7 +90,8 @@ type Props = {
     threadId?: string;
     newThread?: boolean;
   }) => Promise<void>;
-  onChangeProvider: () => void;
+  providers: ProviderRow[];
+  onSwitchProvider: (providerId: string) => Promise<void>;
   onReloadSession?: () => Promise<void>;
   /** Re-run sign-in for a provider whose credentials the gateway rejected. */
   onReconnectProvider?: (providerId: string) => void;
@@ -83,6 +101,8 @@ type Props = {
   onEffortChange: (effort: EffortId) => void;
   approvalMode: ApprovalMode;
   onApprovalModeChange: (mode: ApprovalMode) => void;
+  /** Leave Plan mode and build the newest plan. */
+  onBuildPlan?: () => void;
   onResolveApproval: (
     approvalId: string,
     decision: ApprovalChoice
@@ -94,6 +114,29 @@ type Props = {
   onProfileChange: (profile: UserProfile) => void;
   optionsDisabled?: boolean;
 };
+
+function collectAwaitingApprovals(messages: ChatMessage[]): ToolPart[] {
+  const out: ToolPart[] = [];
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    for (const tool of msg.tools) {
+      if (tool.status === "awaiting_approval" && tool.approvalId) {
+        out.push(tool);
+      }
+    }
+  }
+  return out;
+}
+
+function focusComposer() {
+  const el = document.getElementById(
+    "zest-composer-input"
+  ) as HTMLTextAreaElement | null;
+  if (!el) return;
+  el.focus();
+  const len = el.value.length;
+  el.setSelectionRange(len, len);
+}
 
 export function ChatScreen({
   session,
@@ -111,7 +154,8 @@ export function ChatScreen({
   onNewChat,
   onDeleteThread,
   onOpenProjectChat,
-  onChangeProvider,
+  providers,
+  onSwitchProvider,
   onReloadSession,
   onReconnectProvider,
   onReconnect,
@@ -120,6 +164,7 @@ export function ChatScreen({
   onEffortChange,
   approvalMode,
   onApprovalModeChange,
+  onBuildPlan,
   onResolveApproval,
   onAttachFiles,
   onOpenFolder,
@@ -132,8 +177,15 @@ export function ChatScreen({
   const [focusUser, setFocusUser] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
+  const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
+  const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = shortRoot(session.root);
+  const awaitingApprovals = useMemo(
+    () => collectAwaitingApprovals(messages),
+    [messages]
+  );
+  const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
 
   function closeSettings() {
     setSettingsOpen(false);
@@ -144,6 +196,85 @@ export function ChatScreen({
     setSidebarOpen(next);
     writeSidebarOpen(next);
   }
+
+  function scrollToTool(toolId: string) {
+    const el = document.querySelector(`[data-tool-id="${toolId}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target;
+      const inField =
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+
+      if (e.key === "Escape") {
+        if (diffTarget) {
+          e.preventDefault();
+          setDiffTarget(null);
+          return;
+        }
+        if (providerSwitchOpen) {
+          e.preventDefault();
+          if (!providerSwitchBusy) setProviderSwitchOpen(false);
+          return;
+        }
+        if (settingsOpen) {
+          e.preventDefault();
+          closeSettings();
+          return;
+        }
+        if (sending && onStop) {
+          e.preventDefault();
+          onStop();
+        }
+        return;
+      }
+
+      if (e.key === "/" && !inField && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        focusComposer();
+        return;
+      }
+
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+
+      if (e.key === "n" || e.key === "N") {
+        e.preventDefault();
+        if (!sending) onNewChat();
+        return;
+      }
+      if (e.key === "b" || e.key === "B") {
+        e.preventDefault();
+        setSidebar(!sidebarOpen);
+        return;
+      }
+      if (e.key === ",") {
+        e.preventDefault();
+        setFocusUser(false);
+        setSettingsOpen(true);
+        return;
+      }
+      if (e.key === ".") {
+        e.preventDefault();
+        if (sending) onStop?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    diffTarget,
+    onNewChat,
+    onStop,
+    providerSwitchBusy,
+    providerSwitchOpen,
+    sending,
+    settingsOpen,
+    sidebarOpen,
+  ]);
 
   return (
     <section className="relative flex h-full min-h-0 overflow-hidden bg-[var(--chat-canvas)]">
@@ -189,7 +320,7 @@ export function ChatScreen({
               type="button"
               variant="ghost"
               size="icon-sm"
-              title="New chat"
+              title="New chat (Ctrl+N)"
               onClick={onNewChat}
               disabled={sending}
             >
@@ -199,14 +330,14 @@ export function ChatScreen({
               type="button"
               variant="ghost"
               size="icon-sm"
-              title="Settings"
+              title="Settings (Ctrl+,)"
               aria-expanded={settingsOpen}
               onClick={() => {
                 setFocusUser(false);
                 setSettingsOpen(true);
               }}
             >
-              <MenuIcon />
+              <SettingsIcon />
             </Button>
           </div>
         </header>
@@ -218,11 +349,44 @@ export function ChatScreen({
                 <MessageScrollerContent className="mx-auto w-full max-w-[var(--chat-max)] gap-6 px-4 py-6">
                   {messages.length === 0 ? (
                     <MessageScrollerItem messageId="empty">
-                      <div className="flex min-h-[42vh] flex-col items-center justify-center text-center">
+                      <div className="flex min-h-[42vh] flex-col items-center justify-center gap-4 text-center">
                         <p className="max-w-[34ch] text-sm text-muted-foreground">
-                          Ask about this project — paste images, attach PDFs, or open
-                          another folder from +.
+                          Ask about this project — paste images, attach files, or
+                          open another folder from +.
                         </p>
+                        <div className="flex flex-wrap items-center justify-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              onDraftChange("/plan ");
+                              requestAnimationFrame(() => focusComposer());
+                            }}
+                          >
+                            Plan this repo
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              onDraftChange("/");
+                              requestAnimationFrame(() => focusComposer());
+                            }}
+                          >
+                            / commands
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={onOpenFolder}
+                          >
+                            <FolderOpenIcon className="size-3.5" />
+                            Open folder
+                          </Button>
+                        </div>
                       </div>
                     </MessageScrollerItem>
                   ) : null}
@@ -237,12 +401,34 @@ export function ChatScreen({
                           scrollAnchor={isLast}
                         >
                           <Message align="end" className="justify-end">
-                            <MessageContent className="items-end">
-                              <Bubble variant="secondary" align="end" className="max-w-[85%]">
-                                <BubbleContent className="whitespace-pre-wrap bg-[var(--user-bubble)] text-[13.5px] leading-relaxed text-foreground">
-                                  <LinkifyText text={msg.text} />
-                                </BubbleContent>
-                              </Bubble>
+                            <MessageContent className="items-end gap-1.5">
+                              {msg.attachments && msg.attachments.length > 0 ? (
+                                <AttachmentGroup className="justify-end">
+                                  {msg.attachments.map((att) => (
+                                    <Attachment key={`${msg.id}-${att.name}`} size="sm">
+                                      <AttachmentMedia variant="icon">
+                                        {att.kind === "pdf" ? (
+                                          <FileTextIcon />
+                                        ) : att.kind === "image" ? (
+                                          <ImageIcon />
+                                        ) : (
+                                          <FileIcon />
+                                        )}
+                                      </AttachmentMedia>
+                                      <AttachmentContent>
+                                        <AttachmentTitle>{att.name}</AttachmentTitle>
+                                      </AttachmentContent>
+                                    </Attachment>
+                                  ))}
+                                </AttachmentGroup>
+                              ) : null}
+                              {msg.text.trim() ? (
+                                <Bubble variant="secondary" align="end" className="max-w-[85%]">
+                                  <BubbleContent className="whitespace-pre-wrap bg-[var(--user-bubble)] text-[13.5px] leading-relaxed text-foreground">
+                                    <LinkifyText text={msg.text} />
+                                  </BubbleContent>
+                                </Bubble>
+                              ) : null}
                             </MessageContent>
                           </Message>
                         </MessageScrollerItem>
@@ -312,15 +498,33 @@ export function ChatScreen({
                             ) : null}
 
                             {msg.text ? (
-                              // The answer to a slash command reads as a
-                              // document, not a chat reply — frame it as one.
-                              // Tool rows stay outside the card: they are how
-                              // the answer was reached, not part of it.
-                              msg.command ? (
+                              // The answer to a command reads as a document,
+                              // not a chat reply — frame it as one. Tool rows
+                              // stay outside the card: they are how the answer
+                              // was reached, not part of it.
+                              //
+                              // The shape test is what keeps Plan mode honest.
+                              // It tags every turn it produces, so a one-line
+                              // clarifying question would otherwise arrive
+                              // titled and savable as `plan.md`.
+                              msg.command && looksLikeDocument(msg.text) ? (
                                 <CommandOutputCard
                                   command={msg.command}
                                   text={msg.text}
                                   streaming={msg.streaming}
+                                  action={
+                                    msg.id === planToBuild && onBuildPlan
+                                      ? {
+                                          label: "Build plan",
+                                          hint:
+                                            approvalMode === "plan"
+                                              ? "Leaves Plan mode so the steps can run"
+                                              : undefined,
+                                          disabled: sending,
+                                          onClick: onBuildPlan,
+                                        }
+                                      : undefined
+                                  }
                                 >
                                   <Markdown>{msg.text}</Markdown>
                                   {msg.streaming ? (
@@ -438,6 +642,15 @@ export function ChatScreen({
             onOpenFolder={onOpenFolder}
             onRemoveAttachment={onRemoveAttachment}
             onPasteImages={onPasteImages}
+            aboveComposer={
+              awaitingApprovals.length > 0 ? (
+                <ApprovalStrip
+                  tools={awaitingApprovals}
+                  onResolveApproval={onResolveApproval}
+                  onFocusTool={scrollToTool}
+                />
+              ) : null
+            }
           />
         </div>
       </div>
@@ -453,7 +666,7 @@ export function ChatScreen({
         onClose={closeSettings}
         onChangeProvider={() => {
           closeSettings();
-          onChangeProvider();
+          setProviderSwitchOpen(true);
         }}
         onReloadSession={onReloadSession}
         onReconnect={() => {
@@ -465,6 +678,33 @@ export function ChatScreen({
           onOpenFolder();
         }}
         onProfileChange={onProfileChange}
+      />
+
+      <ProviderSwitchSheet
+        open={providerSwitchOpen}
+        providers={providers}
+        currentProviderId={session.provider}
+        busy={providerSwitchBusy}
+        onClose={() => {
+          if (!providerSwitchBusy) setProviderSwitchOpen(false);
+        }}
+        onSelect={(providerId) => {
+          void (async () => {
+            setProviderSwitchBusy(true);
+            try {
+              await onSwitchProvider(providerId);
+              setProviderSwitchOpen(false);
+            } catch {
+              /* parent toasts */
+            } finally {
+              setProviderSwitchBusy(false);
+            }
+          })();
+        }}
+        onConnect={(providerId) => {
+          setProviderSwitchOpen(false);
+          onReconnectProvider?.(providerId);
+        }}
       />
 
       <DiffViewer target={diffTarget} onClose={() => setDiffTarget(null)} />
