@@ -18,9 +18,15 @@ crates/core/     zest-core
   prefs.rs       project-scoped provider sticky state (`.zest/session-state.json`)
   fsutil.rs      centralized atomic persistence (flush/sync + Windows MoveFileExW)
   tools/         Tool trait + ToolRegistry (sensitive-path gates, bounded I/O)
-  agent.rs       transactional loop + ledger-before-late-cancel
+                 read: list_dir, glob, grep, read_file (offset/limit), web_search
+                 write: write_file, edit_file (+ Approver); exec: bash (allowlist)
+                 skill: read_skill; multi: delegate
+  prompt.rs      DEFAULT_SYSTEM + compose_system_with_docs + env_context
+  agent.rs       transactional loop, concurrent ungated tools, sequential gated
+                 ones; ledger-before-late-cancel; multimodal send
 crates/cli/      zest — REPL + doctor --live
 crates/desktop/  zest-desktop — Tauri chat shell (ui/ + session controller)
+                 attachments, context meter, known workspaces, profile avatar
 ```
 
 ## Components
@@ -28,10 +34,11 @@ crates/desktop/  zest-desktop — Tauri chat shell (ui/ + session controller)
 | Component | Purpose | Notes |
 |---|---|---|
 | `SseParser` (`sse.rs`) | Split the SSE byte stream into `data:` payloads | Buffers **bytes**, not strings — chunk boundaries land mid-codepoint. Ignores `event:` lines; every frame repeats its type inside the JSON. Unit-tested against a split codepoint. |
-| `AnthropicClient` (`client.rs`) | Issue the streaming request, rebuild the assistant turn | Accumulates blocks keyed by the stream's `index`, never by arrival order. Owns `base_url` so a gateway can be substituted. |
-| `Tool` / `ToolRegistry` (`tools/`) | Declare and dispatch client-side tools | `run` returns `Result<String, String>`; the `Err` becomes a `tool_result` with `is_error: true` rather than aborting the turn. Registry order is stable because tools render at the front of the prompt and reordering invalidates the cache. |
-| `Agent` (`agent.rs`) | The loop | Request → execute tools → feed results back → repeat until the model stops asking. Owns message history. |
+| `AnthropicClient` (`client.rs`) | Issue the streaming request, rebuild the assistant turn | Accumulates blocks keyed by the stream's `index`, never by arrival order. Owns `base_url` so a gateway can be substituted. Retries up to 3× on transient failures **before any byte streams** — never after, since that would replay output. |
+| `Tool` / `ToolRegistry` (`tools/`) | Declare and dispatch client-side tools | Outcomes via `ToolOutcome`; errors become `tool_result` with `is_error: true` rather than aborting the turn. Registry order is stable (prompt-cache prefixes). `web_search` is network read-risk (DuckDuckGo HTML). `bash` declares `Exec` and downgrades to `Read` only for metacharacter-free allowlisted commands. |
+| `Agent` (`agent.rs`) | The loop | Request → execute tools → feed results back → repeat. Ungated calls in a batch run concurrently; gated ones run sequentially afterwards, and results are always returned in call order. Owns message history; `send_blocks_cancellable` for multimodal user content; records `last_usage` for the desktop context meter. |
 | `Renderer` (`cli/main.rs`) | Stream thinking/text/tool calls to the terminal | Tracks a mode so it can print a header when output switches kind. |
+| Desktop UI (`desktop/ui`) | React chat shell | Projects sidebar, streaming chat, approvals/diffs, attachments, Settings. No Base UI Menu portals (WebView crash risk) — positioned panels only. |
 
 ## Data Flow
 
@@ -118,7 +125,10 @@ ledger meters what Zest itself spends and compares it to a configured budget. Th
 Zest's own traffic and blind to what other clients spent on the same account. Where a provider
 returns real limits in response headers (Anthropic's `anthropic-ratelimit-*`), prefer those and
 mark them authoritative. A number labelled "remaining" that silently excludes other clients' usage
-is worse than no number.
+is worse than no number. Separately, Antigravity/Gemini can return `429 RESOURCE_EXHAUSTED` for
+**system-prompt fingerprint** filters that are not real quota (see
+`memory/recurring-corrections.md` / CLIProxyAPI#4696) — do not trust that status alone when
+attributing exhaustion.
 
 ## Integrations
 

@@ -29,10 +29,12 @@ is already built.
    `scripts/verify.ps1` are in place. Run `cargo run -p zest -- doctor --live` only when a working
    gateway/login exists (manual; spends quota). Do not treat verify green as live-doctor green.
 2. **Milestone 1 — usage/routing UX** — Rust-authoritative provider catalogue, `UsageSnapshot`,
-   delegation provenance (thread v2), Settings Usage, and opt-in `doctor --live --dual`.
+   delegation provenance (thread v2), Settings Usage, and opt-in `doctor --live --dual` (landed).
+   Desktop also gained projects-by-folder chat history, attachments, `web_search`, and context meter.
 3. **Second spendable provider** alongside Codex so delegated workers exercise real dual-account
    routing in day-to-day use (dual doctor proves the path when configured).
-4. **OS-backed Windows sandbox** before any `bash` / exec tool ships.
+4. **Compaction + OS-backed Windows sandbox** — honest context management next; sandbox before any
+   `bash` / exec tool ships.
 
 ## Known Risks
 
