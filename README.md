@@ -71,6 +71,13 @@ copy .env.example .env
 
 Desktop **Connect** can also spawn this login when the gateway tree is present.
 
+If Claude through the gateway keeps returning `auth_unavailable` after a rebuild,
+that is the proxy cooling or dropping the session — not Zest wiping credentials.
+Desktop now probes before opening a gateway chat. In `tools/CLIProxyAPI/config.yaml`
+you can also set `disable-cooling: true` (and optionally
+`transient-error-cooldown-seconds: -1`) so a transient 503 does not black-hole the
+account until you Connect again.
+
 ### 4. Install JS deps and build the webview
 
 Desktop loads `crates/desktop/ui/dist` — you must build it once after clone:
