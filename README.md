@@ -146,13 +146,198 @@ When set, it is **authoritative** (persona wins over “You are Zest…”). Tak
 
 YAML frontmatter requires `name` and `description`. Catalogue is injected into the system prompt; bodies ≤4 KiB are inlined; larger skills load via the `read_skill` tool.
 
-### Approvals
+### Approvals & modes
 
-`write_file` asks **Allow once / Deny** in the desktop UI. CLI denies writes by default.
+The composer footer has a mode chip (keys **1-5** while open):
 
-### Chat history
+| Mode | Writes | Commands |
+|------|--------|----------|
+| Manual | ask | ask — including `cargo check` |
+| Accept edits | apply | ask for every command |
+| Plan | **refused** | **refused** — read-only research |
+| Auto *(default)* | apply | allowlisted run; ask for the rest |
+| Bypass permissions | apply | run |
 
-Threads live under `.zest/threads/` (gitignored). New chat / recent threads are in Settings.
+Cards offer **Allow once / Allow for session / Deny**. A session grant covers that
+tool and *that target only* — this file, or this exact command — because that is
+what you were shown. Changing mode clears every grant, and nothing is persisted:
+restarting is always a clean slate.
+
+Plan mode refuses rather than queueing a card, so the agent writes up what it
+would do instead of stalling.
+
+CLI prompts y/N at the terminal.
+
+### Long tool runs
+
+Five or more consecutive finished tool rows collapse into one line — *Ran 2
+commands, edited 3 files +30 -12* — which expands on click. Anything still running
+or waiting on you stays on its own row, and a failure inside a collapsed run is
+called out on the summary.
+
+### Tools
+
+Project-scoped: `list_dir`, `glob`, `grep`, `read_file`, `write_file`, `edit_file`.
+Commands: `bash`. Network: `web_search` (DuckDuckGo HTML; no API key). Skills:
+`read_skill`. Multi-provider: `delegate` when more than one provider is configured.
+
+`read_file` numbers its output and takes `offset` / `limit` (2000 lines at a time,
+256 KiB cap). `edit_file` replaces an exact string and is what the agent should
+reach for on an existing file — `write_file` is for creating one.
+
+### Running commands
+
+`bash` runs in the project root. Read-only commands run unattended:
+
+```
+cargo check | clippy | test | fmt --check | tree | metadata
+git status | diff | log | show | branch | rev-parse
+npm test | run lint | run ui:build | run ui:test
+```
+
+A command qualifies only if it contains **no shell metacharacters** — `cargo check
+&& rm -rf /` is not an allowlisted command, it is an approval prompt. Everything
+else shows the exact command line and waits for Allow. Configure under `[tools.bash]`:
+
+```toml
+[tools.bash]
+enabled = true
+extra_allowlist = [["just", "lint"]]   # token lists; still no metacharacters
+denylist = ["cargo publish"]           # checked first, always wins
+timeout_ms = 120000                    # capped at 600000
+```
+
+Not enabled for delegated workers or for `doctor --live`.
+
+### Slash commands
+
+A command **is** a skill. Type `/` in the composer to see what is available;
+`↑↓` to move, `Tab`/`Enter` to pick, `Esc` to dismiss. Anything after the
+command is appended to the skill body as your instruction:
+
+```
+/plan add a health endpoint
+```
+
+Adding a command means adding `.zest/skills/<name>/SKILL.md` — no code, no
+rebuild. `zest` ships with `/plan` (research, propose, change nothing).
+
+The transcript keeps what you typed, not the expansion, so the sidebar stays
+readable. An unknown `/token` is sent as-is rather than rejected — a typo should
+not eat your message. Start a message with `//` for a literal slash.
+
+### Routing (delegation)
+
+**Off by default.** Turn it on in **Settings → Routing**, where you also map task
+kinds to providers:
+
+| Kind | Provider | Model | Effort |
+|---|---|---|---|
+| `planning` | codex | gpt-5.6-luna | high |
+| `implementation` | claude | claude-opus-5 | high |
+| `mechanical` | codex | gpt-5.4-mini | low |
+
+**The parent chat does the orchestrating.** It delegates a piece, reads the
+answer, then delegates the next — so every hop is a row in your transcript with
+its provider, model and token delta. A *worker* can never delegate again: its
+registry structurally cannot contain the tool, which is what bounds the fan-out
+without a depth counter.
+
+Delegation is gated like anything else that spends money. Outside Auto and
+Bypass you get a card naming the exact provider and model before the call goes
+out, and the route is re-checked at dispatch — if a rate limit changed the
+answer between the card and the call, it aborts rather than quietly spending a
+different account.
+
+Off means the `delegate` tool is **not registered at all** — the model cannot see
+it and cannot spend a second subscription. Configuring rules is not enough on its
+own; the switch is separate.
+
+Rules need two or more configured providers. Model dropdowns are fed by each
+provider's real catalogue, and a rule is validated against it before saving.
+Rules are consulted in order, first match wins, so listing two providers for one
+kind gives you a fallback chain. A kind with no matching rule goes to
+`[routing].default`. Saved to `~/.zest/zest.toml`.
+
+After saving, hit **Apply now** — the tool registry is built once per session, so
+New chat (which only swaps the thread) keeps the old routing. Applying rebuilds
+the session and reloads the open chat from disk; nothing is lost.
+
+**Never configured routing before?** With two providers loaded, **Suggest rules**
+fills in a working starting point derived from what you actually have. It only
+suggests rules that reach a *different* provider — see below for why that matters.
+
+Each rule shows what it truly resolves to (`claude · claude-opus-5 · high`).
+A rule pointing at the provider the open chat already uses is noted, not
+flagged: that is still a real delegation — the worker starts with **no
+conversation history** — it just isolates context rather than changing model.
+Point the kind elsewhere if you wanted a different model.
+
+Two things sound like "the default" and are not the same:
+
+| | |
+|---|---|
+| **This chat runs on** | whichever provider you picked in the launcher |
+| **`[routing].default`** | where a *delegated* task goes when no rule matches — and the chat provider for the CLI, which has no picker |
+
+The Routing panel states both, because a note about one reads as a claim about
+the other otherwise.
+
+Equivalent TOML:
+
+```toml
+[routing]
+delegation = true
+default = { provider = "codex", model = "gpt-5.6-sol" }
+rules = [
+  { kind = "planning", provider = "codex", model = "gpt-5.6-luna" },
+  { kind = "implementation", provider = "claude", model = "claude-opus-5" },
+  # `effort` and `prompt` are optional. Worth setting both: routing a
+  # mechanical task to a cheap model and then running it at max effort spends
+  # most of what the routing saved.
+  { kind = "mechanical", provider = "codex", model = "gpt-5.4-mini", effort = "low",
+    prompt = "Make the smallest change that works. Do not refactor." },
+]
+```
+
+Delegated workers get the read and write tools but never `bash`, and never
+`delegate` itself — recursion is prevented by the capability being absent rather
+than by a depth counter.
+
+### Chat history (by project)
+
+The left sidebar lists **Projects** (folders you have opened). Each project expands
+to its chats. Threads are stored per project under `<project>/.zest/threads/`
+(gitignored). Known project roots are remembered in `~/.zest/known-workspaces.json`.
+
+**A chat belongs to one provider for its whole life.** Its stored history is raw
+wire format — thinking-block signatures that must echo back byte for byte, tool
+calls in that provider's shape — so it cannot be replayed to a different one.
+Switching provider therefore shows that provider's chats; switching back brings
+the others straight back. Nothing is deleted. When a project has chats under more
+than one provider, each row is tagged so this is visible rather than surprising.
+
+- Folder picker (sidebar or composer) adds/switches the active project
+- **+** on a project → new chat there
+- Trash → confirm, then delete (deleting the open chat starts a fresh empty one)
+- Composer footer shows folder, git branch, and context usage estimate
+
+### Attachments & images
+
+Composer **+** → Upload files / Open folder. Paste images into the composer.
+PDFs are extracted to text (no OCR). Images go to the model as Messages API image
+blocks.
+
+### User profile
+
+Header avatar opens **Settings → User**. Display name + optional photo (resized to
+a small JPEG under `~/.zest/avatar.jpg`).
+
+### Context usage
+
+Footer ring shows how full the context window looks (last API turn’s
+`input_tokens` when available, otherwise a rough estimate). Soft “compact”
+threshold is **not** shipped yet — the meter is informational only.
 
 ---
 
@@ -174,6 +359,29 @@ Agent-facing docs for contributors: `AGENTS.md`, `PROJECT_CONTEXT.md`, `context/
 ## Configuration
 
 `zest.toml` declares providers and routing. Keys are never stored there — only env var **names**.
+
+Looked up in this order:
+
+1. `zest.toml` in the folder you opened
+2. `~/.zest/zest.toml` — **user-global**, applies to every project
+3. Anthropic-from-environment fallback
+
+Environment variables load the same way: project `.env` (searching upward), then
+`~/.zest/.env`. First one wins, and a real environment variable beats both.
+
+**Set both user-global files once and every project works:**
+
+```powershell
+mkdir $HOME\.zest -Force
+copy zest.toml $HOME\.zest\zest.toml
+copy .env      $HOME\.zest\.env
+```
+
+Which accounts you are signed into, and the keys that reach them, are properties
+of your machine rather than of one repository. Without these, opening any folder
+outside the Zest checkout falls through to step 3 and cannot see your Codex login.
+A project `zest.toml` **replaces** the user one rather than merging — a merged
+provider table makes "which account is this about to spend" ambiguous.
 
 | Variable | Purpose |
 |----------|---------|
@@ -216,6 +424,14 @@ skip live doctor — do not invent a green result.
 | Connection refused `:8317` | `.\scripts\start-gateway.ps1` |
 | Model rejected / Luna missing | Rebuild with current core (Codex has a built-in Sol/Terra/Luna catalogue) |
 | Custom persona ignored | **Save** in Settings, then send a **new** message (or New chat) |
+| Can't reach gateway / connect errors | Start CLIProxyAPI (`.\scripts\start-gateway.ps1`); empty system prompt is fine |
+| Delete chat looks like a no-op | Deleting the open chat creates a fresh Untitled chat — look for the toast |
+| Project missing from sidebar | Open that folder once (picker); it is then stored under known workspaces |
+| Provider shows **Not configured** despite being signed in | Being signed in is only half of it — add a `[providers.<id>]` entry to `~/.zest/zest.toml` |
+| `auth_unavailable` / 503 from the gateway mid-chat | That account's session died or is in cooldown. Click **Reconnect** on the error — it re-runs the gateway login, no terminal needed |
+| `provider 'codex' is not configured for <folder>` | That folder has no `zest.toml` and neither does `~/.zest/`. Copy one there (see Configuration) |
+| `provider 'codex' … could not be loaded: ZEST_GATEWAY_KEY is not set` | Copy `.env` to `~/.zest/.env`, or set the variable for your user account |
+| Smart App Control blocks build scripts | Windows Security → Smart App Control Off → reboot → `cargo clean` / rebuild |
 | `zest-desktop.exe` locked | Close the running app before `cargo run` / rebuild |
 | File lock on Windows | Close the desktop process; retry |
 
@@ -225,7 +441,7 @@ skip live doctor — do not invent a green result.
 
 - The agent runs in **Rust**. Node is only used to build the desktop UI.
 - One chat stays on one provider; other accounts are used through delegated workers when configured.
-- Shell/exec tools are not enabled yet.
+- `bash` has no OS sandbox — the approval gate is the containment. See `memory/decisions.md`.
 - Usage in Settings shows what Zest used — not your full subscription remaining.
 
 ---
