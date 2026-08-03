@@ -21,6 +21,11 @@ import {
   type EffortId,
 } from "@/lib/models";
 import {
+  markProviderVerified,
+  markProviderVerifyFailed,
+  recentVerifyFailed,
+} from "@/lib/providerVerify";
+import {
   effortFromSession,
   mergeSessionOptions,
   rollbackSessionOptions,
@@ -34,6 +39,7 @@ import type {
   ProviderRow,
   SessionInfo,
   ToolPart,
+  UserAttachmentChip,
   UserProfile,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -41,7 +47,8 @@ import { cn } from "@/lib/utils";
 type Screen = "boot" | "picker" | "waiting" | "auth-success" | "chat";
 
 function isReady(row: ProviderRow) {
-  return row.statusKind === "ready";
+  // Soft memory: a recent failed probe beats filesystem "Signed in".
+  return row.statusKind === "ready" && !recentVerifyFailed(row.id);
 }
 
 function pickReadyProvider(rows: ProviderRow[], prefer: string | null) {
@@ -55,6 +62,17 @@ function pickReadyProvider(rows: ProviderRow[], prefer: string | null) {
 
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
+
+/**
+ * What "Build plan" says on the user's behalf.
+ *
+ * It lands in the transcript as their message, so it is worded as something a
+ * person would say — clicking the button *is* saying this, and the transcript
+ * should not contain instructions they never gave.
+ */
+const BUILD_PLAN_PROMPT =
+  "Build the plan. Delegate the steps you marked as suiting another model; " +
+  "where routing has no match, build it here instead.";
 
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -89,7 +107,12 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
   // Rust terminalizes interrupted tools on load; keep a belt-and-suspenders pass.
   return raw.map((msg) => {
     if (msg.role === "user") {
-      return { id: msg.id, role: "user", text: msg.text ?? "" };
+      return {
+        id: msg.id,
+        role: "user",
+        text: msg.text ?? "",
+        attachments: msg.attachments,
+      };
     }
     return {
       id: msg.id,
@@ -185,6 +208,14 @@ export default function App() {
   const [approvalModeState, setApprovalModeState] =
     useState<ApprovalMode>("auto");
   const [optionsUpdating, setOptionsUpdating] = useState(false);
+  /**
+   * The mode Plan mode interrupted, restored by Build.
+   *
+   * `null` means planning was never entered from somewhere else this session —
+   * the app opened in Plan, or it was restored from disk. Build then falls back
+   * to the desktop default rather than inventing a permission level.
+   */
+  const modeBeforePlanRef = useRef<ApprovalMode | null>(null);
 
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
@@ -206,6 +237,13 @@ export default function App() {
   modelRef.current = model;
   const effortRef = useRef(effort);
   effortRef.current = effort;
+  /** Set just before send; applied when the matching user_message event arrives. */
+  const pendingUserAttachmentsRef = useRef<UserAttachmentChip[] | null>(null);
+  const enterChatRef = useRef<(providerId: string) => Promise<SessionInfo>>(
+    async () => {
+      throw new Error("session start is not ready yet");
+    }
+  );
 
   const loadProviders = useCallback(async (prefer?: string | null) => {
     const rows = await backend.listProviders();
@@ -226,6 +264,32 @@ export default function App() {
     }
   }, []);
 
+  const finishVerifiedLogin = useCallback(async (row: ProviderRow) => {
+    // File presence is not a working session — prove it, then open chat
+    // without an extra Continue click.
+    setWaitingHint("Checking the sign-in works…");
+    try {
+      await backend.verifyProvider(row.id);
+    } catch (err) {
+      markProviderVerifyFailed(row.id);
+      setWaitingHint("Signed in, but the provider still refused");
+      setWaitingError(
+        `${row.label} accepted the sign-in but cannot serve a request yet. ` +
+          `Try connecting again.\n\n${String(err)}`
+      );
+      return;
+    }
+    markProviderVerified(row.id);
+    setWaitingHint("Opening chat…");
+    try {
+      await enterChatRef.current(row.id);
+    } catch (err) {
+      markProviderVerifyFailed(row.id);
+      setPickerError(String(err));
+      setScreen("picker");
+    }
+  }, []);
+
   const startWaitingPoll = useCallback(() => {
     stopPolling();
     let ticks = 0;
@@ -237,24 +301,15 @@ export default function App() {
       try {
         const rows = await loadProviders(selectedIdRef.current);
         const row = rows.find((p) => p.id === selectedIdRef.current);
-        if (row?.statusKind === "ready") {
+        // Ready, or a session file appeared but looked incomplete — either way
+        // prove it with a probe instead of spinning on "Waiting…".
+        const fileAppeared =
+          row?.statusKind === "ready" ||
+          (row?.statusKind === "not_logged_in" &&
+            row.detail.toLowerCase().includes("incomplete"));
+        if (row && fileAppeared) {
           stopPolling();
-          // "ready" here only means a credentials file appeared. A gateway can
-          // hold an account it cannot actually use — that is exactly how a
-          // dead Claude session looked signed in. Prove it with one tiny turn
-          // before claiming success.
-          setWaitingHint("Checking the sign-in works…");
-          try {
-            await backend.verifyProvider(row.id);
-          } catch (err) {
-            setWaitingHint("Signed in, but the provider still refused");
-            setWaitingError(
-              `${row.label} accepted the sign-in but cannot serve a request yet. ` +
-                `Try connecting again.\n\n${String(err)}`
-            );
-            return;
-          }
-          setScreen("auth-success");
+          await finishVerifiedLogin(row);
           return;
         }
       } catch {
@@ -267,7 +322,7 @@ export default function App() {
         setWaitingError("Still waiting — complete sign-in in the browser, or Cancel.");
       }
     }, POLL_MS);
-  }, [loadProviders, stopPolling]);
+  }, [finishVerifiedLogin, loadProviders, stopPolling]);
 
   const deltaQueueRef = useRef<ChatEvent[]>([]);
   const deltaRafRef = useRef<number | null>(null);
@@ -286,10 +341,23 @@ export default function App() {
       event,
       { newId }
     );
-    messagesRef.current = state.messages;
+    // Attach filename chips from the send that produced this user event.
+    // History reload omits them until thread persistence gains attachments.
+    let nextMessages = state.messages;
+    if (event.kind === "user" && pendingUserAttachmentsRef.current) {
+      const chips = pendingUserAttachmentsRef.current;
+      pendingUserAttachmentsRef.current = null;
+      nextMessages = nextMessages.map((m) =>
+        m.role === "user" && m.id === event.message_id
+          ? { ...m, attachments: chips }
+          : m
+      );
+    }
+
+    messagesRef.current = nextMessages;
     activeAssistantId.current = state.activeAssistantId;
     currentTurnIdRef.current = state.currentTurnId;
-    setMessages(state.messages);
+    setMessages(nextMessages);
     if (state.sending !== prevSending) {
       sendingRef.current = state.sending;
       setSending(state.sending);
@@ -303,7 +371,7 @@ export default function App() {
     }
     if (effects.warningToast) {
       toast.add({
-        type: "error",
+        type: "warning",
         title: "History not saved",
         description: effects.warningToast,
       });
@@ -410,7 +478,7 @@ export default function App() {
 
     if (info.warning) {
       toast.add({
-        type: "error",
+        type: "warning",
         title: "Thread recovery",
         description: info.warning,
       });
@@ -422,13 +490,20 @@ export default function App() {
 
   const enterChat = useCallback(
     async (providerId: string) => {
-      const info = await backend.startSession(providerId);
-      stopPolling();
-      applySession(info);
-      return info;
+      try {
+        const info = await backend.startSession(providerId);
+        markProviderVerified(providerId);
+        stopPolling();
+        applySession(info);
+        return info;
+      } catch (err) {
+        markProviderVerifyFailed(providerId);
+        throw err;
+      }
     },
     [applySession, stopPolling]
   );
+  enterChatRef.current = enterChat;
 
   const bootStarted = useRef(false);
   useEffect(() => {
@@ -470,8 +545,16 @@ export default function App() {
         const ready = pickReadyProvider(rows, prefer);
         if (ready) {
           setSelectedId(ready.id);
-          await enterChat(ready.id);
-          return;
+          try {
+            // startSession probes gateway providers; catch here so a dead Claude
+            // session lands on the picker with Connect instead of a chat error.
+            await enterChat(ready.id);
+            return;
+          } catch (err) {
+            setPickerError(String(err));
+            setScreen("picker");
+            return;
+          }
         }
 
         const fallback =
@@ -515,15 +598,22 @@ export default function App() {
   useEffect(() => {
     const onFocus = () => {
       if (screen === "waiting") {
-        loadProviders(selectedIdRef.current)
-          .then((rows) => {
+        void (async () => {
+          try {
+            const rows = await loadProviders(selectedIdRef.current);
             const row = rows.find((p) => p.id === selectedIdRef.current);
-            if (row?.statusKind === "ready") {
-              stopPolling();
-              setScreen("auth-success");
-            }
-          })
-          .catch(() => {});
+            if (!row) return;
+            const fileAppeared =
+              row.statusKind === "ready" ||
+              (row.statusKind === "not_logged_in" &&
+                row.detail.toLowerCase().includes("incomplete"));
+            if (!fileAppeared) return;
+            stopPolling();
+            await finishVerifiedLogin(row);
+          } catch {
+            /* keep waiting */
+          }
+        })();
         return;
       }
       if (screen === "picker") {
@@ -532,7 +622,7 @@ export default function App() {
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [loadProviders, screen, stopPolling]);
+  }, [finishVerifiedLogin, loadProviders, screen, stopPolling]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -577,23 +667,23 @@ export default function App() {
     await loadProviders(selectedId);
   }
 
-  async function changeProvider() {
+  async function switchProvider(providerId: string) {
+    if (!providerId || providerId === session?.provider) return;
     if (session?.threadId) {
       saveDraft(session.threadId, draftRef.current);
     }
+    setSelectedId(providerId);
     try {
-      await backend.endSession();
-    } catch {
-      /* ignore */
+      await enterChat(providerId);
+    } catch (err) {
+      setPickerError(String(err));
+      toast.add({
+        type: "error",
+        title: "Could not switch provider",
+        description: String(err),
+      });
+      throw err;
     }
-    setMessages([]);
-    activeAssistantId.current = null;
-    currentTurnIdRef.current = null;
-    setSession(null);
-    threadIdRef.current = null;
-    sessionIdRef.current = null;
-    setScreen("picker");
-    await loadProviders(selectedId);
   }
 
   /** `only` targets a specific provider — used by the Reconnect on an auth
@@ -795,7 +885,12 @@ export default function App() {
         setMessages([]);
         setAttachments([]);
         if (providerId) {
-          await enterChat(providerId);
+          try {
+            await enterChat(providerId);
+          } catch (err) {
+            setPickerError(String(err));
+            setScreen("picker");
+          }
         } else {
           setScreen("picker");
         }
@@ -818,11 +913,28 @@ export default function App() {
         (Boolean(a.content?.trim()) || (a.kind === "image" && Boolean(a.dataBase64)))
     );
     if ((!text && !hasOk) || sending) return;
+    const chips: UserAttachmentChip[] = pending
+      .filter((a) => a.status === "done")
+      .map((a) => ({ name: a.name, kind: a.kind }));
+    pendingUserAttachmentsRef.current = chips.length > 0 ? chips : null;
     setDraft("");
     setAttachments([]);
     if (session?.threadId) {
       saveDraft(session.threadId, "");
     }
+    await submitTurn(text, pending, { restoreDraftOnFailure: true });
+  }
+
+  /**
+   * Send one turn. Split out of `onSend` so a button can start a turn without
+   * going through the composer — the composer owns the draft and attachments,
+   * and a turn does not have to come from either.
+   */
+  async function submitTurn(
+    text: string,
+    pending: PreparedAttachment[],
+    { restoreDraftOnFailure }: { restoreDraftOnFailure: boolean }
+  ) {
     // Stay busy until an authoritative done/cancelled/error chat-event arrives.
     setSending(true);
     sendingRef.current = true;
@@ -841,12 +953,17 @@ export default function App() {
         }))
       );
     } catch (err) {
+      pendingUserAttachmentsRef.current = null;
       setSending(false);
       sendingRef.current = false;
-      setDraft(text);
-      setAttachments(pending);
-      if (session?.threadId) {
-        saveDraft(session.threadId, text);
+      // Only text the user typed goes back in the composer. Putting a
+      // button's prompt there would leave them holding words they never wrote.
+      if (restoreDraftOnFailure) {
+        setDraft(text);
+        setAttachments(pending);
+        if (session?.threadId) {
+          saveDraft(session.threadId, text);
+        }
       }
       const message = formatInvokeError(err);
       if (!message.includes("already in progress") && !message.includes('"busy"')) {
@@ -863,6 +980,42 @@ export default function App() {
         });
       }
     }
+  }
+
+  /**
+   * Leave Plan mode and tell the model to build what it just planned.
+   *
+   * Delegation happens here rather than during planning: there is nothing to
+   * hand a worker until the plan exists, and a worker sees none of this
+   * conversation. The plan already names which steps suit another model, so the
+   * prompt only has to say "use it where you marked it" — and if routing offers
+   * no match, `delegate` reports that and the model builds it inline.
+   */
+  async function onBuildPlan() {
+    if (sendingRef.current) return;
+
+    if (approvalModeState === "plan") {
+      // Restore rather than escalate. Auto is the fallback only because it is
+      // the mode the desktop opens in, so it is the one the user has already
+      // consented to by default.
+      const target = modeBeforePlanRef.current ?? "auto";
+      modeBeforePlanRef.current = null;
+      try {
+        await backend.setApprovalMode(target);
+        setApprovalModeState(target);
+      } catch (err) {
+        // Building under Plan mode would fail every write, so stop here and
+        // leave the user in a mode they can see.
+        toast.add({
+          type: "error",
+          title: "Could not leave Plan mode",
+          description: String(err),
+        });
+        return;
+      }
+    }
+
+    await submitTurn(BUILD_PLAN_PROMPT, [], { restoreDraftOnFailure: false });
   }
 
   async function onStop() {
@@ -909,6 +1062,11 @@ export default function App() {
 
   async function onApprovalModeChange(next: ApprovalMode) {
     const previous = approvalModeState;
+    // Remember what planning interrupted, so Build can put it back rather than
+    // picking a permission level on the user's behalf.
+    if (next === "plan" && previous !== "plan") {
+      modeBeforePlanRef.current = previous;
+    }
     setApprovalModeState(next);
     try {
       await backend.setApprovalMode(next);
@@ -1051,7 +1209,8 @@ export default function App() {
             onNewChat={onNewChat}
             onDeleteThread={onDeleteThread}
             onOpenProjectChat={onOpenProjectChat}
-            onChangeProvider={changeProvider}
+            providers={providers}
+            onSwitchProvider={switchProvider}
             onReconnect={reconnectProvider}
             onLoadThread={onLoadThread}
             onAttachFiles={onAttachFiles}
@@ -1073,10 +1232,17 @@ export default function App() {
               // Rebuilds the runtime so a routing change takes effect. The
               // sticky thread is reloaded, so the open chat survives.
               const id = session?.provider ?? selectedIdRef.current;
-              if (id) await enterChat(id);
+              if (!id) return;
+              try {
+                await enterChat(id);
+              } catch (err) {
+                setPickerError(String(err));
+                setScreen("picker");
+              }
             }}
             approvalMode={approvalModeState}
             onApprovalModeChange={onApprovalModeChange}
+            onBuildPlan={() => void onBuildPlan()}
           />
         ) : null}
       </div>
