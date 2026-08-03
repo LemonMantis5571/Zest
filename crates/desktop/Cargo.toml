@@ -28,7 +28,8 @@ tauri = { version = "2", features = [] }
 dirs = { workspace = true }
 tokio = { workspace = true }
 ts-rs = { version = "11", default-features = true, optional = true }
-pdf-inspector = "0.1"
+# bump until a patched release is published:
+pdf-inspector = { git = "https://github.com/MADENIYOU/pdf-inspector", rev = "a602f5c5acf1bd9858f7b76760eb71aa98d6d934" }
 rfd = "0.15"
 base64 = "0.22"
 
