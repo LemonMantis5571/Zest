@@ -108,19 +108,30 @@ pub fn detect_all() -> Vec<ProviderSlot> {
     ]
 }
 
+/// Whether Connect / live turns for this provider go through CLIProxyAPI.
+///
+/// When true, a credentials file alone is not enough — the gateway can hold a
+/// cooled-down or incomplete session that still looks "signed in" on disk.
+pub fn uses_gateway_auth(provider_id: &str) -> bool {
+    matches!(provider_id, "codex" | "claude") && find_cliproxy().is_some()
+}
+
 /// Codex readiness for Zest's default path.
 ///
 /// When a local CLIProxyAPI install is present, Ready means the gateway's own
-/// credential store under `~/.cli-proxy-api` exists — that is what live turns
-/// spend. Otherwise fall back to the Codex CLI's `auth.json`.
+/// credential store under `~/.cli-proxy-api` looks complete. Desktop still
+/// probes before opening a chat — see [`uses_gateway_auth`]. Otherwise fall
+/// back to the Codex CLI's `auth.json`.
 pub fn detect_codex() -> AuthStatus {
     if find_cliproxy().is_some() {
-        return if gateway_auth_for("codex") {
-            AuthStatus::Ready { account: None }
-        } else {
-            AuthStatus::NotLoggedIn {
+        return match gateway_auth_state("codex") {
+            GatewayAuthState::Present => AuthStatus::Ready { account: None },
+            GatewayAuthState::Incomplete => AuthStatus::NotLoggedIn {
+                fix: "Connect in Zest (ChatGPT sign-in) — session file looks incomplete".into(),
+            },
+            GatewayAuthState::Absent => AuthStatus::NotLoggedIn {
                 fix: "Connect in Zest (ChatGPT sign-in)".into(),
-            }
+            },
         };
     }
 
@@ -172,17 +183,20 @@ pub fn gateway_auth_present() -> bool {
 /// Claude readiness for Zest's default path.
 ///
 /// When a local CLIProxyAPI install is present, Ready means a Claude credential
-/// file exists under `~/.cli-proxy-api` (presence only). Otherwise fall back to
-/// the Claude Code CLI store — which on some platforms lives outside a readable
-/// file, so a missing credentials file is not treated as logged out.
+/// file under `~/.cli-proxy-api` looks complete. Tiny stubs left after a failed
+/// or cooled-down OAuth still parse as JSON and used to show "Signed in" while
+/// every turn returned 503 `auth_unavailable`. Desktop probes before chat.
+/// Otherwise fall back to the Claude Code CLI store.
 pub fn detect_claude() -> AuthStatus {
     if find_cliproxy().is_some() {
-        return if gateway_auth_for("claude") {
-            AuthStatus::Ready { account: None }
-        } else {
-            AuthStatus::NotLoggedIn {
+        return match gateway_auth_state("claude") {
+            GatewayAuthState::Present => AuthStatus::Ready { account: None },
+            GatewayAuthState::Incomplete => AuthStatus::NotLoggedIn {
+                fix: "Connect in Zest (Claude sign-in) — session file looks incomplete".into(),
+            },
+            GatewayAuthState::Absent => AuthStatus::NotLoggedIn {
                 fix: "Connect in Zest (Claude sign-in)".into(),
-            }
+            },
         };
     }
 
@@ -208,16 +222,30 @@ pub fn detect_claude() -> AuthStatus {
     }
 }
 
-/// True when `~/.cli-proxy-api` has a well-formed JSON whose name starts with
-/// `prefix` (e.g. `"claude"` → `claude-….json`). Presence only.
-fn gateway_auth_for(prefix: &str) -> bool {
+/// Outcome of looking at gateway auth files for one provider prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayAuthState {
+    Absent,
+    /// JSON exists but is far too small to be a real OAuth blob (common after a
+    /// failed Claude Connect that still wrote a stub).
+    Incomplete,
+    Present,
+}
+
+/// Reject empty/`{}` stubs. Claude gateway OAuth files are often ~400 bytes;
+/// Codex ones are multi-KB. Size alone cannot prove the account works — desktop
+/// still probes before chat — but a near-empty file is never a finished login.
+const GATEWAY_AUTH_MIN_BYTES: u64 = 200;
+
+fn gateway_auth_state(prefix: &str) -> GatewayAuthState {
     let Some(dir) = home_dir().map(|h| h.join(".cli-proxy-api")) else {
-        return false;
+        return GatewayAuthState::Absent;
     };
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return false;
+        return GatewayAuthState::Absent;
     };
     let needle = format!("{prefix}-");
+    let mut saw_incomplete = false;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -226,11 +254,27 @@ fn gateway_auth_for(prefix: &str) -> bool {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if name.to_ascii_lowercase().starts_with(&needle) && well_formed_json(&path) == Some(true) {
-            return true;
+        if !name.to_ascii_lowercase().starts_with(&needle) {
+            continue;
         }
+        if well_formed_json(&path) != Some(true) {
+            continue;
+        }
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if gateway_auth_file_looks_complete(len) {
+            return GatewayAuthState::Present;
+        }
+        saw_incomplete = true;
     }
-    false
+    if saw_incomplete {
+        GatewayAuthState::Incomplete
+    } else {
+        GatewayAuthState::Absent
+    }
+}
+
+fn gateway_auth_file_looks_complete(len: u64) -> bool {
+    len >= GATEWAY_AUTH_MIN_BYTES
 }
 
 /// Antigravity keeps a data directory under `~/.gemini/antigravity`. The Gemini
@@ -499,6 +543,18 @@ mod tests {
         assert!(resolve_login("codex").is_some());
         assert!(resolve_login("antigravity").is_none());
         assert!(resolve_login("byok").is_none());
+    }
+
+    #[test]
+    fn gateway_auth_rejects_tiny_stub_files() {
+        // Empty / near-empty stubs only — Claude OAuth files are often ~424 bytes.
+        assert!(!gateway_auth_file_looks_complete(2));
+        assert!(!gateway_auth_file_looks_complete(
+            GATEWAY_AUTH_MIN_BYTES - 1
+        ));
+        assert!(gateway_auth_file_looks_complete(GATEWAY_AUTH_MIN_BYTES));
+        assert!(gateway_auth_file_looks_complete(424));
+        assert!(gateway_auth_file_looks_complete(4309));
     }
 
     #[test]
