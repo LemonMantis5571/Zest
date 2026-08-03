@@ -22,12 +22,13 @@ use ts_rs::TS;
 use zest_core::routing_edit::{routing_document, validate_rules, RuleInput};
 use zest_core::{
     can_start_login, compose_system_with_docs, descriptor_for_picker_id, descriptor_from_config,
-    detect_all, display_path, env_context, load_custom_system, load_project_docs, new_id,
-    save_custom_system, start_login as core_start_login, truncate_chars, ApprovalDecision,
-    ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, Config, HarnessError,
-    Ledger, PersistPriority, PersistWorker, ProjectSessionState, ProviderRegistry, ProviderSlot,
-    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadLoadError,
-    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
+    detect_all, display_path, env_context, load_custom_system, load_project_docs, new_id, probe,
+    save_custom_system, start_login as core_start_login, truncate_chars, uses_gateway_auth,
+    ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, Config,
+    HarnessError, Ledger, PersistPriority, PersistWorker, ProjectSessionState, ProviderRegistry,
+    ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
+    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
+    DEFAULT_SYSTEM,
 };
 
 use attachments::{
@@ -145,6 +146,11 @@ impl Approver for HubApprover {
 /// library with no wired-up gate must not be permissive. Choosing the product
 /// default here is the front-end's job.
 const DESKTOP_DEFAULT_MODE: ApprovalMode = ApprovalMode::Auto;
+
+/// The skill Plan mode runs. Blocking writes says what the model *cannot* do;
+/// this says what it *should* do instead, and it is a markdown file so the
+/// answer to "plan mode should say X" is an edit, not a release.
+const PLAN_SKILL: &str = "plan";
 
 struct AppState {
     sessions: SessionController,
@@ -544,16 +550,19 @@ fn usage_snapshot() -> UsageSnapshot {
 ///
 /// A credentials file on disk is not a working session — the gateway can hold
 /// an account it has put in cooldown, and that never shows up locally. Called
-/// after a sign-in so "Signed in" is something observed rather than assumed.
-/// Costs a few tokens, which is why it is not on every render.
+/// after a sign-in and again before opening a gateway chat.
 #[tauri::command]
 async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    prove_provider_serves(&state, &id).await
+}
+
+async fn prove_provider_serves(state: &State<'_, AppState>, id: &str) -> Result<(), String> {
     zest_core::load_env();
-    let root = resolve_workspace_root(&state)?;
+    let root = resolve_workspace_root(state)?;
     let config = Config::find(&root).map_err(|e| e.to_string())?;
     let (registry, skipped) = ProviderRegistry::from_config(&config);
 
-    let provider = registry.get(&id).ok_or_else(|| {
+    let provider = registry.get(id).ok_or_else(|| {
         skipped
             .iter()
             .find(|s| s.id == id)
@@ -562,7 +571,7 @@ async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), S
     })?;
 
     let model = provider.default_model().to_string();
-    zest_core::probe(provider.as_ref(), &model)
+    probe(provider.as_ref(), &model)
         .await
         .map_err(|e| format_turn_error(&e))
 }
@@ -890,7 +899,7 @@ fn event_priority(event: &ChatEvent) -> PersistPriority {
 }
 
 #[tauri::command]
-fn start_session(
+async fn start_session(
     state: State<'_, AppState>,
     id: String,
     model: Option<String>,
@@ -907,6 +916,19 @@ fn start_session(
 
     if !slot.status.selectable() {
         return Err(format!("{} is not ready — connect it first", slot.label));
+    }
+
+    // Gateway "Signed in" is only a file check. Prove the account can serve
+    // before opening chat — otherwise a cooled-down Claude session looks ready
+    // and the first user message fails with 503 auth_unavailable.
+    if uses_gateway_auth(&id) {
+        prove_provider_serves(&state, &id).await.map_err(|e| {
+            format!(
+                "{label} needs Connect again before chat — the gateway has a \
+session file but cannot use it yet.\n\n{e}",
+                label = slot.label
+            )
+        })?;
     }
 
     persist_choice(&id)?;
@@ -1136,7 +1158,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
 
 /// Switch project (and optional thread) while keeping the current provider.
 #[tauri::command]
-fn open_project_chat(
+async fn open_project_chat(
     state: State<'_, AppState>,
     root: String,
     thread_id: Option<String>,
@@ -1182,7 +1204,7 @@ fn open_project_chat(
         persist_provider_thread(&root, &provider_id, tid)?;
     }
 
-    start_session(state, provider_id, None, None)
+    start_session(state, provider_id, None, None).await
 }
 
 #[tauri::command]
@@ -1302,11 +1324,28 @@ async fn send_message(
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
     state.approvals.begin_turn(&turn.turn_id);
 
+    // Plan mode and the `plan` skill are one feature, not two things that share
+    // a word: being in the mode runs the skill. A poisoned policy lock reads as
+    // "not plan mode" — the tool layer fails closed on its own, and losing the
+    // skill is better than losing the turn.
+    let plan_mode = state
+        .policy
+        .lock()
+        .map(|policy| policy.mode() == ApprovalMode::Plan)
+        .unwrap_or(false);
+
     // Slash commands resolve against the session's skills, so this has to come
     // after the session is in hand. An unknown command expands to itself.
     let (prompt, command) = match session.skills.read() {
         Ok(skills) => {
-            let expansion = zest_core::expand_command(&text, &skills);
+            let typed = zest_core::expand_command(&text, &skills);
+            // An explicit command outranks the mode: naming a skill is a
+            // stronger signal than being in a mode that implies one.
+            let expansion = if typed.command.is_none() && plan_mode {
+                zest_core::expand_command_as(&text, &skills, PLAN_SKILL)
+            } else {
+                typed
+            };
             (expansion.prompt, expansion.command)
         }
         // A poisoned lock must not lose the message — send it verbatim.
