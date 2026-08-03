@@ -2,6 +2,52 @@
 
 Track notable changes here.
 
+## 2026-08-03 — Planning marks the delegation; Build performs it
+
+Wiring Plan mode to the `plan` skill exposed a contradiction between them: step
+3 of the skill ordered `delegate`, and `delegate` is `ToolRisk::Exec`, which
+Plan mode blocks unconditionally. Every planning turn spent two tool calls
+failing. The skill was written for `/plan` outside the mode; connecting them
+without reading one against the other was the mistake.
+
+- **The skill now marks instead of delegating.** A step that suits another model
+  names the routing kind; nothing is handed over. There is nothing to delegate
+  before the plan exists, and a worker sees none of the conversation, so it
+  would be guessing at work nobody has written down yet.
+- **"Build plan" under a finished plan performs it.** It restores the mode Plan
+  interrupted — not a mode of its own choosing — and sends one message saying to
+  delegate the marked steps and build the rest inline. If routing offers no
+  match, `delegate` says so and the model continues in place, which is the
+  fallback without any code deciding it.
+- **The card's action slot is generic.** It knows a command produced a document,
+  not that plans get built; `ChatScreen` decides what follows one.
+- **Only the newest finished plan offers the button**, and it withdraws once the
+  conversation moves past it. The prompt says "the plan", and the model reads
+  the conversation rather than the button, so a second button would be a lie
+  about which plan it meant.
+
+## 2026-08-02 — Plan mode and the `plan` skill are one feature
+
+They shared a word and nothing else: the mode blocked writes, the skill wrote
+plans, and typing prose in Plan mode produced a plain chat reply because the
+card keys off a matched `/command`. Reported as "I'm on plan mode and it did not
+use the plan component".
+
+- **Being in the mode runs the skill.** `expand_command_as` applies a named
+  skill to a message that has no slash on it, and desktop uses it when the mode
+  is Plan. `display` keeps what was typed — inventing a `/plan` prefix in the
+  transcript would attribute words to the user they never wrote.
+- **An explicit command still wins.** Naming a skill outranks a mode implying
+  one, so `/other-skill` in Plan mode runs `other-skill`.
+- **A missing `plan` skill sends the message as typed**, the same way an unknown
+  `/token` does. Absent config must not swallow what someone said.
+- **`looksLikeDocument` decides the card**, because the mode tags every turn and
+  a one-line clarifying question should not arrive titled and savable as
+  `plan.md`. Rust cannot make this call — it tags at `assistant_start`, before
+  any of the answer exists. Every rule in the predicate is monotonic, so the
+  card can never unwrap mid-stream; there is a test that asserts exactly that
+  by re-evaluating at every prefix.
+
 ## 2026-08-02 — streaming: the two remaining stalls
 
 Follow-on to the entry below, after checking how opencode handles bursts. The
