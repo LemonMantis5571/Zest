@@ -28,7 +28,10 @@ tauri = { version = "2", features = [] }
 dirs = { workspace = true }
 tokio = { workspace = true }
 ts-rs = { version = "11", default-features = true, optional = true }
-pdf-inspector = "0.1"
+# crates.io 0.1.7 still pins lopdf ^0.41 (RUSTSEC-2026-0187). Use the upstream
+# bump until a patched release is published:
+# https://github.com/firecrawl/pdf-inspector/pull/222
+pdf-inspector = { git = "https://github.com/MADENIYOU/pdf-inspector", rev = "a602f5c5acf1bd9858f7b76760eb71aa98d6d934" }
 rfd = "0.15"
 base64 = "0.22"
 

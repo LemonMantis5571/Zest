@@ -26,3 +26,7 @@ Track corrections that apply across the whole workspace.
   When Gemini/Antigravity 429s appear: check system-prompt identity wording and ledger/
   cooldown labeling before treating it as spent quota. Do not add aggressive product-identity
   openers for Antigravity-backed models without verifying; prefer neutral coding-agent framing.
+- **pdf-inspector / lopdf RustSec** — crates.io `pdf-inspector` 0.1.7 pins `lopdf ^0.41`
+  (RUSTSEC-2026-0187). Desktop depends on the patched git rev from
+  [firecrawl/pdf-inspector#222](https://github.com/firecrawl/pdf-inspector/pull/222) until a
+  crates.io release ships; switch back to a versioned crates.io dep when available.
