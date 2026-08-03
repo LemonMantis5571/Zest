@@ -30,3 +30,9 @@ Track corrections that apply across the whole workspace.
   (RUSTSEC-2026-0187). Desktop depends on the patched git rev from
   [firecrawl/pdf-inspector#222](https://github.com/firecrawl/pdf-inspector/pull/222) until a
   crates.io release ships; switch back to a versioned crates.io dep when available.
+- **Gateway Claude/Codex “Signed in” ≠ working** — CLIProxyAPI can leave a cooldown or
+  stub auth file that looks Ready locally while chat gets 503 `auth_unavailable`.
+  Builds do not wipe `~/.cli-proxy-api`. Always probe before opening a gateway chat;
+  reject near-empty stubs (< ~200 bytes), but do **not** treat Claude’s ~400-byte
+  OAuth files as incomplete (Codex files are multi-KB). Surface Connect again.
+  Optional gateway `disable-cooling: true` reduces black-hole after transient 503s.

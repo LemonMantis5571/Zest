@@ -14,6 +14,31 @@ Impact:
 
 ---
 
+### 2026-08-02 — A mode may apply a skill
+
+Decision: `ApprovalMode::Plan` no longer only blocks tools — it runs the `plan`
+skill over whatever the user types. Modes and skills were previously disjoint:
+modes set tool policy, skills set the prompt. Plan mode now does both.
+
+Reason: two unrelated features were both called "Plan", so a user in Plan mode
+reasonably expected the plan skill and got a plain chat reply. This is the same
+collision as `[routing].default` meaning two things, recorded below. The fix is
+to make the name true rather than to explain the difference.
+
+Impact: what Plan mode *says* now lives in `.zest/skills/plan/SKILL.md`, so
+changing it is a markdown edit, not a release. The precedence rule is that an
+explicit `/command` outranks the mode. The generalisation is deliberate —
+`expand_command_as` takes any skill name, so a future mode can adopt a skill the
+same way without new machinery.
+
+The cost: presentation can no longer be decided in Rust. Rust tags the message
+at `assistant_start`, before the answer exists, so the UI holds a monotonic
+`looksLikeDocument` predicate to keep a clarifying question from being framed as
+a document. Monotonicity is load-bearing, not tidiness — a predicate that could
+flip false would unwrap the card mid-stream.
+
+---
+
 ### 2026-08-02 — CSP `worker-src` relaxed from `'none'` to `'self'`
 
 Decision: the production CSP in `tauri.conf.json` now allows `worker-src 'self'`
@@ -97,11 +122,16 @@ a gateway reports a dead account as 503, which is indistinguishable from ordinar
 overload otherwise. Deliberately narrow: rate limits and bad requests do not get
 a Reconnect, because signing in again fixes neither. `ChatEvent::Error` gained
 `reconnect_provider`, set only for that class. The probe costs a few tokens, so
-it runs on an explicit sign-in and never on a render.
+it runs on an explicit sign-in and again when opening a gateway chat
+(`start_session` for Claude/Codex via CLIProxyAPI) — never on a render.
+Near-empty auth stubs (< 200 bytes) are treated as Incomplete, not Signed in.
+Claude gateway OAuth files are often ~400 bytes; Codex ones are multi-KB — size
+is only a stub filter, never proof the account can serve.
 
-Not fixed: the picker still derives its resting status from the filesystem, so a
-session that dies *after* a verified login shows green until the next turn fails.
-Probing on every render would cost tokens for a status nobody asked for.
+Not fixed: the picker resting status is still mostly filesystem-based between
+probes, so a session that dies *after* a verified login can show green until the
+next enter-chat or turn fails. Probing on every render would cost tokens for a
+status nobody asked for.
 
 ### 2026-08-02 — Slash commands are skills; the parent orchestrates
 
