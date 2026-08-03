@@ -14,6 +14,9 @@ blake3.workspace = true
 dirs.workspace = true
 dotenvy = "0.15"
 futures-util.workspace = true
+# OS entropy for the local gateway's API key. Already in the tree via rustls; a
+# direct dependency so the intent is visible rather than incidental.
+getrandom = "0.3"
 globset.workspace = true
 ignore.workspace = true
 regex.workspace = true

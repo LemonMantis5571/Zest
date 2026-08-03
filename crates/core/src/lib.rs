@@ -13,6 +13,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod fsutil;
+pub mod gateway;
 pub mod persist;
 pub mod prefs;
 pub mod prompt;
@@ -32,8 +33,9 @@ pub use anthropic::types::{
     DEFAULT_MODEL,
 };
 pub use auth::{
-    can_start_login, detect_all, gateway_auth_present, login_command, resolve_login, start_login,
-    uses_gateway_auth, AuthStatus, LoginSpawn, ProviderSlot,
+    can_start_login, cliproxy_exe, cliproxy_install, detect_all, gateway_auth_present,
+    login_command, resolve_login, start_login, uses_gateway_auth, AuthStatus, LoginSpawn,
+    ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use commands::{
@@ -43,6 +45,11 @@ pub use commands::{
 pub use config::{load_env, user_config_path, Config, ProviderConfig, Routing, Rule, Target};
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
+pub use gateway::{
+    ensure_running as ensure_gateway_running, gateway_dir, provision as provision_gateway,
+    runtime as gateway_runtime, GatewayState, Provisioned, DEFAULT_PORT as GATEWAY_DEFAULT_PORT,
+    GATEWAY_KEY_ENV,
+};
 pub use persist::{PersistPriority, PersistWorker, DELTA_CHECKPOINT_MS};
 pub use prefs::{ProjectSessionState, ProviderSessionPrefs};
 pub use prompt::{

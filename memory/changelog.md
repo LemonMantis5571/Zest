@@ -2,6 +2,31 @@
 
 Track notable changes here.
 
+## 2026-08-03 — The gateway ships with Zest, and a dead port says so
+
+"Claude needs Connect again before chat" turned out to have nothing to do with Claude. Nothing
+was listening on `:8317`, the session was fine, and Reconnect could never have fixed it. Two
+faults stacked: the error lost its own classification on the way out, and nobody was keeping
+the gateway alive.
+
+- **Retry stopped destroying evidence.** `annotate_attempts` formatted the failure into a
+  string, which discarded `is_connect()`. A refused connection is transient, so it always
+  exhausted its retries and always got flattened — the desktop's "can't reach the gateway"
+  branch was unreachable in practice, and every dead-gateway turn fell through to the auth arm.
+  It now wraps in `HarnessError::Exhausted` and classifiers read through it.
+- **"Connect again" means it.** The desktop probe returns a typed `ProbeFailure`, so the
+  sign-in wording appears only for an actual credential failure. A gateway that will not come
+  up says that instead.
+- **Zest starts the gateway.** Installed but not running is the ordinary state after a reboot,
+  not a user error. Measured at 0.58s from cold. Spawned `DETACHED_PROCESS`, so it is not tied
+  to Zest's lifetime.
+- **And ships it.** CLIProxyAPI (MIT) is bundled as a Tauri sidecar and provisions its own
+  loopback-only config with a generated key, so a downloaded Zest installs nothing. Native
+  subscription OAuth was investigated and rejected — the token endpoint moved this year and the
+  `client_id` is not obtainable — see `memory/decisions.md`.
+- A hand-installed gateway still wins: its `config.yaml` and an existing `ZEST_GATEWAY_KEY` are
+  left alone, and `auth-dir` stays `~/.cli-proxy-api` so sign-ins are not orphaned.
+
 ## 2026-08-03 — Planning marks the delegation; Build performs it
 
 Wiring Plan mode to the `plan` skill exposed a contradiction between them: step

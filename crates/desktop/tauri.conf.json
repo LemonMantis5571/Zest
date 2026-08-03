@@ -27,6 +27,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/cli-proxy-api"],
+    "resources": ["licenses/CLIProxyAPI-LICENSE.txt"],
     "icon": [
       "icons/zest-icon-32.png",
       "icons/zest-icon-128.png",
