@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   ArrowUpIcon,
   FileIcon,
@@ -59,6 +59,8 @@ type Props = {
   onOpenFolder: () => void;
   onRemoveAttachment: (id: string) => void;
   onPasteImages: (files: File[]) => void;
+  /** Sticky chrome above the input (e.g. pending approvals). */
+  aboveComposer?: ReactNode;
 };
 
 function attachmentPreviewUrl(att: PreparedAttachment): string | null {
@@ -90,6 +92,7 @@ export function Composer({
   onOpenFolder,
   onRemoveAttachment,
   onPasteImages,
+  aboveComposer,
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -178,6 +181,7 @@ export function Composer({
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-3 pt-20">
       <div className="pointer-events-auto mx-auto w-full max-w-[var(--chat-max)]">
+        {aboveComposer}
         <div className="overflow-visible rounded-2xl border border-border bg-[color-mix(in_srgb,var(--card)_92%,transparent)] shadow-[0_16px_48px_rgba(0,0,0,0.55)] backdrop-blur-xl">
           {attachments.length > 0 ? (
             <AttachmentGroup className="px-3 pt-3">
@@ -208,7 +212,6 @@ export function Composer({
                       <AttachmentAction
                         type="button"
                         title="Remove"
-                        disabled={sending}
                         onClick={() => onRemoveAttachment(att.id)}
                       >
                         <XIcon />
@@ -244,12 +247,12 @@ export function Composer({
           ) : null}
           <textarea
             ref={ref}
+            id="zest-composer-input"
             rows={1}
             value={value}
-            disabled={sending}
-            placeholder="Plan, paste images, @ for context, / for commands"
+            placeholder="Ask about this project — / for commands, paste or attach files"
             autoComplete="off"
-            className="block max-h-[180px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-sm text-foreground caret-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
+            className="block max-h-[180px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-sm text-foreground caret-foreground outline-none placeholder:text-muted-foreground"
             onChange={(e) => onChange(e.target.value)}
             onPaste={(e) => {
               const items = Array.from(e.clipboardData?.items ?? []);
@@ -298,7 +301,6 @@ export function Composer({
                   type="button"
                   variant="ghost"
                   size="icon-sm"
-                  disabled={sending}
                   title="Add context"
                   aria-haspopup="menu"
                   aria-expanded={menuOpen}
@@ -361,11 +363,11 @@ export function Composer({
               )}
             </div>
             {sending ? (
-              <Button
+                <Button
                 type="button"
                 size="icon-sm"
                 aria-label="Stop"
-                title="Stop"
+                title="Stop (Esc or Ctrl+.)"
                 className="rounded-full"
                 onClick={() => onStop?.()}
               >

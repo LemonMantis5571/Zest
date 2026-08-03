@@ -149,7 +149,7 @@ function ToastIcon({ type }: { type: string | undefined }) {
 
   if (type === "warning") {
     icon = (
-      <TriangleAlertIcon aria-hidden="true" />
+      <TriangleAlertIcon className="text-amber-400" aria-hidden="true" />
     )
   }
 

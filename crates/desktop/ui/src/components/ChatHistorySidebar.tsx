@@ -232,7 +232,7 @@ export function ChatHistorySidebar({
             type="button"
             variant="ghost"
             size="icon-sm"
-            title="Expand projects"
+            title="Expand projects (Ctrl+B)"
             aria-expanded={open}
             onClick={() => onOpenChange(true)}
           >
@@ -240,6 +240,31 @@ export function ChatHistorySidebar({
           </Button>
         )}
       </div>
+
+      {!open ? (
+        <div className="flex flex-col items-center gap-1 px-1 py-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title="New chat (Ctrl+N)"
+            disabled={sending}
+            onClick={onNewChat}
+          >
+            <PlusIcon />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title="Open project folder"
+            disabled={sending}
+            onClick={onOpenFolder}
+          >
+            <FolderOpenIcon />
+          </Button>
+        </div>
+      ) : null}
 
       {open ? (
         <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">

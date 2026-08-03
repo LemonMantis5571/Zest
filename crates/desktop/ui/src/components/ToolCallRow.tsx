@@ -54,7 +54,10 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
 
   if (awaiting) {
     return (
-      <div className="w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-card/60">
+      <div
+        data-tool-id={tool.id}
+        className="w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-card/60"
+      >
         <div className="flex items-start gap-2.5 px-3 py-2.5">
           <div className="mt-0.5 grid size-6 place-items-center rounded-md bg-muted/80 text-foreground">
             {isCommand ? (
