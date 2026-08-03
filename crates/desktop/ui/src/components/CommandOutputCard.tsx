@@ -19,6 +19,18 @@ type Props = {
   children: ReactNode;
   /** Still streaming — hide the actions until there is something to act on. */
   streaming?: boolean;
+  /**
+   * What to do with this document, offered under it.
+   *
+   * Stays generic on purpose: the card knows a command produced a document, not
+   * that plans get built. Whoever renders the card decides what follows one.
+   */
+  action?: {
+    label: string;
+    hint?: string;
+    onClick: () => void;
+    disabled?: boolean;
+  };
 };
 
 /**
@@ -33,6 +45,7 @@ export function CommandOutputCard({
   text,
   children,
   streaming,
+  action,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -124,6 +137,27 @@ export function CommandOutputCard({
       ) : (
         <div className="px-3 py-2.5">{children}</div>
       )}
+
+      {/* Hidden while streaming and while collapsed: acting on a document you
+          cannot see, or that is not finished, is not a choice worth offering. */}
+      {action && !streaming && !collapsed ? (
+        <div className="flex items-center gap-2 border-t border-border/50 px-3 py-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={action.disabled}
+            onClick={action.onClick}
+          >
+            {action.label}
+          </Button>
+          {action.hint ? (
+            <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+              {action.hint}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
