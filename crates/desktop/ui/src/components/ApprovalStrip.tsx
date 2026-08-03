@@ -93,12 +93,16 @@ export function ApprovalStrip({
                 variant="ghost"
                 size="sm"
                 disabled={busy !== null}
-                title="Allow for session"
+                title={
+                  isCommand
+                    ? "Stop asking about this exact command for the rest of the session"
+                    : `Stop asking about ${tool.path || "this file"} for the rest of the session`
+                }
                 onClick={() => {
                   void resolve(approvalId, "session");
                 }}
               >
-                {rowBusy === "session" ? "Allowing…" : "Session"}
+                {rowBusy === "session" ? "Allowing…" : "Allow for session"}
               </Button>
               <Button
                 type="button"
@@ -108,7 +112,11 @@ export function ApprovalStrip({
                   void resolve(approvalId, "once");
                 }}
               >
-                {rowBusy === "once" ? "…" : "Allow"}
+                {rowBusy === "once"
+                  ? isCommand
+                    ? "Running…"
+                    : "Allowing…"
+                  : "Allow once"}
               </Button>
             </div>
           </div>
