@@ -20,6 +20,9 @@ use crate::provider::{Completion, RateLimitSnapshot, StreamEvent};
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Max silence between SSE chunks before the turn fails.
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Tries for a request that has produced no output yet. Small on purpose: a
+/// coding turn is long, and the user is watching.
+pub const MAX_ATTEMPTS: u32 = 3;
 
 pub struct AnthropicClient {
     http: reqwest::Client,
@@ -66,30 +69,33 @@ impl AnthropicClient {
         on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
         cancel: Option<&CancelToken>,
     ) -> Result<Completion> {
-        let resp = tokio::select! {
-            biased;
-            _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
-            resp = self
-                .http
-                .post(self.endpoint())
-                .header("x-api-key", &self.api_key)
-                // Gateways commonly read the bearer header instead. Sending both is
-                // harmless — the real API ignores it.
-                .header("authorization", format!("Bearer {}", self.api_key))
-                .header("anthropic-version", API_VERSION)
-                .header("content-type", "application/json")
-                .json(req)
-                .send() => resp?,
-        };
+        // Retry only covers getting a successful response. Once the body starts
+        // streaming a second attempt would replay text the caller already saw,
+        // so everything below the loop happens exactly once.
+        let mut attempt = 0u32;
+        let resp = loop {
+            attempt += 1;
+            let (error, retry_after) = match self.send_once(req, cancel).await {
+                Ok(resp) => break resp,
+                Err(pair) => pair,
+            };
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HarnessError::Api {
-                status: status.as_u16(),
-                body,
-            });
-        }
+            let exhausted = attempt >= MAX_ATTEMPTS;
+            if exhausted || !error.is_transient() {
+                return Err(if attempt > 1 {
+                    annotate_attempts(error, attempt)
+                } else {
+                    error
+                });
+            }
+
+            let delay = retry_after.unwrap_or_else(|| backoff(attempt));
+            tokio::select! {
+                biased;
+                _ = wait_cancel(cancel) => return Err(HarnessError::Cancelled),
+                _ = tokio::time::sleep(delay) => {}
+            }
+        };
 
         // Read the headers before touching the body — `bytes_stream()` consumes
         // the response.
@@ -136,6 +142,95 @@ impl AnthropicClient {
 
         Ok(accumulator.finish(limits))
     }
+
+    /// One attempt at getting a streaming response.
+    ///
+    /// On failure returns the error alongside any `retry-after` the server
+    /// asked for — a rate limiter's own number is better than our guess.
+    async fn send_once(
+        &self,
+        req: &Request,
+        cancel: Option<&CancelToken>,
+    ) -> std::result::Result<reqwest::Response, (HarnessError, Option<Duration>)> {
+        let resp = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => return Err((HarnessError::Cancelled, None)),
+            resp = self
+                .http
+                .post(self.endpoint())
+                .header("x-api-key", &self.api_key)
+                // Gateways commonly read the bearer header instead. Sending both is
+                // harmless — the real API ignores it.
+                .header("authorization", format!("Bearer {}", self.api_key))
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json")
+                .json(req)
+                .send() => match resp {
+                    Ok(resp) => resp,
+                    Err(e) => return Err((HarnessError::Http(e), None)),
+                },
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp);
+        }
+
+        let retry_after = retry_after_from_headers(resp.headers());
+        let body = resp.text().await.unwrap_or_default();
+        Err((
+            HarnessError::Api {
+                status: status.as_u16(),
+                body,
+            },
+            retry_after,
+        ))
+    }
+}
+
+/// Exponential backoff with jitter: ~1s, ~2s, ~4s.
+///
+/// The jitter is derived from the wall clock rather than a PRNG to avoid a
+/// dependency for something this small. Its only job is to stop two concurrent
+/// delegated workers from retrying in lockstep.
+fn backoff(attempt: u32) -> Duration {
+    let base = Duration::from_secs(1 << attempt.min(4).saturating_sub(1));
+    let jitter_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos() % 250_000_000) / 1_000_000)
+        .unwrap_or(0);
+    base + Duration::from_millis(jitter_ms)
+}
+
+/// `retry-after` as either delay-seconds or an HTTP date. Only the seconds form
+/// is honoured; a date would need a date library for a marginal gain.
+fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let secs: u64 = headers
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    // Do not let a server park the turn for minutes; fall through to our own
+    // backoff by reporting nothing.
+    (secs <= 60).then(|| Duration::from_secs(secs))
+}
+
+/// Make an exhausted retry visible in the message the user actually reads.
+///
+/// `Cancelled` is passed through untouched: the caller branches on that variant
+/// to distinguish "the user stopped it" from "it broke", and flattening it into
+/// a generic error would report a deliberate Stop as a failure.
+fn annotate_attempts(error: HarnessError, attempts: u32) -> HarnessError {
+    match error {
+        HarnessError::Cancelled => HarnessError::Cancelled,
+        HarnessError::Api { status, body } => HarnessError::Api {
+            status,
+            body: format!("{body} (failed after {attempts} attempts)"),
+        },
+        other => HarnessError::Other(format!("{other} (failed after {attempts} attempts)")),
+    }
 }
 
 /// Throughput headroom, if the endpoint reports it.
@@ -162,4 +257,195 @@ fn rate_limits_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Rate
     };
 
     (!snapshot.is_empty()).then_some(snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::anthropic::types::Message;
+
+    /// Fast tests pin the backoff to zero via the server's own `retry-after`.
+    fn spawn_server(statuses: Vec<u16>) -> (String, Arc<AtomicUsize>) {
+        spawn_server_with(statuses, Some(0))
+    }
+
+    /// Minimal one-shot HTTP server: replies with `statuses[n]` to the nth
+    /// request, then a canned SSE turn once the status list runs out.
+    ///
+    /// `retry_after` of `None` omits the header, so the client falls back to its
+    /// own second-scale backoff — which is what the cancel test needs to have
+    /// something to interrupt.
+    fn spawn_server_with(
+        statuses: Vec<u16>,
+        retry_after: Option<u64>,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+
+                // Drain the request head so the client is not left blocked.
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                if content_length > 0 {
+                    use std::io::Read;
+                    let mut body = vec![0u8; content_length];
+                    let _ = reader.read_exact(&mut body);
+                }
+
+                match statuses.get(n) {
+                    Some(&status) => {
+                        let header = match retry_after {
+                            Some(secs) => format!("retry-after: {secs}\r\n"),
+                            None => String::new(),
+                        };
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 {status} X\r\n{header}content-length: 4\r\n\r\nboom"
+                        );
+                    }
+                    None => {
+                        let sse = concat!(
+                            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+                            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+                            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                        );
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{sse}",
+                            sse.len()
+                        );
+                    }
+                }
+                let _ = stream.flush();
+            }
+        });
+
+        (format!("http://{addr}"), hits)
+    }
+
+    fn request() -> Request {
+        Request {
+            model: "test".into(),
+            max_tokens: 16,
+            stream: true,
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::new(),
+            thinking: None,
+            output_config: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_a_529_then_succeeds() {
+        let (base, hits) = spawn_server(vec![529]);
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(base);
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        let completion = client.stream(&request(), &mut sink).await.unwrap();
+        assert_eq!(completion.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "should have retried once");
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_max_attempts_and_says_so() {
+        let (base, hits) = spawn_server(vec![529, 529, 529, 529]);
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(base);
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        let err = client.stream(&request(), &mut sink).await.unwrap_err();
+        assert_eq!(hits.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+        let message = err.to_string();
+        assert!(message.contains("failed after 3 attempts"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_a_bad_request() {
+        // A 400 is deterministic — retrying it just spends time and quota.
+        let (base, hits) = spawn_server(vec![400, 400]);
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(base);
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        let err = client.stream(&request(), &mut sink).await.unwrap_err();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(matches!(err, HarnessError::Api { status: 400, .. }));
+    }
+
+    /// Stop must not have to wait out a backoff sleep.
+    #[tokio::test]
+    async fn cancel_during_backoff_returns_immediately() {
+        // No `retry-after`, so the client uses its own ~1s backoff — there is
+        // an actual sleep to interrupt.
+        let (base, hits) = spawn_server_with(vec![503, 503, 503, 503], None);
+        let client = AnthropicClient::new("k".into())
+            .unwrap()
+            .with_base_url(base);
+        let cancel = CancelToken::new();
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            token.cancel();
+        });
+
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        let started = std::time::Instant::now();
+        let err = client
+            .stream_cancellable(&request(), &mut sink, Some(&cancel))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, HarnessError::Cancelled), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_millis(800),
+            "cancel waited out the backoff: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "must not keep retrying");
+    }
+
+    #[test]
+    fn retry_after_ignores_absurd_delays() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "5".parse().unwrap());
+        assert_eq!(
+            retry_after_from_headers(&headers),
+            Some(Duration::from_secs(5))
+        );
+        headers.insert("retry-after", "3600".parse().unwrap());
+        assert_eq!(retry_after_from_headers(&headers), None);
+        headers.insert(
+            "retry-after",
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after_from_headers(&headers), None);
+    }
 }

@@ -9,6 +9,7 @@ mod alpha_prove;
 pub mod anthropic;
 pub mod auth;
 pub mod cancel;
+pub mod commands;
 pub mod config;
 pub mod error;
 pub mod fsutil;
@@ -17,6 +18,7 @@ pub mod prefs;
 pub mod prompt;
 pub mod provider;
 pub mod routing;
+pub mod routing_edit;
 pub mod runtime;
 pub mod skills;
 pub mod thread;
@@ -34,21 +36,23 @@ pub use auth::{
     AuthStatus, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
-pub use config::{Config, ProviderConfig, Routing, Rule, Target};
+pub use commands::{expand as expand_command, parse_command, Expansion, ParsedCommand};
+pub use config::{load_env, user_config_path, Config, ProviderConfig, Routing, Rule, Target};
 pub use error::{HarnessError, Result};
-pub use fsutil::{atomic_write, atomic_write_json};
+pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
 pub use persist::{PersistPriority, PersistWorker, DELTA_CHECKPOINT_MS};
 pub use prefs::{ProjectSessionState, ProviderSessionPrefs};
 pub use prompt::{
-    compose_for_project, compose_system, custom_system_path, load_custom_system,
-    save_custom_system, truncate_chars, DEFAULT_SYSTEM, MAX_CUSTOM_PROMPT_BYTES,
+    compose_for_project, compose_system, compose_system_with_docs, custom_system_path, env_context,
+    load_custom_system, load_project_docs, save_custom_system, truncate_chars, DEFAULT_SYSTEM,
+    DELEGATION_SYSTEM, MAX_CUSTOM_PROMPT_BYTES, MAX_PROJECT_DOCS_BYTES, PROJECT_DOC_FILES,
 };
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue_for_provider, catalogue_from_lists, descriptor_for_picker_id, descriptor_from_config,
-    normalize_effort, Completion, ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot,
-    StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    normalize_effort, probe, Completion, ModelSpec, Provider, ProviderDescriptor,
+    RateLimitSnapshot, StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use routing::{Resolution, Router};
 pub use runtime::{RuntimeBuilder, RuntimeSession};
@@ -62,8 +66,8 @@ pub use thread::{
     WIRE_FORMAT_ANTHROPIC_MESSAGES,
 };
 pub use tools::approval::{
-    AllowApprover, ApprovalDecision, ApprovalPreview, ApprovalRequest, Approver, DenyApprover,
-    ToolRisk,
+    AllowApprover, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalPreview,
+    ApprovalRequest, Approver, DenyApprover, PolicyOutcome, ToolRisk,
 };
 pub use tools::delegate::{Delegate, DELEGATE_TOOL};
 pub use tools::glob_files::GlobFiles;

@@ -7,13 +7,63 @@ use crate::fsutil;
 use crate::skills::SkillSet;
 
 /// Default base instructions when a front-end does not supply its own.
+///
+/// Longer than it looks like it needs to be, for two reasons. The batching line
+/// is what actually cashes in concurrent tool execution — the loop can only
+/// overlap calls the model chose to issue together. And the edit_file line is
+/// worth real money: without it a model reaches for `write_file` and pays for
+/// the whole file in output tokens.
 pub const DEFAULT_SYSTEM: &str = "\
-You are Zest, a coding agent inside the user's project. You have project tools \
-(list_dir, glob, grep, read_file, write_file) scoped to that project. Explore and \
-read before answering. write_file requires user approval. Keep responses focused.";
+You are Zest, a coding agent working inside the user's project.
+
+Tools are scoped to the project directory: list_dir, glob, grep, read_file, \
+write_file, edit_file, bash. web_search reaches public docs and current \
+information.
+
+How to work:
+- Read before you answer. Never guess at a file's contents or an API's shape \
+when a tool can tell you.
+- Issue independent tool calls together in one turn — they run concurrently. \
+Reading three files takes as long as reading one.
+- To change an existing file, use edit_file with an exact unique string. Use \
+write_file only to create a file or replace one wholesale. Line numbers in \
+read_file output are display only; never include them in edit_file arguments.
+- Verify with bash. Read-only commands (cargo check, cargo test, git status, \
+npm test) run without prompting, so use them rather than assuming a change \
+compiles.
+- write_file, edit_file, and non-read-only commands ask the user first.
+
+Keep responses focused. State what you verified and what you did not — \
+\"it compiles\" and \"it works\" are different claims.";
 
 /// Max bytes for `.zest/system.md` (checked before allocating the full body).
 pub const MAX_CUSTOM_PROMPT_BYTES: usize = 32 * 1024;
+
+/// Added only when the `delegate` tool is actually registered.
+///
+/// Kept out of [`DEFAULT_SYSTEM`] so single-provider users do not carry
+/// instructions for a tool they do not have — it would be dead weight in the
+/// cached prefix and an invitation to hallucinate the call.
+pub const DELEGATION_SYSTEM: &str = "\
+# Delegating
+
+Another provider is available through `delegate`, and routing maps a task \
+`kind` to the model that should serve it.
+
+- Split the work and delegate the pieces whose kind is configured. Keep the \
+pieces that are cheaper to do yourself.
+- Send independent delegations **in the same turn** — they run concurrently. \
+Waiting for one before asking for the next doubles the wall-clock for nothing.
+- A worker sees none of this conversation. Give it the file paths, the \
+constraints, and the shape of the answer you want back.
+- Read what comes back before acting on it. A worker can be wrong, and it is \
+your name on the result.";
+
+/// Root-level docs pulled into the prompt when present, in priority order.
+pub const PROJECT_DOC_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "PROJECT_CONTEXT.md"];
+
+/// Total budget across all discovered project docs.
+pub const MAX_PROJECT_DOCS_BYTES: usize = 16 * 1024;
 
 pub fn custom_system_path(root: &Path) -> PathBuf {
     root.join(".zest").join("system.md")
@@ -58,9 +108,27 @@ pub fn save_custom_system(root: &Path, content: &str) -> Result<(), String> {
 /// When `custom` is non-empty it is **authoritative** for identity/persona and is
 /// placed first so it overrides conflicting lines in the front-end base prompt
 /// (e.g. "You are Zest…"). Skills catalogue follows.
+///
+/// Everything composed here is stable for a session, which is what makes it
+/// worth a cache breakpoint. Anything volatile — see [`env_context`] — belongs
+/// after this, not inside it.
 pub fn compose_system(base: &str, custom: &str, skills: &SkillSet) -> String {
+    compose_system_with_docs(base, custom, "", skills)
+}
+
+/// [`compose_system`] plus discovered project docs.
+///
+/// Ordering is a precedence claim: the user's own `.zest/system.md` wins, then
+/// the repo's committed agent docs, then Zest's own rules.
+pub fn compose_system_with_docs(
+    base: &str,
+    custom: &str,
+    project_docs: &str,
+    skills: &SkillSet,
+) -> String {
     let custom = custom.trim();
     let base = base.trim();
+    let project_docs = project_docs.trim();
     let mut out = String::new();
 
     if !custom.is_empty() {
@@ -73,6 +141,15 @@ or identity in the operating rules below.)\n\n# Operating rules\n\n",
         out.push_str(&neutralize_fixed_identity(base));
     } else if !base.is_empty() {
         out.push_str(base);
+    }
+
+    if !project_docs.is_empty() {
+        out.push_str(
+            "\n\n# Project documentation\n\nThe project ships these notes for \
+agents working in it. Follow them where they are more specific than the rules \
+above; the user's own instructions still win over both.\n\n",
+        );
+        out.push_str(project_docs);
     }
 
     let catalogue = skills.catalogue_markdown();
@@ -92,6 +169,125 @@ instructions when a skill is relevant and its details are not already inlined be
     }
 
     out
+}
+
+/// Read root-level agent docs (`AGENTS.md`, `CLAUDE.md`, `PROJECT_CONTEXT.md`).
+///
+/// These are conventions the project already writes down for whatever agent
+/// shows up; not reading them means the harness is the only reader in the room
+/// that ignores them. Bounded in total, and each file is labelled so the model
+/// can tell instructions from context.
+pub fn load_project_docs(root: &Path) -> String {
+    let mut out = String::new();
+    let mut budget = MAX_PROJECT_DOCS_BYTES;
+
+    for name in PROJECT_DOC_FILES {
+        if budget == 0 {
+            break;
+        }
+        let path = root.join(name);
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            // Unreadable or non-UTF-8: skip it rather than fail the session.
+            continue;
+        };
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+
+        let (kept, truncated) = if body.len() > budget {
+            (&body[..floor_char_boundary(body, budget)], true)
+        } else {
+            (body, false)
+        };
+        budget = budget.saturating_sub(kept.len());
+
+        out.push_str(&format!("## {name}\n\n{kept}\n"));
+        if truncated {
+            out.push_str("\n[truncated — read the file directly for the rest]\n");
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn floor_char_boundary(s: &str, mut index: usize) -> usize {
+    index = index.min(s.len());
+    while index > 0 && !s.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// Where the agent is running.
+///
+/// Kept **out** of [`compose_system`] on purpose: the branch name changes and
+/// the cached prompt prefix must not. Front-ends append this after the cached
+/// region, or leave it out.
+pub fn env_context(root: &Path) -> String {
+    let mut out = String::from("# Environment\n\n");
+    out.push_str(&format!("Working directory: {}\n", root.display()));
+    out.push_str(&format!("Platform: {}\n", std::env::consts::OS));
+
+    match git_branch(root) {
+        Some(branch) => out.push_str(&format!("Git repository: yes (branch {branch})\n")),
+        None if root.join(".git").exists() => {
+            out.push_str("Git repository: yes (branch unknown)\n");
+        }
+        None => out.push_str("Git repository: no\n"),
+    }
+
+    let entries = top_level_entries(root);
+    if !entries.is_empty() {
+        out.push_str(&format!("Top level: {}\n", entries.join(", ")));
+    }
+    out
+}
+
+/// Read the branch from `.git/HEAD` rather than shelling out to git — this runs
+/// on every session start and must not depend on git being installed.
+fn git_branch(root: &Path) -> Option<String> {
+    let head = fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
+    let head = head.trim();
+    // Detached HEAD stores a bare sha, which is not a branch name.
+    head.strip_prefix("ref: refs/heads/").map(str::to_string)
+}
+
+/// A bounded, alphabetical listing so the model knows the shape of the project
+/// without spending a `list_dir` call on it.
+fn top_level_entries(root: &Path) -> Vec<String> {
+    const MAX_ENTRIES: usize = 40;
+    let Ok(dir) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = dir
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                return None;
+            }
+            let suffix = match e.file_type() {
+                Ok(t) if t.is_dir() => "/",
+                _ => "",
+            };
+            Some(format!("{name}{suffix}"))
+        })
+        .collect();
+    names.sort();
+    if names.len() > MAX_ENTRIES {
+        let extra = names.len() - MAX_ENTRIES;
+        names.truncate(MAX_ENTRIES);
+        names.push(format!("… (+{extra} more)"));
+    }
+    names
 }
 
 /// Soften a hardcoded "You are Zest…" opener so project custom identity can win.
@@ -117,11 +313,12 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     format!("{truncated}…\n\n(truncated — {count} chars total)")
 }
 
-/// Load custom + discover skills and compose against `base`.
+/// Load custom + project docs + discover skills and compose against `base`.
 pub fn compose_for_project(base: &str, root: &Path) -> Result<(String, SkillSet), String> {
     let custom = load_custom_system(root)?;
+    let docs = load_project_docs(root);
     let skills = SkillSet::discover(root);
-    let system = compose_system(base, &custom, &skills);
+    let system = compose_system_with_docs(base, &custom, &docs, &skills);
     Ok((system, skills))
 }
 
@@ -176,6 +373,132 @@ mod tests {
         assert!(out.contains("truncated"));
         // Must not panic or split a codepoint.
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zest-prompt-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn project_docs_are_discovered_and_labelled() {
+        let dir = scratch("docs");
+        fs::write(dir.join("AGENTS.md"), "Always use tabs.").unwrap();
+        fs::write(dir.join("PROJECT_CONTEXT.md"), "This is a widget factory.").unwrap();
+        // Not on the list — must not be swept in.
+        fs::write(dir.join("NOTES.md"), "secret plans").unwrap();
+
+        let docs = load_project_docs(&dir);
+        assert!(docs.contains("## AGENTS.md"), "{docs}");
+        assert!(docs.contains("Always use tabs."), "{docs}");
+        assert!(docs.contains("## PROJECT_CONTEXT.md"), "{docs}");
+        assert!(!docs.contains("secret plans"), "{docs}");
+    }
+
+    #[test]
+    fn missing_and_empty_docs_are_simply_absent() {
+        let dir = scratch("nodocs");
+        assert!(load_project_docs(&dir).is_empty());
+        fs::write(dir.join("AGENTS.md"), "   \n\n ").unwrap();
+        assert!(
+            load_project_docs(&dir).is_empty(),
+            "whitespace is not content"
+        );
+    }
+
+    #[test]
+    fn project_docs_are_bounded_in_total() {
+        let dir = scratch("bigdocs");
+        fs::write(
+            dir.join("AGENTS.md"),
+            "a".repeat(MAX_PROJECT_DOCS_BYTES * 2),
+        )
+        .unwrap();
+        fs::write(dir.join("CLAUDE.md"), "b".repeat(1000)).unwrap();
+        let docs = load_project_docs(&dir);
+        assert!(docs.contains("truncated"), "{}", &docs[..80]);
+        // The budget is shared, so the second file cannot smuggle more past it.
+        assert!(!docs.contains('b'), "budget was not shared across files");
+        assert!(docs.len() < MAX_PROJECT_DOCS_BYTES * 2);
+    }
+
+    #[test]
+    fn truncating_docs_never_splits_a_codepoint() {
+        let dir = scratch("utf8docs");
+        fs::write(dir.join("AGENTS.md"), "é".repeat(MAX_PROJECT_DOCS_BYTES)).unwrap();
+        let docs = load_project_docs(&dir);
+        assert!(std::str::from_utf8(docs.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn user_instructions_outrank_project_docs_which_outrank_base() {
+        let skills = SkillSet::default();
+        let composed = compose_system_with_docs(
+            "BASE RULES",
+            "CUSTOM LAYER",
+            "## AGENTS.md\n\nDOC RULES",
+            &skills,
+        );
+        let custom_at = composed.find("CUSTOM LAYER").unwrap();
+        let base_at = composed.find("BASE RULES").unwrap();
+        let docs_at = composed.find("DOC RULES").unwrap();
+        assert!(custom_at < base_at);
+        assert!(base_at < docs_at);
+        assert!(composed.contains("user's own instructions still win"));
+    }
+
+    #[test]
+    fn compose_system_without_docs_is_unchanged() {
+        let skills = SkillSet::default();
+        assert_eq!(
+            compose_system("BASE", "", &skills),
+            compose_system_with_docs("BASE", "", "", &skills)
+        );
+        assert!(!compose_system("BASE", "", &skills).contains("Project documentation"));
+    }
+
+    #[test]
+    fn env_context_reports_directory_platform_and_git() {
+        let dir = scratch("env");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("Cargo.toml"), "").unwrap();
+
+        let env = env_context(&dir);
+        assert!(env.contains("Working directory:"), "{env}");
+        assert!(env.contains(std::env::consts::OS), "{env}");
+        assert!(env.contains("Git repository: no"), "{env}");
+        assert!(env.contains("src/"), "{env}");
+        assert!(env.contains("Cargo.toml"), "{env}");
+    }
+
+    #[test]
+    fn env_context_reads_the_branch_without_running_git() {
+        let dir = scratch("branch");
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git").join("HEAD"), "ref: refs/heads/feature/x\n").unwrap();
+        assert!(env_context(&dir).contains("branch feature/x"));
+
+        // Detached HEAD stores a bare sha — not a branch, and not reported as one.
+        fs::write(dir.join(".git").join("HEAD"), "abc123def\n").unwrap();
+        let env = env_context(&dir);
+        assert!(env.contains("branch unknown"), "{env}");
+        assert!(!env.contains("abc123def"), "{env}");
+    }
+
+    /// The environment block must not be inside the region a cache breakpoint
+    /// covers, or the branch changing would cost a full cache miss.
+    #[test]
+    fn env_context_is_not_part_of_the_composed_prefix() {
+        let dir = scratch("cachesafe");
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let (composed, _) = compose_for_project("BASE", &dir).unwrap();
+        assert!(
+            !composed.contains("# Environment"),
+            "compose_for_project must leave env to the caller"
+        );
     }
 
     #[test]

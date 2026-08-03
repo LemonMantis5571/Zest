@@ -25,6 +25,64 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub routing: Routing,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub bash: BashConfig,
+}
+
+/// `[tools.bash]`. Absent means the defaults below, which is a working setup —
+/// the tool ships on with only read-only commands running unattended.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BashConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Extra command prefixes that may run without approval, each given as its
+    /// own token list (`[["just", "lint"]]`). Still subject to the shell
+    /// metacharacter rule — an entry here cannot opt out of that.
+    #[serde(default)]
+    pub extra_allowlist: Vec<Vec<String>>,
+    /// Substrings that force approval even for an otherwise allowlisted
+    /// command. Checked first, so this always wins.
+    #[serde(default)]
+    pub denylist: Vec<String>,
+    #[serde(default = "default_bash_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for BashConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            extra_allowlist: Vec::new(),
+            denylist: Vec::new(),
+            timeout_ms: default_bash_timeout_ms(),
+        }
+    }
+}
+
+impl BashConfig {
+    pub fn settings(&self) -> crate::tools::bash::BashSettings {
+        crate::tools::bash::BashSettings {
+            extra_allowlist: self.extra_allowlist.clone(),
+            denylist: self.denylist.clone(),
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_bash_timeout_ms() -> u64 {
+    crate::tools::bash::DEFAULT_TIMEOUT_MS
 }
 
 /// How to reach one provider.
@@ -82,6 +140,29 @@ pub struct Routing {
     /// Consulted in order; first match wins. Used from Step 5 onward.
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Whether the model may hand work to another provider at all.
+    ///
+    /// **Off by default**, and off means the `delegate` tool is not registered
+    /// — not merely discouraged. Spending a second subscription is not
+    /// something to enable by accident, and an absent capability cannot be
+    /// talked around the way a flag in the prompt can. Same reasoning as the
+    /// worker registries, which structurally cannot contain `delegate`.
+    #[serde(default)]
+    pub delegation: bool,
+}
+
+impl Routing {
+    /// The task kinds the model may declare, taken from the rules.
+    ///
+    /// A kind with no rule routes nowhere in particular, so the rule list *is*
+    /// the vocabulary. Sorted and deduped: this becomes an enum in the tool
+    /// schema, and a reordering would invalidate the prompt cache for nothing.
+    pub fn kinds(&self) -> Vec<String> {
+        let mut kinds: Vec<String> = self.rules.iter().map(|r| r.kind.clone()).collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +172,9 @@ pub struct Target {
     /// Omitted means the provider's own default.
     #[serde(default)]
     pub model: Option<String>,
+    /// Omitted means `high`.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,17 +185,65 @@ pub struct Rule {
     pub provider: String,
     #[serde(default)]
     pub model: Option<String>,
+    /// Reasoning effort for this worker. Omitted means `high`.
+    ///
+    /// Worth setting: routing a mechanical task to a cheap model and then
+    /// running it at maximum effort spends most of what the routing saved.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Extra framing prepended to the worker's system prompt.
+    ///
+    /// A frontend worker and a planner otherwise get identical instructions,
+    /// which wastes the one thing routing by kind actually knows.
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+/// Load `.env` from the project (searching upward), then `~/.zest/.env`.
+///
+/// The second one is the point: a key like `ZEST_GATEWAY_KEY` belongs to the
+/// machine for the same reason the provider list does. With only the upward
+/// search, opening a folder outside the Zest checkout finds no `.env` at all
+/// and a correctly-configured provider fails for want of a credential.
+///
+/// dotenv semantics are first-wins and never clobber a variable already in the
+/// environment, so a project `.env` still overrides the user one, and a real
+/// environment variable overrides both.
+pub fn load_env() {
+    let _ = dotenvy::dotenv();
+    if let Some(home) = dirs::home_dir() {
+        let _ = dotenvy::from_path(home.join(".zest").join(".env"));
+    }
+}
+
+/// User-global config: `~/.zest/zest.toml`.
+///
+/// Which accounts you are signed into is a property of the machine, not of a
+/// repository. Without this, opening any folder that happens not to contain a
+/// `zest.toml` would drop you back to the bare Anthropic-from-env fallback and
+/// fail with "provider `codex` could not be loaded" — even though nothing about
+/// your Codex login changed by opening a different directory.
+pub fn user_config_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".zest").join(CONFIG_FILE))
 }
 
 impl Config {
-    /// Look for `zest.toml` in `dir`. Absent is not an error — see module note.
+    /// Look for `zest.toml` in `dir`, then `~/.zest/zest.toml`. Absent is not an
+    /// error — see module note.
+    ///
+    /// Project config **replaces** user config rather than merging into it.
+    /// Merging two provider tables would make it genuinely hard to answer
+    /// "which account is this about to spend", and that question has to stay
+    /// easy.
     pub fn find(dir: impl AsRef<Path>) -> Result<Self> {
         let path = dir.as_ref().join(CONFIG_FILE);
         if path.is_file() {
-            Self::load_from(path)
-        } else {
-            Ok(Self::env_fallback())
+            return Self::load_from(path);
         }
+        if let Some(user) = user_config_path().filter(|p| p.is_file()) {
+            return Self::load_from(user);
+        }
+        Ok(Self::env_fallback())
     }
 
     pub fn load_from(path: impl AsRef<Path>) -> Result<Self> {
@@ -142,9 +274,12 @@ impl Config {
                 default: Some(Target {
                     provider: "anthropic".to_string(),
                     model: None,
+                    effort: None,
                 }),
                 rules: Vec::new(),
+                delegation: false,
             },
+            tools: ToolsConfig::default(),
         }
     }
 
@@ -160,6 +295,7 @@ impl Config {
             return self.providers.keys().next().map(|id| Target {
                 provider: id.clone(),
                 model: None,
+                effort: None,
             });
         }
         None
@@ -376,6 +512,61 @@ model = "m"
         )
         .unwrap_err();
         assert!(err.to_string().contains("base_urls"), "{err}");
+    }
+
+    #[test]
+    fn bash_defaults_to_enabled_with_no_tools_section() {
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+"#,
+        )
+        .expect("valid");
+        assert!(config.tools.bash.enabled);
+        assert!(config.tools.bash.extra_allowlist.is_empty());
+        assert_eq!(
+            config.tools.bash.timeout_ms,
+            crate::tools::bash::DEFAULT_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn bash_section_parses_allowlist_and_denylist() {
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+
+[tools.bash]
+enabled = false
+extra_allowlist = [["just", "lint"], ["make", "test"]]
+denylist = ["cargo publish"]
+timeout_ms = 5000
+"#,
+        )
+        .expect("valid");
+        let bash = &config.tools.bash;
+        assert!(!bash.enabled);
+        assert_eq!(bash.extra_allowlist.len(), 2);
+        assert_eq!(bash.extra_allowlist[0], vec!["just", "lint"]);
+        assert_eq!(bash.denylist, vec!["cargo publish".to_string()]);
+        assert_eq!(bash.timeout_ms, 5000);
+
+        // The settings a tool actually receives carry the same values.
+        let settings = bash.settings();
+        assert_eq!(settings.timeout_ms, 5000);
+        assert_eq!(settings.denylist, vec!["cargo publish".to_string()]);
+    }
+
+    #[test]
+    fn the_repo_config_parses() {
+        // zest.toml is the file every fresh clone starts from; a typo in the
+        // committed `[tools.bash]` block would break launch, not a test.
+        let raw = include_str!("../../../zest.toml");
+        let config = Config::parse(raw).expect("committed zest.toml must parse");
+        assert!(config.tools.bash.enabled);
+        assert!(config.lint().is_empty(), "{:?}", config.lint());
     }
 
     #[test]

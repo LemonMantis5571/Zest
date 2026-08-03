@@ -100,7 +100,7 @@ impl WriteFile {
         ))
     }
 
-    fn verify_preimage(path: &Path, expected: &PreImage) -> Result<(), String> {
+    pub(crate) fn verify_preimage(path: &Path, expected: &PreImage) -> Result<(), String> {
         let current = match std::fs::metadata(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
@@ -147,41 +147,70 @@ impl WriteFile {
     }
 
     fn execute_write(&self, prepared: PreparedToolCall) -> Result<String, String> {
-        let PreparedKind::WriteFile {
-            absolute_path,
-            relative_path,
-            content,
-            preimage,
-        } = prepared.kind
-        else {
-            return Err("internal error: write_file prepared kind mismatch".into());
-        };
-
-        // Re-resolve and require the same normalized path.
-        let again = self.root.resolve_for_write(&relative_path)?;
-        if again != absolute_path {
-            return Err(
-                "target path changed after approval (symlink or root moved); aborting write — fresh approval required"
-                    .into(),
-            );
-        }
-
-        Self::verify_preimage(&absolute_path, &preimage)?;
-
-        if let Some(parent) = absolute_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create parent dirs failed: {e}"))?;
-            // Parent must still be inside the project after create.
-            let canon_parent = std::fs::canonicalize(parent)
-                .map_err(|e| format!("cannot verify parent directory: {e}"))?;
-            if !canon_parent.starts_with(self.root.as_path()) {
-                return Err("parent directory resolves outside the project root".into());
-            }
-        }
-
-        atomic_write(&absolute_path, content.as_bytes())?;
-        Ok(format!("wrote {relative_path} ({} bytes)", content.len()))
+        let relative = commit_prepared_write(&self.root, prepared)?;
+        Ok(format!(
+            "wrote {} ({} bytes)",
+            relative.path, relative.bytes
+        ))
     }
+}
+
+/// What a committed write touched, for the tool's result line.
+pub(crate) struct CommittedWrite {
+    pub path: String,
+    pub bytes: usize,
+}
+
+/// Commit a prepared whole-file replacement.
+///
+/// Shared by `write_file` and `edit_file`: both arrive here holding a path, a
+/// full new body, and the pre-image the user actually approved against. Every
+/// re-check below exists because approval and execution are separated in time —
+/// the path can be re-pointed by a symlink and the bytes can change underneath.
+pub(crate) fn commit_prepared_write(
+    root: &ProjectRoot,
+    prepared: PreparedToolCall,
+) -> Result<CommittedWrite, String> {
+    let tool_name = prepared.tool_name;
+    let PreparedKind::WriteFile {
+        absolute_path,
+        relative_path,
+        content,
+        preimage,
+    } = prepared.kind
+    else {
+        return Err(format!(
+            "internal error: {tool_name} prepared kind mismatch"
+        ));
+    };
+
+    // Re-resolve and require the same normalized path.
+    let again = root.resolve_for_write(&relative_path)?;
+    if again != absolute_path {
+        return Err(
+            "target path changed after approval (symlink or root moved); aborting write — fresh approval required"
+                .into(),
+        );
+    }
+
+    WriteFile::verify_preimage(&absolute_path, &preimage)?;
+
+    if let Some(parent) = absolute_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent dirs failed: {e}"))?;
+        // Parent must still be inside the project after create.
+        let canon_parent = std::fs::canonicalize(parent)
+            .map_err(|e| format!("cannot verify parent directory: {e}"))?;
+        if !canon_parent.starts_with(root.as_path()) {
+            return Err("parent directory resolves outside the project root".into());
+        }
+    }
+
+    let bytes = content.len();
+    atomic_write(&absolute_path, content.as_bytes())?;
+    Ok(CommittedWrite {
+        path: relative_path,
+        bytes,
+    })
 }
 
 #[async_trait]
@@ -191,10 +220,11 @@ impl Tool for WriteFile {
     }
 
     fn description(&self) -> &str {
-        "Create or overwrite a UTF-8 text file in the project. Paths are \
-         relative to the project root. Prefer editing with the smallest \
-         complete file contents that achieve the change. Requires user \
-         approval before the write runs."
+        "Create a new UTF-8 text file in the project, or fully replace one. \
+         Paths are relative to the project root. To change part of a file that \
+         already exists, use `edit_file` instead — it is far cheaper and cannot \
+         clobber the parts you did not intend to touch. Requires user approval \
+         before the write runs."
     }
 
     fn risk(&self) -> ToolRisk {

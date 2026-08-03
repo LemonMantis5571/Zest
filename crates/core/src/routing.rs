@@ -23,7 +23,13 @@ pub struct Resolution {
     /// Providers passed over on the way here, with why. Worth surfacing — a
     /// silent fallback spends a different account than the user expected.
     pub skipped: Vec<(String, String)>,
+    /// Extra framing for the worker, from the rule that matched. `None` when
+    /// the default or the last-resort fallback answered.
+    pub prompt: Option<String>,
 }
+
+/// Effort a worker runs at when neither the rule nor the default says.
+pub const DEFAULT_WORKER_EFFORT: &str = "high";
 
 pub struct Router {
     default: Option<Target>,
@@ -39,32 +45,47 @@ impl Router {
     }
 
     /// Preference-ordered candidates for a task `kind`, most specific first.
-    pub fn candidates(&self, kind: Option<&str>, registry: &ProviderRegistry) -> Vec<Target> {
-        let mut out: Vec<Target> = Vec::new();
+    ///
+    /// Each carries the rule's worker framing, so a candidate that is passed
+    /// over does not leave its prompt attached to whoever answers instead.
+    pub fn candidates(
+        &self,
+        kind: Option<&str>,
+        registry: &ProviderRegistry,
+    ) -> Vec<(Target, Option<String>)> {
+        let mut out: Vec<(Target, Option<String>)> = Vec::new();
 
         if let Some(kind) = kind {
             for rule in self.rules.iter().filter(|r| r.kind == kind) {
-                out.push(Target {
-                    provider: rule.provider.clone(),
-                    model: rule.model.clone(),
-                });
+                out.push((
+                    Target {
+                        provider: rule.provider.clone(),
+                        model: rule.model.clone(),
+                        effort: rule.effort.clone(),
+                    },
+                    rule.prompt.clone(),
+                ));
             }
         }
 
         if let Some(default) = &self.default {
-            out.push(default.clone());
+            out.push((default.clone(), None));
         }
 
         // Last resort: anything that loaded. Running the task on a second-choice
         // provider beats refusing to run it.
         for id in registry.ids() {
-            out.push(Target {
-                provider: id.to_string(),
-                model: None,
-            });
+            out.push((
+                Target {
+                    provider: id.to_string(),
+                    model: None,
+                    effort: None,
+                },
+                None,
+            ));
         }
 
-        out.dedup_by(|a, b| a.provider == b.provider);
+        out.dedup_by(|a, b| a.0.provider == b.0.provider);
         out
     }
 
@@ -76,7 +97,7 @@ impl Router {
     ) -> Option<Resolution> {
         let mut skipped = Vec::new();
 
-        for target in self.candidates(kind, registry) {
+        for (target, prompt) in self.candidates(kind, registry) {
             let Some(provider) = registry.get(&target.provider) else {
                 skipped.push((target.provider.clone(), "not loaded".to_string()));
                 continue;
@@ -85,25 +106,30 @@ impl Router {
                 skipped.push((target.provider.clone(), reason));
                 continue;
             }
-            // Validate the routed model before dispatch. Invalid targets become
+            // Validate the routed pair before dispatch. Invalid targets become
             // explicit skipped reasons and fall through safely.
             let model = target
                 .model
                 .clone()
                 .unwrap_or_else(|| provider.default_model().to_string());
-            // Worker effort is fixed to `high` for this milestone.
-            if let Err(reason) = provider.validate_selection(&model, "high") {
+            let effort = target
+                .effort
+                .clone()
+                .unwrap_or_else(|| DEFAULT_WORKER_EFFORT.to_string());
+            if let Err(reason) = provider.validate_selection(&model, &effort) {
                 skipped.push((
                     target.provider.clone(),
-                    format!("invalid model `{model}`: {reason}"),
+                    format!("invalid model `{model}` / effort `{effort}`: {reason}"),
                 ));
                 continue;
             }
             let mut accepted = target;
             accepted.model = Some(model);
+            accepted.effort = Some(effort);
             return Some(Resolution {
                 target: accepted,
                 skipped,
+                prompt,
             });
         }
 

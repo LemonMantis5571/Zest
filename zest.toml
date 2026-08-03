@@ -38,3 +38,15 @@ default = { provider = "codex", model = "gpt-5.6-sol" }
 # kind = "mechanical"
 # provider = "codex"
 # model = "gpt-5.6-sol"
+
+[tools.bash]
+# Read-only commands (cargo check/clippy/test, git status/diff, npm test, ...) run
+# without prompting. Everything else shows the exact command line and waits.
+#
+# A command only qualifies for the unattended path if it contains no shell
+# metacharacters — that check, not the allowlist, is what stops
+# `cargo check && rm -rf /`. Entries below cannot opt out of it.
+enabled = true
+# extra_allowlist = [["just", "lint"]]   # each entry is a token list
+# denylist = ["cargo publish"]           # checked first; always wins
+# timeout_ms = 120000                    # capped at 600000
