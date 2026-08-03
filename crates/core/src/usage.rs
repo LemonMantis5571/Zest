@@ -15,12 +15,121 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil;
 use crate::provider::{Completion, RateLimitSnapshot};
+
+/// Days of per-day history to keep. Enough to draw a year-long heatmap with room
+/// to spare; old buckets are dropped rather than growing the file forever.
+pub const DAILY_RETENTION_DAYS: usize = 400;
+
+/// Minutes east of UTC, for deciding which day a turn belongs to.
+///
+/// A process global because the ledger is written from deep inside the agent
+/// loop, far from anything that knows about the user's clock. Zero (UTC) is the
+/// default so the CLI stays deterministic; the desktop sets the real offset at
+/// startup, because a streak that resets at 6pm is worse than no streak.
+static LOCAL_OFFSET_MINUTES: AtomicI32 = AtomicI32::new(0);
+
+pub fn set_local_offset_minutes(minutes: i32) {
+    // Guard against a nonsense value from the front end: real zones span
+    // UTC-12..UTC+14.
+    if (-12 * 60..=14 * 60).contains(&minutes) {
+        LOCAL_OFFSET_MINUTES.store(minutes, Ordering::Relaxed);
+    }
+}
+
+pub fn local_offset_minutes() -> i32 {
+    LOCAL_OFFSET_MINUTES.load(Ordering::Relaxed)
+}
+
+/// `YYYY-MM-DD` for a unix timestamp, in the configured local zone.
+///
+/// ISO order is lexicographic order, which is why the daily map can be a
+/// `BTreeMap<String, _>` and still iterate chronologically.
+pub fn day_key(unix_secs: u64) -> String {
+    day_key_from_number(local_day_number(unix_secs))
+}
+
+/// Days since the epoch, in the configured local zone.
+///
+/// The form to compute with: "are these two days consecutive" is subtraction on
+/// this, and calendar-string arithmetic would be a bug farm.
+pub fn local_day_number(unix_secs: u64) -> i64 {
+    let shifted = unix_secs as i64 + i64::from(local_offset_minutes()) * 60;
+    shifted.div_euclid(86_400)
+}
+
+pub fn day_key_from_number(day: i64) -> String {
+    let (y, m, d) = civil_from_days(day);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Parse a `YYYY-MM-DD` key back to a day number. `None` if it is not one.
+pub fn day_number_from_key(key: &str) -> Option<i64> {
+    let mut parts = key.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(days_from_civil(y, m, d))
+}
+
+/// Calendar date to days since the epoch. Inverse of [`civil_from_days`].
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 } as u64; // March = 0
+    let doy = (153 * mp + 2) / 5 + u64::from(d) - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// Days since the unix epoch to a calendar date.
+///
+/// Hinnant's civil-from-days, valid for any date in the proleptic Gregorian
+/// calendar. Written out rather than pulled in: a date crate would be a new
+/// dependency for one function, and this one has no configuration to get wrong.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    // Shift the epoch to 0000-03-01 so leap days land at the end of the cycle.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], March = 0
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe as i64 + era * 400;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// One day's measured spend, across every provider.
+///
+/// Not split per provider: the question this answers is "how much did I use Zest
+/// that day", and a per-provider-per-day matrix would grow the file by the
+/// number of providers for a breakdown nothing asks for.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DayUsage {
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_read_tokens: u64,
+}
+
+impl DayUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
+    }
+}
 
 /// What Zest itself has spent against one provider, plus the last headroom that
 /// provider reported.
@@ -61,6 +170,13 @@ impl ProviderUsage {
 pub struct Ledger {
     #[serde(default)]
     providers: BTreeMap<String, ProviderUsage>,
+    /// Spend per local day, newest last, capped at [`DAILY_RETENTION_DAYS`].
+    ///
+    /// Added after the per-provider totals, so an existing ledger simply starts
+    /// empty here — there is no history to backfill, and inventing one would be
+    /// worse than an honest gap.
+    #[serde(default)]
+    daily: BTreeMap<String, DayUsage>,
     /// Where to persist. Not serialized — it is where the file is, not part of it.
     #[serde(skip)]
     path: Option<PathBuf>,
@@ -122,7 +238,43 @@ impl Ledger {
             entry.headroom_at = Some(now);
         }
 
+        let day = self.daily.entry(day_key(now)).or_default();
+        day.requests += 1;
+        day.input_tokens += u64::from(completion.usage.input_tokens);
+        day.output_tokens += u64::from(completion.usage.output_tokens);
+        day.cache_write_tokens += u64::from(completion.usage.cache_creation_input_tokens);
+        day.cache_read_tokens += u64::from(completion.usage.cache_read_input_tokens);
+        self.trim_daily();
+
         let _ = self.save();
+    }
+
+    /// Drop the oldest buckets past the retention window.
+    ///
+    /// Keys are ISO dates, so `BTreeMap` order is chronological and the oldest
+    /// are simply the first ones.
+    fn trim_daily(&mut self) {
+        while self.daily.len() > DAILY_RETENTION_DAYS {
+            let Some(oldest) = self.daily.keys().next().cloned() else {
+                break;
+            };
+            self.daily.remove(&oldest);
+        }
+    }
+
+    /// Per-day spend, keyed by ISO date so iteration is chronological. Empty for
+    /// a ledger written before daily buckets existed, until the next turn.
+    pub fn daily(&self) -> &BTreeMap<String, DayUsage> {
+        &self.daily
+    }
+
+    /// Lifetime totals across every provider, for the headline figures.
+    pub fn lifetime(&self) -> (u64, u64) {
+        self.providers
+            .values()
+            .fold((0, 0), |(tokens, requests), p| {
+                (tokens + p.total_tokens(), requests + p.requests)
+            })
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -142,6 +294,7 @@ impl Ledger {
         };
         let reloaded = Self::load_from(path);
         self.providers = reloaded.providers;
+        self.daily = reloaded.daily;
     }
 
     pub fn get(&self, provider_id: &str) -> Option<&ProviderUsage> {
@@ -419,6 +572,123 @@ mod tests {
         match &anth.headroom {
             HeadroomView::NotReported { label } => assert_eq!(label, "Not reported"),
             other => panic!("expected not reported, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod daily_tests {
+    use super::*;
+
+    /// Dates the algorithm is most likely to get wrong: epoch, leap days, and
+    /// century rules. Checked against known-good calendar values.
+    #[test]
+    fn civil_dates_are_correct_at_the_awkward_boundaries() {
+        for (days, expected) in [
+            (0i64, (1970, 1, 1)),
+            (-1, (1969, 12, 31)),
+            (59, (1970, 3, 1)),
+            // 2000 was a leap year (divisible by 400); 1900 was not.
+            (11016, (2000, 2, 29)),
+            (11017, (2000, 3, 1)),
+            // 2100 is not a leap year, so Feb 28 is followed by Mar 1.
+            (47540, (2100, 2, 28)),
+            (47541, (2100, 3, 1)),
+            (19723, (2024, 1, 1)),
+            (20543, (2026, 3, 31)),
+        ] {
+            assert_eq!(civil_from_days(days), expected, "days={days}");
+        }
+    }
+
+    #[test]
+    fn day_keys_sort_chronologically() {
+        // The retention trim and the heatmap both rely on this.
+        let mut keys = vec![
+            day_key(1_760_000_000),
+            day_key(1_700_000_000),
+            day_key(1_780_000_000),
+        ];
+        let original = keys.clone();
+        keys.sort();
+        assert_eq!(keys[0], original[1]);
+        assert_eq!(keys[2], original[2]);
+    }
+
+    #[test]
+    fn the_local_offset_decides_which_day_a_turn_lands_on() {
+        // 2026-01-01T02:00:00Z is still 2025-12-31 in UTC-6. A user's late
+        // evening belongs to their day, not to tomorrow.
+        let two_am_utc = 1_767_232_800;
+        set_local_offset_minutes(0);
+        assert_eq!(day_key(two_am_utc), "2026-01-01");
+        set_local_offset_minutes(-6 * 60);
+        assert_eq!(day_key(two_am_utc), "2025-12-31");
+        set_local_offset_minutes(0);
+    }
+
+    #[test]
+    fn an_absurd_offset_is_refused() {
+        set_local_offset_minutes(0);
+        set_local_offset_minutes(99_999);
+        assert_eq!(local_offset_minutes(), 0, "kept the sane value");
+    }
+
+    #[test]
+    fn daily_history_is_capped() {
+        let mut ledger = Ledger::default();
+        for day in 0..(DAILY_RETENTION_DAYS + 25) {
+            ledger
+                .daily
+                .insert(format!("2020-01-{day:05}"), DayUsage::default());
+        }
+        ledger.trim_daily();
+        assert_eq!(ledger.daily.len(), DAILY_RETENTION_DAYS);
+        // The oldest went, not the newest.
+        assert!(ledger.daily.contains_key(&format!(
+            "2020-01-{:05}",
+            DAILY_RETENTION_DAYS + 24
+        )));
+        assert!(!ledger.daily.contains_key("2020-01-00000"));
+    }
+
+    #[test]
+    fn recording_a_turn_fills_todays_bucket() {
+        let mut ledger = Ledger::default();
+        ledger.record("codex", &completion_with(10, 4));
+        ledger.record("codex", &completion_with(6, 1));
+
+        let days: Vec<_> = ledger.daily().values().collect();
+        assert_eq!(days.len(), 1, "same day, one bucket");
+        let usage = days[0];
+        assert_eq!(usage.requests, 2);
+        assert_eq!(usage.total_tokens(), 21);
+        // The lifetime totals still agree with the day.
+        assert_eq!(ledger.get("codex").unwrap().total_tokens(), 21);
+    }
+
+    /// A ledger written before daily buckets existed must still load.
+    #[test]
+    fn an_older_ledger_loads_with_no_daily_history() {
+        let raw = r#"{"providers":{"codex":{"requests":3,"input_tokens":10,"output_tokens":5,
+            "cache_write_tokens":0,"cache_read_tokens":0,"first_seen":1,"last_seen":2}}}"#;
+        let ledger: Ledger = serde_json::from_str(raw).unwrap();
+        assert_eq!(ledger.get("codex").unwrap().requests, 3);
+        assert!(ledger.daily().is_empty());
+        assert_eq!(ledger.lifetime(), (15, 3));
+    }
+
+    fn completion_with(input: u32, output: u32) -> Completion {
+        Completion {
+            content: vec![],
+            stop_reason: None,
+            usage: crate::anthropic::types::Usage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+            limits: None,
         }
     }
 }

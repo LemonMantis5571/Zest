@@ -12,6 +12,7 @@ import type {
   ContextUsage,
   LoginStarted,
   PreparedAttachment,
+  ProfileStats,
   ProviderRow,
   SessionInfo,
   ProjectChats,
@@ -27,6 +28,21 @@ export function listProviders() {
 
 export function usageSnapshot() {
   return invoke<UsageSnapshot>("usage_snapshot");
+}
+
+export function profileStats() {
+  return invoke<ProfileStats>("profile_stats");
+}
+
+/**
+ * Hand core this machine's UTC offset.
+ *
+ * The webview is the only part of Zest that knows the timezone, and every day
+ * boundary depends on it. `getTimezoneOffset` reports minutes *behind* UTC, so
+ * the sign is flipped to the usual "minutes east" convention.
+ */
+export function setLocalOffset(minutes = -new Date().getTimezoneOffset()) {
+  return invoke<void>("set_local_offset", { minutes });
 }
 
 export function lastProvider() {
