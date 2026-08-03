@@ -94,19 +94,48 @@ pub fn expand(input: &str, skills: &SkillSet) -> Expansion {
         };
     };
 
-    let body = skill.body.trim();
-    let prompt = if parsed.rest.is_empty() {
-        body.to_string()
-    } else {
-        // The rule goes above the user's words so the last thing the model
-        // reads is what the user actually asked for.
-        format!("{body}\n\n---\n\n{}", parsed.rest)
+    Expansion {
+        prompt: compose(&skill.body, parsed.rest),
+        display: input.to_string(),
+        command: Some(skill.name.clone()),
+    }
+}
+
+/// Expand `input` as if the skill `name` had been invoked on it.
+///
+/// This is how a *mode* applies a skill: Plan mode runs the `plan` skill over
+/// whatever was typed, without anyone typing `/plan`. The whole message becomes
+/// the argument, and `display` stays exactly what was typed — writing a `/plan`
+/// prefix into the transcript would attribute words to the user they never
+/// wrote.
+///
+/// A missing skill passes the message through untouched, for the same reason an
+/// unknown `/token` does: absent config must not swallow what someone said.
+pub fn expand_as(input: &str, skills: &SkillSet, name: &str) -> Expansion {
+    let unescaped = unescape(input);
+    let Some(skill) = skills.command(name) else {
+        return Expansion {
+            prompt: unescaped,
+            display: input.to_string(),
+            command: None,
+        };
     };
 
     Expansion {
-        prompt,
+        prompt: compose(&skill.body, unescaped.trim()),
         display: input.to_string(),
         command: Some(skill.name.clone()),
+    }
+}
+
+/// Put the skill body above the user's words, so the freshest instruction the
+/// model reads is what was actually asked for.
+fn compose(body: &str, rest: &str) -> String {
+    let body = body.trim();
+    if rest.is_empty() {
+        body.to_string()
+    } else {
+        format!("{body}\n\n---\n\n{rest}")
     }
 }
 
@@ -212,6 +241,50 @@ mod tests {
             "a typo must not eat the message"
         );
         assert_eq!(out.command, None);
+    }
+
+    #[test]
+    fn a_mode_applies_a_skill_to_a_message_with_no_slash() {
+        let skills = skills_with("plan", "Research first, then write a plan.");
+        let out = expand_as("make this project better", &skills, "plan");
+        assert_eq!(out.command.as_deref(), Some("plan"));
+        assert!(out.prompt.starts_with("Research first, then write a plan."));
+        assert!(out.prompt.trim_end().ends_with("make this project better"));
+    }
+
+    #[test]
+    fn a_mode_does_not_rewrite_what_the_transcript_shows() {
+        let skills = skills_with("plan", "body");
+        let out = expand_as("make this project better", &skills, "plan");
+        // The user did not type a slash, so the transcript must not grow one.
+        assert_eq!(out.display, "make this project better");
+    }
+
+    #[test]
+    fn a_mode_whose_skill_is_missing_sends_the_message_as_typed() {
+        let skills = skills_with("other", "body");
+        let out = expand_as("make this project better", &skills, "plan");
+        assert_eq!(out.prompt, "make this project better");
+        assert_eq!(out.command, None, "no skill means no document to frame");
+    }
+
+    #[test]
+    fn a_mode_still_honours_the_escape() {
+        let skills = skills_with("plan", "body");
+        let out = expand_as("//usr/local/bin is wrong", &skills, "plan");
+        assert!(
+            out.prompt.trim_end().ends_with("/usr/local/bin is wrong"),
+            "{}",
+            out.prompt
+        );
+    }
+
+    #[test]
+    fn a_bare_message_under_a_mode_is_just_the_body() {
+        let skills = skills_with("plan", "Research first.");
+        let out = expand_as("   ", &skills, "plan");
+        assert_eq!(out.prompt, "Research first.");
+        assert!(!out.prompt.contains("---"), "no empty argument separator");
     }
 
     #[test]
