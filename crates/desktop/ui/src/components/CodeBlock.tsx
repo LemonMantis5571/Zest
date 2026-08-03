@@ -1,8 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
-import { highlightCode, languageLabel, normalizeLang } from "@/lib/highlight";
+import {
+  highlightCode,
+  languageLabel,
+  normalizeLang,
+  releaseHighlight,
+} from "@/lib/highlight";
 import { cn } from "@/lib/utils";
+
+/** How long a code block must stop changing before it is worth highlighting. */
+const HIGHLIGHT_SETTLE_MS = 120;
+
+/** Per-mount id for the highlight queue. Module-scoped so it never collides. */
+let nextKey = 1;
 
 type Props = {
   code: string;
@@ -26,20 +37,41 @@ export function CodeBlock({
   const label = languageLabel(lang);
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Identifies this block to the highlight queue for the life of the component,
+  // so its own earlier requests are what get superseded — never another
+  // block's.
+  const keyRef = useRef(`code-${nextKey++}`);
 
   useEffect(() => {
     let cancelled = false;
-    highlightCode(code, lang)
-      .then((next) => {
-        if (!cancelled) setHtml(next);
-      })
-      .catch(() => {
-        if (!cancelled) setHtml(null);
-      });
+    // Two layers, both earning their place. The debounce stops a *streaming*
+    // block from asking at all while it grows; the queue key means that when it
+    // does ask, an older request for this same block is superseded rather than
+    // raced. Neither costs main-thread time — the work happens in a worker.
+    const timer = window.setTimeout(() => {
+      highlightCode(code, lang, keyRef.current)
+        .then((next) => {
+          if (!cancelled) setHtml(next);
+        })
+        .catch(() => {
+          // Superseded, released, or no worker available. The plain-text
+          // fallback below is already correct, so leave what is on screen
+          // rather than flashing it away.
+        });
+    }, HIGHLIGHT_SETTLE_MS);
+
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [code, lang]);
+
+  // Free the slot when the block unmounts, so scrolling away does not leave
+  // entries accumulating in the queue.
+  useEffect(() => {
+    const key = keyRef.current;
+    return () => releaseHighlight(key);
+  }, []);
 
   async function copy() {
     try {
@@ -71,7 +103,7 @@ export function CodeBlock({
           onClick={() => void copy()}
           title={copied ? "Copied" : "Copy"}
           className={cn(
-            "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors",
+            "inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors",
             "hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
           )}
         >
@@ -105,7 +137,12 @@ type DiffPreviewProps = {
 };
 
 /** Live edit preview for write approvals — colored +/- lines. */
-export function DiffPreview({ diff, path, className }: DiffPreviewProps) {
+export function DiffPreview({
+  diff,
+  path,
+  className,
+  maxHeightClass = "max-h-56",
+}: DiffPreviewProps & { maxHeightClass?: string }) {
   const lines = diff.split("\n");
 
   return (
@@ -120,7 +157,12 @@ export function DiffPreview({ diff, path, className }: DiffPreviewProps) {
           {path}
         </div>
       ) : null}
-      <pre className="max-h-56 overflow-auto p-0 font-mono text-[11.5px] leading-[1.6]">
+      <pre
+        className={cn(
+          "overflow-auto p-0 font-mono text-[11.5px] leading-[1.6]",
+          maxHeightClass
+        )}
+      >
         {lines.map((line, i) => {
           const kind =
             line.startsWith("+") && !line.startsWith("+++")

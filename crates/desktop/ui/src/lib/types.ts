@@ -1,10 +1,58 @@
 import type { ChatEvent as GeneratedChatEvent } from "./generated/ChatEvent.ts";
 import type { ModelCapability } from "./generated/ModelCapability.ts";
+import type { CommandView } from "./generated/CommandView.ts";
+import type { ProviderModelsView } from "./generated/ProviderModelsView.ts";
 import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
+import type { RoutingRuleView } from "./generated/RoutingRuleView.ts";
+import type { RoutingView } from "./generated/RoutingView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 
 export type StatusKind = "ready" | "unknown" | "not_logged_in" | "unconfigured";
+
+/** Mirrors `ApprovalMode` in core; wire names must match `ApprovalMode::as_str`. */
+export type ApprovalMode =
+  | "manual"
+  | "accept_edits"
+  | "plan"
+  | "auto"
+  | "bypass";
+
+/**
+ * Routing wire types come from Rust via ts-rs — hand-writing them here would be
+ * a second source of truth that drifts silently.
+ */
+export type RoutingRule = RoutingRuleView;
+export type { CommandView };
+export type RoutingProviderModels = ProviderModelsView;
+export type { RoutingView };
+
+/** What the user clicked on an approval card. */
+export type ApprovalChoice = "once" | "session" | "deny";
+
+export const APPROVAL_MODES: {
+  id: ApprovalMode;
+  label: string;
+  hint: string;
+}[] = [
+  { id: "manual", label: "Manual", hint: "Ask before every write and command" },
+  {
+    id: "accept_edits",
+    label: "Accept edits",
+    hint: "Apply file edits; still ask for commands",
+  },
+  { id: "plan", label: "Plan", hint: "Read only — no writes, no commands" },
+  {
+    id: "auto",
+    label: "Auto",
+    hint: "Apply edits and safe commands; ask for the rest",
+  },
+  {
+    id: "bypass",
+    label: "Bypass permissions",
+    hint: "Never ask. Use in a throwaway tree",
+  },
+];
 
 /** Rust-authoritative provider row (auth + catalogue). */
 export type ProviderRow = Omit<GeneratedProviderView, "statusKind"> & {
@@ -40,6 +88,10 @@ export type ChatMessage =
       thinking: string;
       tools: ToolPart[];
       error?: string;
+      /** Provider to offer a Reconnect for; only set on auth failures. */
+      reconnectProvider?: string;
+      /** Slash command that produced this turn, if any — titles the output. */
+      command?: string;
       streaming: boolean;
     };
 
@@ -64,6 +116,54 @@ export type ThreadSummary = {
   title?: string;
   providerId?: string;
   messageCount: number;
+};
+
+/** Sidebar grouping: one project folder + its chats. */
+export type ProjectChats = {
+  name: string;
+  path: string;
+  active: boolean;
+  threads: ThreadSummary[];
+};
+
+export type PreparedAttachment = {
+  id: string;
+  name: string;
+  path: string;
+  kind: string;
+  status: string;
+  detail: string;
+  content?: string | null;
+  mediaType?: string | null;
+  dataBase64?: string | null;
+};
+
+export type AttachmentInput = {
+  name: string;
+  detail: string;
+  content?: string | null;
+  status: string;
+  kind?: string | null;
+  mediaType?: string | null;
+  dataBase64?: string | null;
+};
+
+export type ContextUsage = {
+  usedTokens: number;
+  windowTokens: number;
+  remainingTokens: number;
+  percentFull: number;
+  source: string;
+};
+
+export type UserProfile = {
+  displayName: string;
+  avatarDataUrl: string;
+};
+
+export type WorkspacePickResult = {
+  path: string;
+  sessionEnded: boolean;
 };
 
 /** Identity fields present on most chat-event variants. */

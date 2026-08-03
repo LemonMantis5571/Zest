@@ -9,12 +9,23 @@ import {
   DEFAULT_EFFORT,
 } from "./models";
 import type {
+  ApprovalChoice,
+  ApprovalMode,
+  CommandView,
+  RoutingRule,
+  RoutingView,
+  AttachmentInput,
   ChatEvent,
+  ContextUsage,
   LoginStarted,
+  PreparedAttachment,
+  ProjectChats,
   ProviderRow,
   SessionInfo,
   ThreadSummary,
   UsageSnapshot,
+  UserProfile,
+  WorkspacePickResult,
 } from "./types";
 
 export type { SkillSummary, SystemPromptInfo };
@@ -40,15 +51,41 @@ export type DesktopBackend = {
     effort?: string;
   }): Promise<SessionInfo>;
   listThreads(): Promise<ThreadSummary[]>;
+  listChatProjects(): Promise<ProjectChats[]>;
+  openProjectChat(options: {
+    root: string;
+    threadId?: string | null;
+    newThread?: boolean;
+  }): Promise<SessionInfo>;
   loadThread(id: string): Promise<SessionInfo>;
   newThread(): Promise<SessionInfo>;
-  sendMessage(text: string): Promise<void>;
+  deleteThread(id: string, projectPath?: string | null): Promise<SessionInfo>;
+  sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
   cancelTurn(): Promise<void>;
-  resolveApproval(approvalId: string, allow: boolean): Promise<void>;
+  resolveApproval(approvalId: string, decision: ApprovalChoice): Promise<void>;
+  setApprovalMode(mode: ApprovalMode): Promise<string>;
+  approvalMode(): Promise<string>;
+  verifyProvider(id: string): Promise<void>;
+  listCommands(): Promise<CommandView[]>;
+  routingConfig(): Promise<RoutingView>;
+  suggestedRouting(): Promise<RoutingRule[]>;
+  setRoutingConfig(delegation: boolean, rules: RoutingRule[]): Promise<RoutingView>;
   endSession(): Promise<void>;
   getSystemPrompt(): Promise<SystemPromptInfo>;
   setSystemPrompt(custom: string): Promise<SystemPromptInfo>;
   listSkills(): Promise<SkillSummary[]>;
+  getWorkspaceFolder(): Promise<string>;
+  pickWorkspaceFolder(): Promise<WorkspacePickResult | null>;
+  pickFiles(): Promise<PreparedAttachment[]>;
+  preparePastedImage(options: {
+    dataBase64: string;
+    mediaType: string;
+    name?: string;
+  }): Promise<PreparedAttachment>;
+  gitBranch(): Promise<string | null>;
+  contextUsage(): Promise<ContextUsage>;
+  getUserProfile(): Promise<UserProfile>;
+  setUserProfile(profile: UserProfile): Promise<UserProfile>;
   onChatEvent(handler: (event: ChatEvent) => void): Promise<UnlistenFn>;
   /** Optional boot hook (fixture streams a canned turn). */
   boot?(handler: (event: ChatEvent) => void): Promise<void> | void;
@@ -81,16 +118,35 @@ export function createTauriBackend(): DesktopBackend {
     startSession: (id, options) => tauriApi.startSession(id, options),
     updateSessionOptions: (options) => tauriApi.updateSessionOptions(options),
     listThreads: () => tauriApi.listThreads(),
+    listChatProjects: () => tauriApi.listChatProjects(),
+    openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadThread: (id) => tauriApi.loadThread(id),
     newThread: () => tauriApi.newThread(),
-    sendMessage: (text) => tauriApi.sendMessage(text),
+    deleteThread: (id, projectPath) => tauriApi.deleteThread(id, projectPath),
+    sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
     cancelTurn: () => tauriApi.cancelTurn(),
-    resolveApproval: (approvalId, allow) =>
-      tauriApi.resolveApproval(approvalId, allow),
+    resolveApproval: (approvalId, decision) =>
+      tauriApi.resolveApproval(approvalId, decision),
+    setApprovalMode: (mode) => tauriApi.setApprovalMode(mode),
+    approvalMode: () => tauriApi.approvalMode(),
+    verifyProvider: (id) => tauriApi.verifyProvider(id),
+    listCommands: () => tauriApi.listCommands(),
+    routingConfig: () => tauriApi.routingConfig(),
+    suggestedRouting: () => tauriApi.suggestedRouting(),
+    setRoutingConfig: (delegation, rules) =>
+      tauriApi.setRoutingConfig(delegation, rules),
     endSession: () => tauriApi.endSession(),
     getSystemPrompt: () => tauriApi.getSystemPrompt(),
     setSystemPrompt: (custom) => tauriApi.setSystemPrompt(custom),
     listSkills: () => tauriApi.listSkills(),
+    getWorkspaceFolder: () => tauriApi.getWorkspaceFolder(),
+    pickWorkspaceFolder: () => tauriApi.pickWorkspaceFolder(),
+    pickFiles: () => tauriApi.pickFiles(),
+    preparePastedImage: (options) => tauriApi.preparePastedImage(options),
+    gitBranch: () => tauriApi.gitBranch(),
+    contextUsage: () => tauriApi.contextUsage(),
+    getUserProfile: () => tauriApi.getUserProfile(),
+    setUserProfile: (profile) => tauriApi.setUserProfile(profile),
     onChatEvent: (handler) => tauriApi.onChatEvent(handler),
   };
 }
@@ -98,6 +154,7 @@ export function createTauriBackend(): DesktopBackend {
 export function createFixtureBackend(): DesktopBackend {
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
+  let workspace = ".";
 
   return {
     mode: "fixture",
@@ -160,11 +217,34 @@ export function createFixtureBackend(): DesktopBackend {
         {
           id: session.threadId,
           createdAt: 0,
-          updatedAt: 0,
+          updatedAt: Math.floor(Date.now() / 1000),
           title: "Fixture",
           messageCount: session.messages.length,
         },
       ];
+    },
+    async listChatProjects() {
+      const threads = await this.listThreads();
+      return [
+        {
+          name: workspace.split(/[/\\]/).filter(Boolean).pop() || "fixture",
+          path: workspace,
+          active: true,
+          threads,
+        },
+      ];
+    },
+    async openProjectChat(options) {
+      workspace = options.root;
+      session = {
+        ...session,
+        root: workspace,
+        messages: options.newThread ? [] : session.messages,
+        threadId: options.newThread
+          ? `fixture-${crypto.randomUUID()}`
+          : options.threadId || session.threadId,
+      };
+      return { ...session };
     },
     async loadThread(id: string) {
       if (id !== session.threadId) {
@@ -175,12 +255,19 @@ export function createFixtureBackend(): DesktopBackend {
     async newThread() {
       session = {
         ...FIXTURE_SESSION,
+        root: workspace,
         threadId: `fixture-${crypto.randomUUID()}`,
         messages: [],
       };
       return { ...session };
     },
-    async sendMessage(text: string) {
+    async deleteThread(id: string) {
+      if (id === session.threadId) {
+        return this.newThread();
+      }
+      return { ...session };
+    },
+    async sendMessage(text: string, attachments?: AttachmentInput[]) {
       if (!chatHandler) return;
       const turnId = `turn-${crypto.randomUUID()}`;
       const userId = `user-${crypto.randomUUID()}`;
@@ -190,7 +277,12 @@ export function createFixtureBackend(): DesktopBackend {
         thread_id: session.threadId,
         turn_id: turnId,
       };
-      chatHandler({ kind: "user", ...id, message_id: userId, text });
+      let display = text.trim();
+      if (attachments?.length) {
+        const lines = attachments.map((a) => `Attached: ${a.name} (${a.detail})`);
+        display = display ? `${display}\n\n${lines.join("\n")}` : lines.join("\n");
+      }
+      chatHandler({ kind: "user", ...id, message_id: userId, text: display });
       chatHandler({
         kind: "assistant_start",
         ...id,
@@ -206,7 +298,7 @@ export function createFixtureBackend(): DesktopBackend {
         kind: "text_delta",
         ...id,
         message_id: assistantId,
-        text,
+        text: text.trim() || "(attachment)",
       });
       chatHandler({ kind: "done", ...id, message_id: assistantId });
     },
@@ -215,6 +307,34 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async resolveApproval() {
       throw new Error("fixture: no pending approvals");
+    },
+    async setApprovalMode(mode: ApprovalMode) {
+      return mode;
+    },
+    async approvalMode() {
+      return "auto";
+    },
+    async verifyProvider() {
+      /* fixture: nothing to verify */
+    },
+    async listCommands() {
+      return [];
+    },
+    async routingConfig() {
+      return {
+        delegation: false,
+        rules: [],
+        providers: [],
+        configPath: "fixture",
+        defaultProvider: "",
+        projectScoped: false,
+      };
+    },
+    async suggestedRouting() {
+      return [];
+    },
+    async setRoutingConfig() {
+      throw new Error("fixture: routing is read-only");
     },
     async endSession() {
       /* no-op */
@@ -239,6 +359,59 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async listSkills() {
       return [];
+    },
+    async getWorkspaceFolder() {
+      return workspace;
+    },
+    async pickWorkspaceFolder() {
+      workspace = `fixture/project-${crypto.randomUUID().slice(0, 8)}`;
+      session = { ...session, root: workspace, messages: [] };
+      return { path: workspace, sessionEnded: false };
+    },
+    async pickFiles() {
+      return [
+        {
+          id: `att-${crypto.randomUUID()}`,
+          name: "sample.pdf",
+          path: `${workspace}/sample.pdf`,
+          kind: "pdf",
+          status: "done",
+          detail: "TextBased, 1 pages",
+          content: "# Fixture PDF\n\nExtracted markdown from pdf-inspector path.",
+        },
+      ];
+    },
+    async preparePastedImage(options) {
+      return {
+        id: `att-${crypto.randomUUID()}`,
+        name: options.name ?? "paste.png",
+        path: "clipboard",
+        kind: "image",
+        status: "done",
+        detail: "pasted",
+        mediaType: options.mediaType,
+        dataBase64: options.dataBase64.includes(",")
+          ? options.dataBase64.split(",").pop()!
+          : options.dataBase64,
+      };
+    },
+    async gitBranch() {
+      return "master";
+    },
+    async contextUsage() {
+      return {
+        usedTokens: 12000,
+        windowTokens: 256000,
+        remainingTokens: 244000,
+        percentFull: 4.7,
+        source: "estimate",
+      };
+    },
+    async getUserProfile() {
+      return { displayName: "Fixture", avatarDataUrl: "" };
+    },
+    async setUserProfile(profile) {
+      return profile;
     },
     async onChatEvent(handler) {
       chatHandler = handler;

@@ -1,6 +1,17 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ChevronRightIcon, XIcon } from "lucide-react";
+import {
+  BookOpenIcon,
+  ChartColumnIcon,
+  ChevronRightIcon,
+  type LucideIcon,
+  ScrollTextIcon,
+  ServerIcon,
+  SplitIcon,
+  UserIcon,
+  XIcon,
+} from "lucide-react";
 
+import { RoutingSettings } from "@/components/RoutingSettings";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -9,11 +20,12 @@ import {
 } from "@/components/ui/collapsible";
 import { getBackend, type SkillSummary } from "@/lib/backend";
 import { chipLabel, type EffortId } from "@/lib/models";
+import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
 import type {
   ProviderRow,
   SessionInfo,
-  ThreadSummary,
   UsageSnapshot,
+  UserProfile,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -23,28 +35,19 @@ type Props = {
   model: string;
   effort: EffortId;
   sending: boolean;
+  profile: UserProfile;
+  /** Open the User section first (avatar click). */
+  focusUser?: boolean;
   onClose: () => void;
-  onNewChat: () => void;
   onChangeProvider: () => void;
+  /** Rebuild the session so a routing change applies without a restart. */
+  onReloadSession?: () => Promise<void>;
   onReconnect: () => void;
-  onLoadThread: (id: string) => void;
+  onOpenFolder: () => void;
+  onProfileChange: (profile: UserProfile) => void;
 };
 
 const CUSTOM_SOFT_LIMIT = 8000;
-
-function formatUpdatedAt(epochSecs: number) {
-  if (!epochSecs) return "";
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    }).format(new Date(epochSecs * 1000));
-  } catch {
-    return "";
-  }
-}
 
 function formatAge(secs: number) {
   if (secs < 60) return `${secs}s`;
@@ -52,30 +55,30 @@ function formatAge(secs: number) {
   return `${Math.floor(secs / 3600)}h`;
 }
 
-function threadTitle(thread: ThreadSummary) {
-  const title = thread.title?.trim();
-  if (title) return title;
-  return "Untitled chat";
-}
-
 function SettingsSection({
   title,
   hint,
+  icon: Icon,
   defaultOpen = false,
   children,
 }: {
   title: string;
   hint?: string;
+  icon: LucideIcon;
   defaultOpen?: boolean;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
 
+  useEffect(() => {
+    if (defaultOpen) setOpen(true);
+  }, [defaultOpen]);
+
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="border-b border-border/50">
       <CollapsibleTrigger
         className={cn(
-          "flex w-full items-center gap-2 px-4 py-3 text-left outline-none transition-colors",
+          "flex w-full cursor-pointer items-center gap-2.5 px-4 py-3 text-left outline-none transition-colors",
           "hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring/40"
         )}
       >
@@ -85,6 +88,7 @@ function SettingsSection({
             open && "rotate-90"
           )}
         />
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 flex-1">
           <span className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             {title}
@@ -112,21 +116,24 @@ export function SettingsPanel({
   model,
   effort,
   sending,
+  profile,
+  focusUser = false,
   onClose,
-  onNewChat,
   onChangeProvider,
+  onReloadSession,
   onReconnect,
-  onLoadThread,
+  onOpenFolder,
+  onProfileChange,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const [provider, setProvider] = useState<ProviderRow | null>(null);
-  const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [customPrompt, setCustomPrompt] = useState("");
   const [savedCustom, setSavedCustom] = useState("");
+  const [basePrompt, setBasePrompt] = useState("");
   const [promptPath, setPromptPath] = useState(".zest/system.md");
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptError, setPromptError] = useState<string | null>(null);
@@ -134,6 +141,17 @@ export function SettingsPanel({
 
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
+  const [displayName, setDisplayName] = useState(profile.displayName);
+  const [avatarDataUrl, setAvatarDataUrl] = useState(profile.avatarDataUrl);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setDisplayName(profile.displayName);
+    setAvatarDataUrl(profile.avatarDataUrl);
+  }, [open, profile.displayName, profile.avatarDataUrl]);
 
   useEffect(() => {
     if (!open) return;
@@ -142,33 +160,45 @@ export function SettingsPanel({
     setLoading(true);
     setError(null);
     setPromptError(null);
+    setProfileError(null);
 
     const backend = getBackend();
-    Promise.all([
+    // Settled, not all: these are independent sections, and one of them
+    // failing used to blank the other three. The system prompt in particular
+    // needs the live session, which is unavailable while a turn streams —
+    // that must not take Usage and Skills down with it.
+    Promise.allSettled([
       backend.listProviders(),
-      backend.listThreads(),
       backend.getSystemPrompt(),
       backend.listSkills(),
       backend.usageSnapshot(),
     ])
-      .then(([rows, list, prompt, skillList, snap]) => {
+      .then(([rowsR, promptR, skillsR, snapR]) => {
         if (cancelled) return;
-        setProvider(rows.find((p) => p.id === session.provider) ?? null);
-        setThreads(list);
-        setCustomPrompt(prompt.custom);
-        setSavedCustom(prompt.custom);
-        setPromptPath(prompt.customPath);
-        setSkills(skillList);
-        setUsage(snap);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        // Surface real load failures — never fake empty settings state.
-        setError(String(err));
-        setThreads([]);
-        setSkills([]);
-        setUsage(null);
-        setPromptError(String(err));
+
+        if (rowsR.status === "fulfilled") {
+          setProvider(
+            rowsR.value.find((p) => p.id === session.provider) ?? null
+          );
+        } else {
+          setError(String(rowsR.reason));
+        }
+
+        if (promptR.status === "fulfilled") {
+          setCustomPrompt(promptR.value.custom);
+          setSavedCustom(promptR.value.custom);
+          setBasePrompt(promptR.value.base);
+          setPromptPath(promptR.value.customPath);
+        } else {
+          // Never fake empty settings state — say why it is missing.
+          setBasePrompt("");
+          setPromptError(String(promptR.reason));
+        }
+
+        setSkills(skillsR.status === "fulfilled" ? skillsR.value : []);
+        if (skillsR.status === "rejected") setError(String(skillsR.reason));
+
+        setUsage(snapR.status === "fulfilled" ? snapR.value : null);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -224,7 +254,7 @@ export function SettingsPanel({
   const overSoftLimit = customPrompt.length > CUSTOM_SOFT_LIMIT;
   const promptHint = savedCustom.trim()
     ? `${savedCustom.trim().slice(0, 42)}${savedCustom.trim().length > 42 ? "…" : ""}`
-    : "No custom instructions";
+    : "Default Zest rules";
 
   async function savePrompt() {
     setPromptSaving(true);
@@ -234,6 +264,7 @@ export function SettingsPanel({
       const info = await getBackend().setSystemPrompt(customPrompt);
       setCustomPrompt(info.custom);
       setSavedCustom(info.custom);
+      setBasePrompt(info.base);
       setPromptPath(info.customPath);
       setPromptSavedFlash(true);
       window.setTimeout(() => setPromptSavedFlash(false), 1600);
@@ -251,12 +282,43 @@ export function SettingsPanel({
     setPromptError(null);
   }
 
+  const profileDirty =
+    displayName !== profile.displayName || avatarDataUrl !== profile.avatarDataUrl;
+
+  async function saveProfile() {
+    setProfileSaving(true);
+    setProfileError(null);
+    try {
+      const next = await getBackend().setUserProfile({
+        displayName: displayName.trim(),
+        avatarDataUrl,
+      });
+      onProfileChange(next);
+      setDisplayName(next.displayName);
+      setAvatarDataUrl(next.avatarDataUrl);
+    } catch (err) {
+      setProfileError(String(err));
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  async function onPickAvatar(file: File | null) {
+    if (!file) return;
+    setProfileError(null);
+    try {
+      setAvatarDataUrl(await optimizeAvatarFile(file));
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return (
     <div className="absolute inset-0 z-40 flex justify-end overflow-hidden">
       <button
         type="button"
         aria-label="Close settings"
-        className="absolute inset-0 bg-black/45 animate-in fade-in duration-150"
+        className="absolute inset-0 cursor-pointer bg-black/45 animate-in fade-in duration-150"
         onClick={onClose}
       />
       <div
@@ -287,7 +349,75 @@ export function SettingsPanel({
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           <SettingsSection
+            title="User"
+            icon={UserIcon}
+            hint={displayName.trim() || "Name & photo"}
+            defaultOpen={focusUser}
+          >
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                className="grid size-14 cursor-pointer place-items-center overflow-hidden rounded-xl bg-card ring-1 ring-border outline-none transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring/50"
+                title="Change avatar"
+                onClick={() => fileRef.current?.click()}
+              >
+                {avatarDataUrl ? (
+                  <img src={avatarDataUrl} alt="" className="size-full object-cover" />
+                ) : (
+                  <span className="text-sm text-muted-foreground">PFP</span>
+                )}
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                className="hidden"
+                onChange={(e) => {
+                  void onPickAvatar(e.target.files?.[0] ?? null);
+                }}
+              />
+              <div className="min-w-0 flex-1">
+                <label className="mb-1 block text-[11px] text-muted-foreground">
+                  Display name
+                </label>
+                <input
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  disabled={sending || profileSaving}
+                  placeholder="Your name"
+                  className="w-full rounded-md border border-border/80 bg-card/80 px-2.5 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                />
+              </div>
+            </div>
+            {profileError ? (
+              <p className="mt-2 text-xs text-destructive">{profileError}</p>
+            ) : null}
+            <div className="mt-2.5 flex flex-wrap gap-1.5">
+              <Button
+                type="button"
+                size="sm"
+                disabled={sending || profileSaving || !profileDirty}
+                onClick={() => void saveProfile()}
+              >
+                {profileSaving ? "Saving…" : "Save profile"}
+              </Button>
+              {avatarDataUrl ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={sending || profileSaving}
+                  onClick={() => setAvatarDataUrl("")}
+                >
+                  Remove photo
+                </Button>
+              ) : null}
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
             title="Provider"
+            icon={ServerIcon}
             hint={`${session.label} · ${provider?.statusLabel ?? session.provider}`}
           >
             <div className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5">
@@ -302,11 +432,20 @@ export function SettingsPanel({
                 {session.root}
               </div>
               <div className="mt-3 flex flex-wrap gap-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={sending}
+                  onClick={onOpenFolder}
+                >
+                  Change folder
+                </Button>
                 {canConnect ? (
                   <Button
                     type="button"
                     size="sm"
-                    variant="secondary"
+                    variant="outline"
                     disabled={sending}
                     onClick={onReconnect}
                   >
@@ -330,7 +469,19 @@ export function SettingsPanel({
           </SettingsSection>
 
           <SettingsSection
+            title="Routing"
+            icon={SplitIcon}
+            hint="Send task kinds to different providers"
+          >
+            <RoutingSettings
+              sessionProvider={session.provider}
+              onApply={onReloadSession}
+            />
+          </SettingsSection>
+
+          <SettingsSection
             title="Usage"
+            icon={ChartColumnIcon}
             hint={
               usage?.providers.length
                 ? `${usage.providers.length} account${usage.providers.length === 1 ? "" : "s"}`
@@ -385,19 +536,30 @@ export function SettingsPanel({
             )}
           </SettingsSection>
 
-          <SettingsSection title="System prompt" hint={promptHint}>
+          <SettingsSection title="System prompt" icon={ScrollTextIcon} hint={promptHint}>
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              Custom instructions for this project. Saved to{" "}
+              Optional project instructions. Saved to{" "}
               <span className="font-mono text-[11px] text-foreground/80">{promptPath}</span>
-              . Takes effect on the next message.
+              . Empty is fine — Zest still uses its built-in coding-agent rules.
+              Takes effect on the next message.
             </p>
+            {!customPrompt.trim() && basePrompt.trim() ? (
+              <div className="mb-2 rounded-lg border border-border/60 bg-card/40 px-3 py-2">
+                <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Default (active while empty)
+                </div>
+                <p className="m-0 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground">
+                  {basePrompt}
+                </p>
+              </div>
+            ) : null}
             <textarea
               value={customPrompt}
               onChange={(e) => setCustomPrompt(e.target.value)}
               disabled={sending || promptSaving}
               rows={7}
               spellCheck={false}
-              placeholder="You are …&#10;Project conventions, tone, extra rules…"
+              placeholder={"Optional: You are …\nProject conventions, tone, extra rules…"}
               className={cn(
                 "w-full resize-y rounded-lg border border-border/80 bg-card/80 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground caret-foreground outline-none",
                 "placeholder:text-muted-foreground/70 focus-visible:ring-2 focus-visible:ring-ring/50",
@@ -439,6 +601,7 @@ export function SettingsPanel({
 
           <SettingsSection
             title="Skills"
+            icon={BookOpenIcon}
             hint={
               skills.length === 0
                 ? "None loaded"
@@ -475,66 +638,12 @@ export function SettingsPanel({
             )}
           </SettingsSection>
 
-          <SettingsSection
-            title="Chats"
-            hint={`${threads.length} recent`}
-          >
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              className="mb-3 w-full justify-center"
-              disabled={sending}
-              onClick={onNewChat}
-            >
-              New chat
-            </Button>
-            {loading ? (
-              <p className="text-xs text-muted-foreground">Loading…</p>
-            ) : error ? (
-              <p className="text-xs text-destructive">{error}</p>
-            ) : threads.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No saved threads yet.</p>
-            ) : (
-              <ul className="m-0 flex list-none flex-col gap-1 p-0">
-                {threads.map((thread) => {
-                  const active = thread.id === session.threadId;
-                  return (
-                    <li key={thread.id}>
-                      <button
-                        type="button"
-                        disabled={sending || active}
-                        onClick={() => onLoadThread(thread.id)}
-                        className={cn(
-                          "flex w-full flex-col gap-0.5 rounded-md px-2.5 py-2 text-left outline-none transition-colors",
-                          "hover:bg-accent hover:text-accent-foreground",
-                          "focus-visible:ring-2 focus-visible:ring-ring/50",
-                          "disabled:pointer-events-none",
-                          active && "bg-accent/70 text-foreground"
-                        )}
-                      >
-                        <span className="truncate text-sm">
-                          {threadTitle(thread)}
-                          {active ? (
-                            <span className="ml-1.5 text-[11px] text-muted-foreground">
-                              Active
-                            </span>
-                          ) : null}
-                        </span>
-                        <span className="text-[11px] text-muted-foreground">
-                          {thread.messageCount}{" "}
-                          {thread.messageCount === 1 ? "message" : "messages"}
-                          {thread.updatedAt
-                            ? ` · ${formatUpdatedAt(thread.updatedAt)}`
-                            : ""}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </SettingsSection>
+          {error ? (
+            <p className="px-4 py-3 text-xs text-destructive">{error}</p>
+          ) : null}
+          {loading ? (
+            <p className="px-4 py-2 text-xs text-muted-foreground">Loading…</p>
+          ) : null}
         </div>
       </div>
     </div>

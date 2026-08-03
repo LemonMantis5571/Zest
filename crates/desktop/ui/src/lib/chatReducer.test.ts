@@ -5,6 +5,7 @@ import {
   findApprovalTool,
   initialChatUiState,
   isStaleChatEvent,
+  joinThinkingStream,
   markApprovalRunning,
   reduceChatEvent,
   restoreApprovalCard,
@@ -83,6 +84,29 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(state.activeAssistantId, null);
     assert.equal(state.sending, false);
     assert.equal(state.currentTurnId, null);
+  });
+
+  it("separates thinking sentence chunks that arrive without whitespace", () => {
+    const state = reduceAll([
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+      {
+        kind: "thinking_delta",
+        ...ID,
+        message_id: "a1",
+        text: "Clarifying search scope for web inspection",
+      },
+      {
+        kind: "thinking_delta",
+        ...ID,
+        message_id: "a1",
+        text: "Planning targeted GitHub repository search",
+      },
+    ]);
+    const a = assistant(state);
+    assert.equal(
+      a.thinking,
+      "Clarifying search scope for web inspection\n\nPlanning targeted GitHub repository search"
+    );
   });
 
   it("ignores duplicate user message ids", () => {
@@ -402,5 +426,36 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(tool.status, "awaiting_approval");
     assert.equal(tool.approvalId, "ap1");
     assert.equal(tool.diff, "+x");
+  });
+});
+
+describe("joinThinkingStream", () => {
+  it("separates adjacent bold summary titles instead of fusing them", () => {
+    // The reported bug: two `**Title**` blocks welded into `****`, which is not
+    // valid emphasis and renders as literal asterisks.
+    const joined = joinThinkingStream(
+      "**Planning project inspection**",
+      "**Planning React Vite with Tailwind scaffolding**"
+    );
+    assert.ok(!joined.includes("****"), joined);
+    assert.equal(
+      joined,
+      "**Planning project inspection**\n\n**Planning React Vite with Tailwind scaffolding**"
+    );
+  });
+
+  it("still concatenates mid-word chunks untouched", () => {
+    assert.equal(joinThinkingStream("scaff", "olding"), "scaffolding");
+    assert.equal(joinThinkingStream("**bo", "ld**"), "**bold**");
+  });
+
+  it("keeps the existing sentence-boundary behaviour", () => {
+    assert.equal(joinThinkingStream("Done.", " Next"), "Done. Next");
+    assert.equal(joinThinkingStream("done", "Next"), "done\n\nNext");
+  });
+
+  it("handles empty sides", () => {
+    assert.equal(joinThinkingStream("", "**A**"), "**A**");
+    assert.equal(joinThinkingStream("**A**", ""), "**A**");
   });
 });

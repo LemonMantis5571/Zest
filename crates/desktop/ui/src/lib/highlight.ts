@@ -1,163 +1,122 @@
 /**
- * Chat code highlighting via Shiki.
+ * Main-thread client for the Shiki worker.
  *
- * Uses createHighlighterCore + the JS regex engine with statically imported
- * langs/themes so Tauri/WebView2 does not need WASM or runtime chunk fetches
- * (those fail silently and left us on the plain mono fallback).
+ * Highlighting is expensive enough — over 100 ms for one block — that doing it
+ * here drops frames while text is still streaming. The work happens in
+ * `highlight.worker.ts`; this file is the queue in front of it.
+ *
+ * The queue is a **latest-value cache keyed per block**, not a backlog: a
+ * streaming code block asks to be highlighted every time it settles, and only
+ * the newest ask is worth answering. Superseding an in-flight request costs
+ * nothing, because replies are matched by id and a dropped id is simply
+ * ignored when it arrives.
  */
-import { createHighlighterCore, type HighlighterCore } from "shiki/core";
-import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+import { normalizeLang } from "./highlight-core.ts";
+import type { HighlightRequest, HighlightResponse } from "./highlight-protocol.ts";
 
-import themeGithubDark from "@shikijs/themes/github-dark-default";
+export { languageLabel, normalizeLang } from "./highlight-core.ts";
 
-import langBash from "@shikijs/langs/bash";
-import langC from "@shikijs/langs/c";
-import langCpp from "@shikijs/langs/cpp";
-import langCss from "@shikijs/langs/css";
-import langCsharp from "@shikijs/langs/csharp";
-import langDiff from "@shikijs/langs/diff";
-import langGo from "@shikijs/langs/go";
-import langHtml from "@shikijs/langs/html";
-import langJava from "@shikijs/langs/java";
-import langJavascript from "@shikijs/langs/javascript";
-import langJson from "@shikijs/langs/json";
-import langJsx from "@shikijs/langs/jsx";
-import langMarkdown from "@shikijs/langs/markdown";
-import langPowershell from "@shikijs/langs/powershell";
-import langPython from "@shikijs/langs/python";
-import langRust from "@shikijs/langs/rust";
-import langScss from "@shikijs/langs/scss";
-import langShellscript from "@shikijs/langs/shellscript";
-import langSql from "@shikijs/langs/sql";
-import langToml from "@shikijs/langs/toml";
-import langTsx from "@shikijs/langs/tsx";
-import langTypescript from "@shikijs/langs/typescript";
-import langYaml from "@shikijs/langs/yaml";
-
-const THEME = "github-dark-default";
-
-const LANGS = [
-  "typescript",
-  "tsx",
-  "javascript",
-  "jsx",
-  "python",
-  "rust",
-  "go",
-  "java",
-  "c",
-  "cpp",
-  "csharp",
-  "json",
-  "toml",
-  "yaml",
-  "markdown",
-  "html",
-  "css",
-  "scss",
-  "sql",
-  "bash",
-  "shellscript",
-  "powershell",
-  "diff",
-  "plaintext",
-] as const;
-
-type Lang = (typeof LANGS)[number];
-
-const ALIASES: Record<string, Lang> = {
-  ts: "typescript",
-  js: "javascript",
-  py: "python",
-  rs: "rust",
-  sh: "bash",
-  zsh: "bash",
-  shell: "shellscript",
-  ps1: "powershell",
-  yml: "yaml",
-  md: "markdown",
-  text: "plaintext",
-  txt: "plaintext",
-  "": "plaintext",
+type Pending = {
+  resolve: (html: string) => void;
+  reject: (err: Error) => void;
 };
 
-let highlighterPromise: Promise<HighlighterCore> | null = null;
+let worker: Worker | null = null;
+let workerFailed = false;
+let nextId = 1;
+/** In-flight requests by id. A superseded id is deleted, so its reply is dropped. */
+const pending = new Map<number, Pending>();
+/** Newest request id per key, so an older reply for a block cannot win. */
+const latestByKey = new Map<string, number>();
 
-function getHighlighter(): Promise<HighlighterCore> {
-  if (!highlighterPromise) {
-    highlighterPromise = createHighlighterCore({
-      themes: [themeGithubDark],
-      langs: [
-        langTypescript,
-        langTsx,
-        langJavascript,
-        langJsx,
-        langPython,
-        langRust,
-        langGo,
-        langJava,
-        langC,
-        langCpp,
-        langCsharp,
-        langJson,
-        langToml,
-        langYaml,
-        langMarkdown,
-        langHtml,
-        langCss,
-        langScss,
-        langSql,
-        langBash,
-        langShellscript,
-        langPowershell,
-        langDiff,
-      ],
-      engine: createJavaScriptRegexEngine(),
-    }).catch((err) => {
-      // Allow a later CodeBlock mount to retry after a transient failure.
-      highlighterPromise = null;
-      throw err;
+function failAll(reason: string) {
+  for (const slot of pending.values()) slot.reject(new Error(reason));
+  pending.clear();
+  latestByKey.clear();
+}
+
+function ensureWorker(): Worker | null {
+  if (worker) return worker;
+  // One failure is enough — retrying a CSP-blocked constructor every block
+  // would throw on every code fence in the transcript.
+  if (workerFailed) return null;
+  try {
+    const next = new Worker(new URL("./highlight.worker.ts", import.meta.url), {
+      type: "module",
     });
+    next.addEventListener(
+      "message",
+      (event: MessageEvent<HighlightResponse>) => {
+        const reply = event.data;
+        const slot = pending.get(reply.id);
+        // No slot means the request was superseded while in flight. Dropping
+        // it is the entire point of keying by block.
+        if (!slot) return;
+        pending.delete(reply.id);
+        if (reply.ok) slot.resolve(reply.html);
+        else slot.reject(new Error(reply.error));
+      }
+    );
+    next.addEventListener("error", () => {
+      // A dead worker must not leave callers awaiting forever.
+      failAll("highlight worker failed");
+      worker = null;
+      workerFailed = true;
+    });
+    worker = next;
+  } catch {
+    // Blocked by CSP or unsupported — callers keep their plain-text fallback.
+    workerFailed = true;
+    worker = null;
   }
-  return highlighterPromise;
+  return worker;
 }
 
-export function normalizeLang(raw: string | undefined | null): Lang {
-  const key = (raw ?? "").trim().toLowerCase();
-  if ((LANGS as readonly string[]).includes(key)) return key as Lang;
-  return ALIASES[key] ?? "plaintext";
-}
-
-export function languageLabel(lang: string): string {
-  const n = normalizeLang(lang);
-  if (n === "plaintext") return "text";
-  if (n === "typescript") return "ts";
-  if (n === "javascript") return "js";
-  if (n === "shellscript") return "shell";
-  if (n === "powershell") return "ps1";
-  return n;
-}
-
-function escapeHtml(code: string): string {
-  return code
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-/** Highlight to HTML (Shiki wraps in pre/code; host styles the chrome). */
-export async function highlightCode(
+/**
+ * Highlight `code`, superseding any pending request for the same `key`.
+ *
+ * Rejects when the worker is unavailable. Every caller already renders plain
+ * monospace until an answer arrives, so that degrades rather than breaks.
+ */
+export function highlightCode(
   code: string,
-  langHint?: string | null
+  langHint?: string | null,
+  key?: string
 ): Promise<string> {
-  const lang = normalizeLang(langHint);
-  // No grammar package for plain text — keep structure consistent with Shiki.
-  if (lang === "plaintext") {
-    return `<pre class="shiki ${THEME}" tabindex="0"><code>${escapeHtml(code)}</code></pre>`;
+  const active = ensureWorker();
+  if (!active) return Promise.reject(new Error("highlight worker unavailable"));
+
+  const id = nextId++;
+  const slotKey = key ?? `anon-${id}`;
+
+  const previous = latestByKey.get(slotKey);
+  if (previous !== undefined) {
+    const stale = pending.get(previous);
+    if (stale) {
+      pending.delete(previous);
+      // Settle it, so nobody awaits a promise that can never resolve.
+      stale.reject(new Error("superseded"));
+    }
   }
-  const highlighter = await getHighlighter();
-  return highlighter.codeToHtml(code, {
-    lang,
-    theme: THEME,
+  latestByKey.set(slotKey, id);
+
+  const request: HighlightRequest = {
+    id,
+    code,
+    lang: normalizeLang(langHint),
+  };
+
+  return new Promise<string>((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    active.postMessage(request);
   });
+}
+
+/** Drop a block's slot when its component unmounts. */
+export function releaseHighlight(key: string): void {
+  const id = latestByKey.get(key);
+  if (id === undefined) return;
+  pending.get(id)?.reject(new Error("released"));
+  pending.delete(id);
+  latestByKey.delete(key);
 }

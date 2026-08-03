@@ -3,80 +3,141 @@ import {
   CheckIcon,
   ChevronRightIcon,
   FilePenLineIcon,
+  Maximize2Icon,
+  TerminalIcon,
   XIcon,
 } from "lucide-react";
 
 import { DiffPreview } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
-import type { ToolPart } from "@/lib/types";
+import { ZestPulse } from "@/components/ZestPulse";
+import type { ApprovalChoice, ToolPart } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Props = {
   tool: ToolPart;
-  onResolveApproval: (approvalId: string, allow: boolean) => Promise<void>;
+  onResolveApproval: (
+    approvalId: string,
+    decision: ApprovalChoice
+  ) => Promise<void>;
+  onOpenDiff?: (path: string, diff: string) => void;
 };
 
 /**
- * Compact tool row — Linear-style, not a heavy attachment card.
- * Truncated summaries show a portal-free hover preview (WebView-safe).
+ * Compact tool row — quiet chrome, expands for detail.
+ * Rows with a diff open the full DiffViewer on click.
  */
-export function ToolCallRow({ tool, onResolveApproval }: Props) {
+export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
   const awaiting = tool.status === "awaiting_approval";
-  const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
+  const [busy, setBusy] = useState<ApprovalChoice | null>(null);
   const [open, setOpen] = useState(false);
+  const hasDiff = Boolean(tool.diff?.trim());
 
-  async function resolve(allow: boolean) {
+  async function resolve(decision: ApprovalChoice) {
     if (!tool.approvalId || busy !== null) return;
-    setBusy(allow ? "allow" : "deny");
+    setBusy(decision);
     try {
-      await onResolveApproval(tool.approvalId, allow);
+      await onResolveApproval(tool.approvalId, decision);
     } catch {
       setBusy(null);
     }
   }
 
+  function openDiff() {
+    if (!tool.diff?.trim() || !onOpenDiff) return;
+    onOpenDiff(tool.path || tool.name, tool.diff);
+  }
+
+  // `bash` is the only tool that asks to run a command rather than change a
+  // file; for it, `path` carries the command line verbatim.
+  const isCommand = tool.name === "bash";
+
   if (awaiting) {
     return (
-      <div className="w-full max-w-full overflow-hidden rounded-lg border border-border/80 bg-card/90">
-        <div className="flex items-start gap-2.5 border-b border-border/60 px-3 py-2.5">
-          <div className="mt-0.5 grid size-7 place-items-center rounded-md bg-muted text-foreground">
-            <FilePenLineIcon className="size-3.5" />
+      <div className="w-full max-w-full overflow-hidden rounded-lg border border-border/50 bg-card/60">
+        <div className="flex items-start gap-2.5 px-3 py-2.5">
+          <div className="mt-0.5 grid size-6 place-items-center rounded-md bg-muted/80 text-foreground">
+            {isCommand ? (
+              <TerminalIcon className="size-3.5" />
+            ) : (
+              <FilePenLineIcon className="size-3.5" />
+            )}
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-xs font-medium text-foreground">
-              Allow {tool.name}?
+              {isCommand ? "Run this command?" : `Allow ${tool.name}?`}
             </div>
             <TruncateWithHover
-              text={tool.path || tool.summary || "Write to project file"}
+              text={
+                tool.path ||
+                tool.summary ||
+                (isCommand ? "Run a command" : "Write to project file")
+              }
               className="mt-0.5 font-mono text-[11px] text-muted-foreground"
             />
           </div>
+          {hasDiff && onOpenDiff ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Open full diff"
+              className="shrink-0"
+              onClick={openDiff}
+            >
+              <Maximize2Icon className="size-3.5" />
+            </Button>
+          ) : null}
         </div>
         {tool.diff ? (
-          <DiffPreview diff={tool.diff} />
+          <button
+            type="button"
+            title="Open full diff"
+            className="block w-full cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
+            onClick={openDiff}
+          >
+            <DiffPreview diff={tool.diff} />
+          </button>
         ) : null}
-        <div className="flex items-center justify-end gap-2 px-3 py-2">
+        <div className="flex flex-wrap items-center justify-end gap-2 px-3 py-2">
           <Button
             type="button"
             variant="ghost"
             size="sm"
             disabled={busy !== null}
             onClick={() => {
-              void resolve(false);
+              void resolve("deny");
             }}
           >
             {busy === "deny" ? "Denying…" : "Deny"}
           </Button>
           <Button
             type="button"
+            variant="ghost"
+            size="sm"
+            disabled={busy !== null}
+            // The grant covers this tool and this exact target only, which is
+            // what the row above is showing.
+            title={
+              isCommand
+                ? "Stop asking about this exact command for the rest of the session"
+                : `Stop asking about ${tool.path || "this file"} for the rest of the session`
+            }
+            onClick={() => {
+              void resolve("session");
+            }}
+          >
+            {busy === "session" ? "Allowing…" : "Allow for session"}
+          </Button>
+          <Button
+            type="button"
             size="sm"
             disabled={busy !== null}
             onClick={() => {
-              void resolve(true);
+              void resolve("once");
             }}
           >
-            {busy === "allow" ? "Allowing…" : "Allow once"}
+            {busy === "once" ? (isCommand ? "Running…" : "Allowing…") : "Allow once"}
           </Button>
         </div>
       </div>
@@ -90,69 +151,75 @@ export function ToolCallRow({ tool, onResolveApproval }: Props) {
     : tool.name;
   const skipped = delegation?.skipped ?? [];
   const hasSkipped = skipped.length > 0;
-  const hasBody = Boolean(tool.summary?.trim()) || hasSkipped;
+  const hasBody = Boolean(tool.summary?.trim()) || hasSkipped || hasDiff;
 
   const statusIcon =
     tool.status === "running" ? (
-      <Spinner className="size-3.5" />
+      <ZestPulse size={12} />
     ) : tool.status === "error" ? (
-      <XIcon className="size-3.5 text-destructive" />
+      <XIcon className="size-3 text-destructive" />
     ) : (
-      <CheckIcon className="size-3.5 text-[var(--success,#27a644)]" />
+      <CheckIcon className="size-3 text-[var(--success,#27a644)]/90" />
     );
 
   return (
     <div
       className={cn(
-        "group/tool w-full max-w-full rounded-lg border border-border/60 bg-card/40",
-        tool.status === "error" && "border-destructive/40"
+        "group/tool w-full max-w-full rounded-md",
+        tool.status === "error" && "bg-destructive/5"
       )}
     >
       <button
         type="button"
         disabled={!hasBody}
-        onClick={() => hasBody && setOpen((v) => !v)}
+        onClick={() => {
+          if (hasDiff && onOpenDiff) {
+            openDiff();
+            return;
+          }
+          if (hasBody) setOpen((v) => !v);
+        }}
         className={cn(
-          "flex w-full items-center gap-2 px-2.5 py-1.5 text-left outline-none",
-          "hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring/40",
-          !hasBody && "cursor-default"
+          "flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left outline-none transition-colors",
+          "hover:bg-white/[0.03] focus-visible:ring-2 focus-visible:ring-ring/40",
+          hasBody ? "cursor-pointer" : "cursor-default"
         )}
       >
-        <span className="grid size-5 shrink-0 place-items-center text-muted-foreground">
-          {statusIcon}
-        </span>
+        <span className="grid size-4 shrink-0 place-items-center">{statusIcon}</span>
         <span
           className={cn(
-            "shrink-0 font-mono text-[12px] font-medium text-foreground",
-            tool.status === "running" && "shimmer-text"
+            "shrink-0 font-mono text-[12px] text-muted-foreground",
+            tool.status === "running" && "shimmer-text text-foreground/80"
           )}
         >
           {title}
         </span>
-        {!delegation && tool.summary ? (
+        {!delegation && (tool.path || tool.summary) ? (
           <TruncateWithHover
-            text={tool.summary}
-            className="min-w-0 flex-1 font-mono text-[11px] text-muted-foreground"
+            text={tool.path || tool.summary || ""}
+            className="min-w-0 flex-1 font-mono text-[11px] text-muted-foreground/70"
           />
         ) : (
-          <span className="min-w-0 flex-1 text-[11px] text-muted-foreground">
-            {hasSkipped ? `${skipped.length} fallback` : null}
+          <span className="min-w-0 flex-1 text-[11px] text-muted-foreground/70">
+            {hasSkipped ? `${skipped.length} fallback` : hasDiff ? "View diff" : null}
           </span>
         )}
-        {hasBody ? (
+        {hasDiff ? (
+          <Maximize2Icon className="size-3 shrink-0 text-muted-foreground/50" />
+        ) : hasBody ? (
           <ChevronRightIcon
             className={cn(
-              "size-3.5 shrink-0 text-muted-foreground/70 transition-transform",
+              "size-3 shrink-0 text-muted-foreground/50 transition-transform duration-150",
               open && "rotate-90"
             )}
           />
         ) : null}
       </button>
-      {open ? (
-        <div className="space-y-2 border-t border-border/50 bg-[var(--chat-canvas)] px-3 py-2">
+      {open && !hasDiff ? (
+        <div className="mt-0.5 mb-1 space-y-1.5 px-1.5 pl-6">
           {hasSkipped ? (
             <div className="space-y-1">
-              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
                 Fallback reasons
               </div>
               <ul className="space-y-0.5 text-[11px] text-muted-foreground">
@@ -165,7 +232,7 @@ export function ToolCallRow({ tool, onResolveApproval }: Props) {
             </div>
           ) : null}
           {tool.summary ? (
-            <pre className="max-h-56 overflow-auto font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
+            <pre className="max-h-48 overflow-auto font-mono text-[11px] leading-relaxed text-muted-foreground/90 whitespace-pre-wrap">
               {tool.summary}
             </pre>
           ) : null}
