@@ -14,6 +14,7 @@ import {
   restoreApprovalCard,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
+import { revealCount } from "@/lib/reveal";
 import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_EFFORT,
@@ -24,7 +25,17 @@ import {
   mergeSessionOptions,
   rollbackSessionOptions,
 } from "@/lib/sessionOptions";
-import type { ChatEvent, ChatMessage, ProviderRow, SessionInfo, ToolPart } from "@/lib/types";
+import type {
+  ApprovalChoice,
+  ApprovalMode,
+  ChatEvent,
+  ChatMessage,
+  PreparedAttachment,
+  ProviderRow,
+  SessionInfo,
+  ToolPart,
+  UserProfile,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Screen = "boot" | "picker" | "waiting" | "auth-success" | "chat";
@@ -112,6 +123,8 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
         };
       }),
       error: msg.error,
+      // Persisted, so a reopened plan still renders as a plan.
+      command: msg.command,
       streaming: false,
     };
   });
@@ -158,9 +171,19 @@ export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<PreparedAttachment[]>([]);
+  const [workspacePath, setWorkspacePath] = useState<string | null>(null);
+  const [branch, setBranch] = useState<string | null>(null);
+  const [profile, setProfile] = useState<UserProfile>({
+    displayName: "",
+    avatarDataUrl: "",
+  });
   const [sending, setSending] = useState(false);
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
   const [effort, setEffort] = useState<EffortId>(DEFAULT_EFFORT);
+  // Mirrors DESKTOP_DEFAULT_MODE in Rust; reconciled on session start.
+  const [approvalModeState, setApprovalModeState] =
+    useState<ApprovalMode>("auto");
   const [optionsUpdating, setOptionsUpdating] = useState(false);
 
   const selectedIdRef = useRef(selectedId);
@@ -176,6 +199,8 @@ export default function App() {
   const currentTurnIdRef = useRef<string | null>(null);
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
   const optionsUpdatingRef = useRef(false);
   const modelRef = useRef(model);
   modelRef.current = model;
@@ -214,6 +239,21 @@ export default function App() {
         const row = rows.find((p) => p.id === selectedIdRef.current);
         if (row?.statusKind === "ready") {
           stopPolling();
+          // "ready" here only means a credentials file appeared. A gateway can
+          // hold an account it cannot actually use — that is exactly how a
+          // dead Claude session looked signed in. Prove it with one tiny turn
+          // before claiming success.
+          setWaitingHint("Checking the sign-in works…");
+          try {
+            await backend.verifyProvider(row.id);
+          } catch (err) {
+            setWaitingHint("Signed in, but the provider still refused");
+            setWaitingError(
+              `${row.label} accepted the sign-in but cannot serve a request yet. ` +
+                `Try connecting again.\n\n${String(err)}`
+            );
+            return;
+          }
           setScreen("auth-success");
           return;
         }
@@ -270,32 +310,60 @@ export default function App() {
     }
   }, []);
 
-  const flushDeltaQueue = useCallback(() => {
-    deltaRafRef.current = null;
-    const queued = deltaQueueRef.current;
-    deltaQueueRef.current = [];
-    // Merge adjacent text/thinking deltas before React reduce to cut renders.
-    for (const event of mergeAdjacentDeltas(queued)) {
-      applyChatEventNow(event);
-    }
-  }, [applyChatEventNow]);
+  const flushDeltaQueue = useCallback(
+    (drainAll = false) => {
+      deltaRafRef.current = null;
+      const queued = deltaQueueRef.current;
+      deltaQueueRef.current = [];
+      // Merge adjacent text/thinking deltas before React reduce to cut renders.
+      const merged = mergeAdjacentDeltas(queued);
+
+      for (let i = 0; i < merged.length; i += 1) {
+        const event = merged[i];
+        if (!drainAll && event.kind === "text_delta") {
+          const reveal = revealCount(event.text.length);
+          if (reveal < event.text.length) {
+            applyChatEventNow({ ...event, text: event.text.slice(0, reveal) });
+            // Order matters: the remainder and everything queued behind it
+            // wait a frame together, or later text would overtake earlier text.
+            deltaQueueRef.current = [
+              { ...event, text: event.text.slice(reveal) },
+              ...merged.slice(i + 1),
+            ];
+            break;
+          }
+        }
+        applyChatEventNow(event);
+      }
+
+      if (deltaQueueRef.current.length > 0 && deltaRafRef.current == null) {
+        deltaRafRef.current = window.requestAnimationFrame(() =>
+          flushDeltaQueue()
+        );
+      }
+    },
+    [applyChatEventNow]
+  );
 
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
       if (event.kind === "text_delta" || event.kind === "thinking_delta") {
         deltaQueueRef.current.push(event);
         if (deltaRafRef.current == null) {
-          deltaRafRef.current = window.requestAnimationFrame(flushDeltaQueue);
+          deltaRafRef.current = window.requestAnimationFrame(() =>
+            flushDeltaQueue()
+          );
         }
         return;
       }
-      // Non-delta events must see coalesced text first.
+      // Non-delta events must see coalesced text first — and all of it, so a
+      // partially revealed buffer never lands after the `done` that ended it.
       if (deltaQueueRef.current.length > 0) {
         if (deltaRafRef.current != null) {
           window.cancelAnimationFrame(deltaRafRef.current);
           deltaRafRef.current = null;
         }
-        flushDeltaQueue();
+        flushDeltaQueue(true);
       }
       applyChatEventNow(event);
     },
@@ -309,9 +377,19 @@ export default function App() {
     }
 
     setSession(info);
+    setWorkspacePath(info.root);
+    void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
     setSelectedId(info.provider);
     setModel(info.model);
     setEffort(effortFromSession(info.effort, DEFAULT_EFFORT));
+    // Rust owns the mode and it survives project switches, so read it back
+    // rather than assuming the chip still matches.
+    void backend
+      .approvalMode()
+      .then((mode) => setApprovalModeState(mode as ApprovalMode))
+      .catch(() => {
+        /* keep the current chip; the picker is not worth an error toast */
+      });
     const messages = normalizeMessages(info.messages);
     setMessages(messages);
     messagesRef.current = messages;
@@ -321,6 +399,7 @@ export default function App() {
     sendingRef.current = false;
     threadIdRef.current = info.threadId;
     sessionIdRef.current = info.sessionId;
+    setAttachments([]);
 
     if (opts?.clearDraft) {
       saveDraft(info.threadId, "");
@@ -374,11 +453,19 @@ export default function App() {
 
     (async () => {
       try {
-        const [rows, prefer] = await Promise.all([
+        const [rows, prefer, folder, userProfile] = await Promise.all([
           backend.listProviders(),
           backend.lastProvider().catch(() => null),
+          backend.getWorkspaceFolder().catch(() => null),
+          backend.getUserProfile().catch(() => ({
+            displayName: "",
+            avatarDataUrl: "",
+          })),
         ]);
         setProviders(rows);
+        if (folder) setWorkspacePath(folder);
+        setProfile(userProfile);
+        void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
 
         const ready = pickReadyProvider(rows, prefer);
         if (ready) {
@@ -509,8 +596,10 @@ export default function App() {
     await loadProviders(selectedId);
   }
 
-  async function reconnectProvider() {
-    const providerId = session?.provider ?? selectedId;
+  /** `only` targets a specific provider — used by the Reconnect on an auth
+   *  failure, which knows exactly which account the gateway rejected. */
+  async function reconnectProvider(only?: string) {
+    const providerId = only ?? session?.provider ?? selectedId;
     if (!providerId || backend.mode === "fixture") return;
     setPickerError(null);
     try {
@@ -562,10 +651,175 @@ export default function App() {
     }
   }
 
+  async function onDeleteThread(id: string, projectPath: string) {
+    try {
+      const deletedActive = session?.threadId === id;
+      const info = await backend.deleteThread(id, projectPath);
+      saveDraft(id, "");
+      // Always refresh when the open thread was deleted (path strings from the
+      // sidebar may not match session.root byte-for-byte on Windows).
+      if (deletedActive || info.threadId !== session?.threadId) {
+        applySession(info, { clearDraft: true });
+      }
+      setWorkspacePath(info.root);
+      void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+      toast.add({
+        type: "success",
+        title: "Chat deleted",
+        description: deletedActive
+          ? "Started a fresh chat in this project"
+          : undefined,
+      });
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not delete chat",
+        description: String(err),
+      });
+      throw err;
+    }
+  }
+
+  async function onOpenProjectChat(options: {
+    root: string;
+    threadId?: string;
+    newThread?: boolean;
+  }) {
+    if (sendingRef.current) {
+      toast.add({
+        type: "error",
+        title: "Busy",
+        description: "Stop the current turn before switching project",
+      });
+      return;
+    }
+    try {
+      if (session?.threadId) {
+        saveDraft(session.threadId, draftRef.current);
+      }
+      const info = await backend.openProjectChat(options);
+      applySession(info, { clearDraft: Boolean(options.newThread) });
+      setWorkspacePath(info.root);
+      void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not open project chat",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
+  }
+
+  function mergeAttachments(files: PreparedAttachment[]) {
+    setAttachments((prev) => {
+      const seen = new Set(prev.map((a) => a.path + a.name + (a.dataBase64?.slice(0, 32) ?? "")));
+      const next = files.filter(
+        (f) => !seen.has(f.path + f.name + (f.dataBase64?.slice(0, 32) ?? ""))
+      );
+      return [...prev, ...next];
+    });
+    for (const file of files) {
+      if (file.status === "error") {
+        toast.add({
+          type: "error",
+          title: file.name,
+          description: file.detail,
+        });
+      }
+    }
+  }
+
+  async function onAttachFiles() {
+    try {
+      const files = await backend.pickFiles();
+      if (!files.length) return;
+      mergeAttachments(files);
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not attach files",
+        description: formatInvokeError(err),
+      });
+    }
+  }
+
+  async function onPasteImages(files: File[]) {
+    try {
+      const prepared: PreparedAttachment[] = [];
+      for (const file of files) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () =>
+            resolve(typeof reader.result === "string" ? reader.result : "");
+          reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+          reader.readAsDataURL(file);
+        });
+        const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop()! : dataUrl;
+        const att = await backend.preparePastedImage({
+          dataBase64: base64,
+          mediaType: file.type || "image/png",
+          name: file.name || undefined,
+        });
+        prepared.push(att);
+      }
+      if (prepared.length) mergeAttachments(prepared);
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not paste image",
+        description: formatInvokeError(err),
+      });
+    }
+  }
+
+  async function onOpenFolder() {
+    if (sendingRef.current) {
+      toast.add({
+        type: "error",
+        title: "Busy",
+        description: "Stop the current turn before changing folder",
+      });
+      return;
+    }
+    try {
+      const result = await backend.pickWorkspaceFolder();
+      if (!result) return;
+      setWorkspacePath(result.path);
+      void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+      if (result.sessionEnded || session) {
+        const providerId = session?.provider ?? selectedId;
+        setSession(null);
+        sessionIdRef.current = null;
+        threadIdRef.current = null;
+        setMessages([]);
+        setAttachments([]);
+        if (providerId) {
+          await enterChat(providerId);
+        } else {
+          setScreen("picker");
+        }
+      }
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not open folder",
+        description: formatInvokeError(err),
+      });
+    }
+  }
+
   async function onSend() {
     const text = draft.trim();
-    if (!text || sending) return;
+    const pending = attachmentsRef.current;
+    const hasOk = pending.some(
+      (a) =>
+        a.status === "done" &&
+        (Boolean(a.content?.trim()) || (a.kind === "image" && Boolean(a.dataBase64)))
+    );
+    if ((!text && !hasOk) || sending) return;
     setDraft("");
+    setAttachments([]);
     if (session?.threadId) {
       saveDraft(session.threadId, "");
     }
@@ -574,10 +828,26 @@ export default function App() {
     sendingRef.current = true;
     activeAssistantId.current = null;
     try {
-      await backend.sendMessage(text);
+      await backend.sendMessage(
+        text,
+        pending.map((a) => ({
+          name: a.name,
+          detail: a.detail,
+          content: a.content,
+          status: a.status,
+          kind: a.kind,
+          mediaType: a.mediaType,
+          dataBase64: a.dataBase64,
+        }))
+      );
     } catch (err) {
       setSending(false);
       sendingRef.current = false;
+      setDraft(text);
+      setAttachments(pending);
+      if (session?.threadId) {
+        saveDraft(session.threadId, text);
+      }
       const message = formatInvokeError(err);
       if (!message.includes("already in progress") && !message.includes('"busy"')) {
         toast.add({
@@ -609,7 +879,11 @@ export default function App() {
     }
   }
 
-  async function onResolveApproval(approvalId: string, allow: boolean) {
+  async function onResolveApproval(
+    approvalId: string,
+    decision: ApprovalChoice
+  ) {
+    const allow = decision !== "deny";
     const snapshot = findApprovalTool(messagesRef.current, approvalId);
     if (allow && snapshot) {
       const next = markApprovalRunning(messagesRef.current, approvalId);
@@ -617,7 +891,7 @@ export default function App() {
       setMessages(next);
     }
     try {
-      await backend.resolveApproval(approvalId, allow);
+      await backend.resolveApproval(approvalId, decision);
     } catch (err) {
       if (allow && snapshot) {
         const restored = restoreApprovalCard(messagesRef.current, snapshot);
@@ -630,6 +904,22 @@ export default function App() {
         description: String(err),
       });
       throw err;
+    }
+  }
+
+  async function onApprovalModeChange(next: ApprovalMode) {
+    const previous = approvalModeState;
+    setApprovalModeState(next);
+    try {
+      await backend.setApprovalMode(next);
+    } catch (err) {
+      // Rust is authoritative — put the picker back if it refused.
+      setApprovalModeState(previous);
+      toast.add({
+        type: "error",
+        title: "Could not change mode",
+        description: String(err),
+      });
     }
   }
 
@@ -703,12 +993,13 @@ export default function App() {
       <div
         className={cn(
           "h-full w-full",
-          authMode && "flex items-center justify-center px-6 py-8",
+          authMode &&
+            "relative flex items-center justify-center overflow-auto px-6 py-8 before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[radial-gradient(ellipse_at_50%_0%,color-mix(in_srgb,var(--primary)_10%,transparent),transparent_55%)] [&>*]:relative [&>*]:z-10",
           !authMode && "flex min-h-0 flex-col"
         )}
       >
         {screen === "boot" ? (
-          <section className="flex w-full max-w-[420px] flex-col items-center text-center">
+          <section className="flex w-full max-w-[400px] animate-in fade-in duration-200 flex-col items-center text-center ease-out">
             <BrandMark />
             <p className="mt-4 text-sm text-muted-foreground">Opening your session…</p>
           </section>
@@ -718,10 +1009,12 @@ export default function App() {
           <ProviderPicker
             providers={providers}
             selectedId={selectedId}
+            workspacePath={workspacePath}
             error={pickerError}
             onSelect={setSelectedId}
             onContinue={goContinue}
             onConnect={goConnect}
+            onOpenFolder={onOpenFolder}
             continuing={continuing}
           />
         ) : null}
@@ -745,6 +1038,9 @@ export default function App() {
             session={session}
             messages={messages}
             draft={draft}
+            attachments={attachments}
+            branch={branch}
+            profile={profile}
             sending={sending}
             model={model}
             effort={effort}
@@ -753,12 +1049,34 @@ export default function App() {
             onSend={onSend}
             onStop={onStop}
             onNewChat={onNewChat}
+            onDeleteThread={onDeleteThread}
+            onOpenProjectChat={onOpenProjectChat}
             onChangeProvider={changeProvider}
             onReconnect={reconnectProvider}
             onLoadThread={onLoadThread}
+            onAttachFiles={onAttachFiles}
+            onOpenFolder={onOpenFolder}
+            onRemoveAttachment={(id) =>
+              setAttachments((prev) => prev.filter((a) => a.id !== id))
+            }
+            onPasteImages={onPasteImages}
+            onProfileChange={setProfile}
             onModelChange={onModelChange}
             onEffortChange={onEffortChange}
             onResolveApproval={onResolveApproval}
+            onReconnectProvider={(providerId) => {
+              // Same path as the picker Connect: spawns the vendor/gateway
+              // login and shows the waiting screen until it resolves.
+              void reconnectProvider(providerId);
+            }}
+            onReloadSession={async () => {
+              // Rebuilds the runtime so a routing change takes effect. The
+              // sticky thread is reloaded, so the open chat survives.
+              const id = session?.provider ?? selectedIdRef.current;
+              if (id) await enterChat(id);
+            }}
+            approvalMode={approvalModeState}
+            onApprovalModeChange={onApprovalModeChange}
           />
         ) : null}
       </div>

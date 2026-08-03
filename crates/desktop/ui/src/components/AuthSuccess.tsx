@@ -1,5 +1,7 @@
-import { Button } from "@/components/ui/button";
 import { CheckIcon } from "lucide-react";
+
+import { AuthShell } from "@/components/AuthShell";
+import { Button } from "@/components/ui/button";
 
 type Props = {
   onContinue: () => void;
@@ -8,23 +10,23 @@ type Props = {
 
 export function AuthSuccess({ onContinue, continuing }: Props) {
   return (
-    <section className="w-full max-w-[420px]">
-      <header className="mb-7">
-        <div className="mb-4.5 flex size-12 items-center justify-center rounded-full bg-[var(--success)] text-white">
-          <CheckIcon className="size-6" strokeWidth={3} />
+    <AuthShell>
+      <header className="mb-6">
+        <div className="mb-4 flex size-10 items-center justify-center rounded-full bg-[var(--success)]/15 text-[var(--success)]">
+          <CheckIcon className="size-5" strokeWidth={2.5} />
         </div>
-        <h1 className="m-0 mb-2 text-[28px] font-semibold leading-[1.2] tracking-[-0.6px]">
+        <h1 className="m-0 mb-1.5 text-[22px] font-semibold leading-tight tracking-[-0.4px]">
           Authentication successful
         </h1>
-        <p className="m-0 max-w-[36ch] text-sm text-muted-foreground">
+        <p className="m-0 max-w-[38ch] text-[13px] leading-relaxed text-muted-foreground">
           You’re signed in. Continue in Zest — no need to return to a terminal.
         </p>
       </header>
-      <footer className="mt-7 flex justify-end gap-2.5">
+      <footer className="mt-6 flex justify-end gap-2">
         <Button type="button" disabled={continuing} onClick={onContinue}>
           {continuing ? "Starting…" : "Continue"}
         </Button>
       </footer>
-    </section>
+    </AuthShell>
   );
 }

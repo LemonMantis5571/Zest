@@ -117,6 +117,34 @@
   [contenteditable="true"] {
     caret-color: var(--foreground);
   }
+
+  /* Clickable controls should look clickable (WebView defaults are inconsistent). */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([aria-disabled="true"]),
+  [role="option"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="switch"]:not([aria-disabled="true"]),
+  [role="checkbox"]:not([aria-disabled="true"]),
+  summary,
+  a[href],
+  label[for],
+  select:not(:disabled),
+  input[type="button"]:not(:disabled),
+  input[type="submit"]:not(:disabled),
+  input[type="reset"]:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled),
+  input[type="file"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  select:disabled,
+  input:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }
 
 @keyframes zest-shimmer {
@@ -140,4 +168,52 @@
   background-clip: text;
   color: transparent;
   animation: zest-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes zest-pulse-mark {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.88;
+  }
+}
+
+@keyframes zest-pulse-ring {
+  0%,
+  100% {
+    transform: scale(0.92);
+    opacity: 0.35;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.08;
+  }
+}
+
+.zest-pulse-mark {
+  animation: zest-pulse-mark 1.5s ease-in-out infinite;
+}
+
+.zest-pulse-ring {
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--primary) 45%, transparent) 0%,
+    transparent 70%
+  );
+  animation: zest-pulse-ring 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zest-pulse-mark,
+  .zest-pulse-ring {
+    animation: none;
+  }
+
+  .zest-pulse-ring {
+    opacity: 0.2;
+  }
 }
