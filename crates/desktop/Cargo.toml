@@ -26,9 +26,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }
 dirs = { workspace = true }
-dotenvy = "0.15"
 tokio = { workspace = true }
 ts-rs = { version = "11", default-features = true, optional = true }
+pdf-inspector = "0.1"
+rfd = "0.15"
+base64 = "0.22"
 
 [features]
 default = []

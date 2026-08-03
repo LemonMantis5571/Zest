@@ -70,7 +70,9 @@ impl SessionError {
 
     pub fn message(&self) -> &'static str {
         match self {
-            Self::Busy => "a turn is already in progress",
+            // Reaches the UI verbatim, so it has to say what to do rather than
+            // describe internal state.
+            Self::Busy => "the assistant is still working — stop it or wait for it to finish",
             Self::NoSession => "no active session — choose a provider first",
             Self::Poisoned => "session lock poisoned",
         }

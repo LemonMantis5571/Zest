@@ -94,11 +94,11 @@ export function ModelEffortPicker({
         aria-controls={open ? labelId : undefined}
         title="Model and reasoning effort"
         className={cn(
-          "inline-flex max-w-[260px] items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none transition-colors",
+          "inline-flex max-w-[260px] cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none transition-colors",
           "hover:bg-secondary hover:text-foreground",
           "focus-visible:ring-2 focus-visible:ring-ring/50",
           open && "bg-secondary text-foreground",
-          "disabled:pointer-events-none disabled:opacity-50"
+          "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
         )}
         onClick={() => setOpen((value) => !value)}
       >
