@@ -19,6 +19,7 @@ import type {
   ContextUsage,
   LoginStarted,
   PreparedAttachment,
+  ProfileStats,
   ProjectChats,
   ProviderRow,
   SessionInfo,
@@ -40,6 +41,9 @@ export type DesktopBackend = {
   readonly mode: "tauri" | "fixture";
   listProviders(): Promise<ProviderRow[]>;
   usageSnapshot(): Promise<UsageSnapshot>;
+  profileStats(): Promise<ProfileStats>;
+  /** Hand core this machine's UTC offset so day boundaries match the clock. */
+  setLocalOffset(): Promise<void>;
   lastProvider(): Promise<string | null>;
   startLogin(id: string): Promise<LoginStarted>;
   startSession(
@@ -113,6 +117,8 @@ export function createTauriBackend(): DesktopBackend {
     mode: "tauri",
     listProviders: () => tauriApi.listProviders(),
     usageSnapshot: () => tauriApi.usageSnapshot(),
+    profileStats: () => tauriApi.profileStats(),
+    setLocalOffset: () => tauriApi.setLocalOffset(),
     lastProvider: () => tauriApi.lastProvider(),
     startLogin: (id) => tauriApi.startLogin(id),
     startSession: (id, options) => tauriApi.startSession(id, options),
@@ -193,6 +199,50 @@ export function createFixtureBackend(): DesktopBackend {
           },
         ],
       };
+    },
+    async profileStats() {
+      // Enough shape to exercise the heatmap offline: a long run of days, a
+      // gap, and a metering start part-way through so the "no token data"
+      // rendering is visible rather than only reachable on a real install.
+      const day = 86_400;
+      const today = Math.floor(Date.now() / 1000);
+      const iso = (offsetDays: number) =>
+        new Date((today - offsetDays * day) * 1000).toISOString().slice(0, 10);
+
+      const days = [];
+      for (let back = 180; back >= 0; back--) {
+        // A believable rhythm rather than noise: quiet weekends, busy weekdays.
+        const weekday = new Date((today - back * day) * 1000).getDay();
+        const busy = weekday !== 0 && weekday !== 6;
+        const chats = busy ? (back % 5 === 0 ? 0 : 1 + (back % 4)) : back % 3 === 0 ? 1 : 0;
+        if (chats === 0 && back % 7 !== 0) continue;
+        days.push({
+          date: iso(back),
+          chats,
+          messages: chats * (4 + (back % 9)),
+          // Metering began 90 days ago; earlier cells carry no token figure.
+          ...(back <= 90
+            ? { tokens: chats * 12_000 + (back % 11) * 900, requests: chats * 3 }
+            : {}),
+        });
+      }
+
+      return {
+        totalChats: days.reduce((sum, d) => sum + d.chats, 0),
+        totalMessages: days.reduce((sum, d) => sum + d.messages, 0),
+        totalTokens: 5_252_800_000,
+        totalRequests: 12_480,
+        peakDayTokens: 338_300_000,
+        longestChatSecs: 4_380,
+        currentStreakDays: 28,
+        longestStreakDays: 71,
+        firstActivity: today - 180 * day,
+        days,
+        meteringSince: iso(90),
+      };
+    },
+    async setLocalOffset() {
+      /* fixture: no core to inform */
     },
     async lastProvider() {
       return "fixture";

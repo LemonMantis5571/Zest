@@ -24,9 +24,10 @@ use zest_core::{
     can_start_login, compose_system_with_docs, descriptor_for_picker_id, descriptor_from_config,
     detect_all, display_path, ensure_gateway_running, env_context, load_custom_system,
     load_project_docs, new_id, probe, save_custom_system, start_login as core_start_login,
-    truncate_chars, uses_gateway_auth, ApprovalDecision, ApprovalMode, ApprovalPolicy,
-    ApprovalRequest, Approver, AuthStatus, Config, GatewayState, HarnessError, Ledger,
-    PersistPriority, PersistWorker, ProjectSessionState, ProviderConfig, ProviderRegistry,
+    derive_profile_stats, truncate_chars, uses_gateway_auth, ApprovalDecision, ApprovalMode,
+    ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts, Config, GatewayState,
+    HarnessError, Ledger, PersistPriority, PersistWorker, ProfileStats, ProjectSessionState,
+    ProviderConfig, ProviderRegistry,
     ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
     ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
     DEFAULT_SYSTEM,
@@ -545,6 +546,68 @@ fn refresh_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
 #[tauri::command]
 fn usage_snapshot() -> UsageSnapshot {
     Ledger::load().snapshot()
+}
+
+/// Tell core which day it is for this user.
+///
+/// The webview is the only part of Zest that knows the machine's timezone, and
+/// every day boundary — streaks, heatmap cells, which bucket a turn lands in —
+/// depends on it. Called at startup, before anything is recorded.
+#[tauri::command]
+fn set_local_offset(minutes: i32) {
+    zest_core::usage::set_local_offset_minutes(minutes);
+}
+
+/// Activity statistics across every project Zest knows about.
+///
+/// Chats come from thread files, so this is retroactive; tokens come from the
+/// ledger's daily buckets, which only exist from when metering landed. The two
+/// reaches are kept distinct in the payload rather than blended.
+#[tauri::command]
+fn profile_stats(state: State<'_, AppState>) -> Result<ProfileStats, String> {
+    let mut roots = load_known_workspaces();
+    if let Ok(active) = resolve_workspace_root(&state) {
+        if !roots.iter().any(|p| p == &active) {
+            roots.insert(0, active);
+        }
+    }
+
+    let mut chats = Vec::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        // A project that has been moved or deleted is skipped, not fatal: a
+        // profile is a summary, and one missing folder should not blank it.
+        let Ok(store) = open_store(&root) else {
+            continue;
+        };
+        for thread in store.list().unwrap_or_default() {
+            chats.push(ChatFacts {
+                created_at: thread.created_at,
+                updated_at: thread.updated_at,
+                message_count: thread.message_count,
+            });
+        }
+    }
+
+    let ledger = Ledger::load();
+    let (tokens, requests) = ledger.lifetime();
+    let today = zest_core::usage::local_day_number(now_secs());
+    Ok(derive_profile_stats(
+        &chats,
+        ledger.daily(),
+        tokens,
+        requests,
+        today,
+    ))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Send one minimal turn to prove the provider can actually serve.
@@ -2458,6 +2521,8 @@ pub fn run() {
             list_providers,
             refresh_providers,
             usage_snapshot,
+            profile_stats,
+            set_local_offset,
             last_provider,
             start_login,
             verify_provider,

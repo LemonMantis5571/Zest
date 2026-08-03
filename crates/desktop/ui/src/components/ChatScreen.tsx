@@ -103,6 +103,13 @@ type Props = {
   onApprovalModeChange: (mode: ApprovalMode) => void;
   /** Leave Plan mode and build the newest plan. */
   onBuildPlan?: () => void;
+  /** Show the profile screen (avatar click). */
+  onOpenProfile?: () => void;
+  /**
+   * Bumped to request the User section of Settings — the profile screen sends
+   * edits here rather than duplicating the form.
+   */
+  settingsRequest?: number;
   onResolveApproval: (
     approvalId: string,
     decision: ApprovalChoice
@@ -171,6 +178,8 @@ export function ChatScreen({
   onRemoveAttachment,
   onPasteImages,
   onProfileChange,
+  onOpenProfile,
+  settingsRequest = 0,
   optionsDisabled = false,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -186,6 +195,14 @@ export function ChatScreen({
     [messages]
   );
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
+
+  // A bump means "open the User section". Zero is the initial value, so the
+  // panel does not fly open on mount.
+  useEffect(() => {
+    if (settingsRequest <= 0) return;
+    setFocusUser(true);
+    setSettingsOpen(true);
+  }, [settingsRequest]);
 
   function closeSettings() {
     setSettingsOpen(false);
@@ -297,7 +314,12 @@ export function ChatScreen({
             <UserAvatarButton
               avatarDataUrl={profile.avatarDataUrl}
               displayName={profile.displayName}
+              title="Your profile"
               onClick={() => {
+                if (onOpenProfile) {
+                  onOpenProfile();
+                  return;
+                }
                 setFocusUser(true);
                 setSettingsOpen(true);
               }}

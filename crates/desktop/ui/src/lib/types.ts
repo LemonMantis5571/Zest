@@ -223,3 +223,34 @@ export type UsageSnapshot = {
   providers: ProviderUsageView[];
   path?: string | null;
 };
+
+/**
+ * One day of the activity heatmap.
+ *
+ * `tokens` is optional on purpose: a day before token metering existed has real
+ * chat counts and no spend figure, which is not the same as a metered day that
+ * spent nothing. The heatmap draws those two differently.
+ */
+export type DayPoint = {
+  date: string;
+  chats: number;
+  messages: number;
+  tokens?: number;
+  requests?: number;
+};
+
+export type ProfileStats = {
+  totalChats: number;
+  totalMessages: number;
+  /** Lifetime, from per-provider totals that predate daily buckets. */
+  totalTokens: number;
+  totalRequests: number;
+  peakDayTokens: number;
+  longestChatSecs: number;
+  currentStreakDays: number;
+  longestStreakDays: number;
+  firstActivity?: number;
+  days: DayPoint[];
+  /** ISO date metering began; earlier cells have no token figure. */
+  meteringSince?: string;
+};
