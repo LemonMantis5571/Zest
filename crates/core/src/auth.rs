@@ -113,7 +113,7 @@ pub fn detect_all() -> Vec<ProviderSlot> {
 /// When true, a credentials file alone is not enough — the gateway can hold a
 /// cooled-down or incomplete session that still looks "signed in" on disk.
 pub fn uses_gateway_auth(provider_id: &str) -> bool {
-    matches!(provider_id, "codex" | "claude") && find_cliproxy().is_some()
+    matches!(provider_id, "codex" | "claude") && cliproxy_exe().is_some()
 }
 
 /// Codex readiness for Zest's default path.
@@ -123,7 +123,7 @@ pub fn uses_gateway_auth(provider_id: &str) -> bool {
 /// probes before opening a chat — see [`uses_gateway_auth`]. Otherwise fall
 /// back to the Codex CLI's `auth.json`.
 pub fn detect_codex() -> AuthStatus {
-    if find_cliproxy().is_some() {
+    if cliproxy_exe().is_some() {
         return match gateway_auth_state("codex") {
             GatewayAuthState::Present => AuthStatus::Ready { account: None },
             GatewayAuthState::Incomplete => AuthStatus::NotLoggedIn {
@@ -188,7 +188,7 @@ pub fn gateway_auth_present() -> bool {
 /// every turn returned 503 `auth_unavailable`. Desktop probes before chat.
 /// Otherwise fall back to the Claude Code CLI store.
 pub fn detect_claude() -> AuthStatus {
-    if find_cliproxy().is_some() {
+    if cliproxy_exe().is_some() {
         return match gateway_auth_state("claude") {
             GatewayAuthState::Present => AuthStatus::Ready { account: None },
             GatewayAuthState::Incomplete => AuthStatus::NotLoggedIn {
@@ -381,7 +381,9 @@ fn cliproxy_login(
     browser_title: &'static str,
     browser_body: &'static str,
 ) -> Option<LoginSpawn> {
-    let (exe, config) = find_cliproxy()?;
+    // Same resolver the serving process uses. Signing in through a different
+    // config would write credentials to an `auth-dir` the gateway never reads.
+    let (exe, config) = crate::gateway::runtime().ok().flatten()?;
     Some(LoginSpawn {
         program: exe,
         args: vec![
@@ -418,51 +420,96 @@ pub fn start_login(provider_id: &str) -> std::result::Result<LoginSpawn, String>
 }
 
 fn spawn_silent(program: &Path, args: &[String]) -> std::io::Result<()> {
+    // Hide the console entirely on Windows so Connect feels like Zest, not a
+    // terminal handoff. The system browser still opens for OAuth.
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    #[cfg(windows)]
+    return spawn_with_flags(program, args, CREATE_NO_WINDOW);
+    #[cfg(not(windows))]
+    spawn_with_flags(program, args, 0)
+}
+
+/// Start a long-lived background process that outlives this one.
+///
+/// Distinct from [`spawn_silent`], which starts a short login helper as an
+/// ordinary child. A daemon must not stay attached to whoever happened to launch
+/// it: an attached gateway inherits the parent's console handles, which keeps the
+/// parent from exiting cleanly and makes the gateway's lifetime an accident of
+/// which process started it.
+pub(crate) fn spawn_detached(program: &Path, args: &[String]) -> std::io::Result<()> {
+    // DETACHED_PROCESS: no console at all, rather than an invisible one.
+    // Supersedes CREATE_NO_WINDOW, which Windows ignores when this is set.
+    #[cfg(windows)]
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    #[cfg(windows)]
+    return spawn_with_flags(program, args, DETACHED_PROCESS);
+    #[cfg(not(windows))]
+    spawn_with_flags(program, args, 0)
+}
+
+fn spawn_with_flags(program: &Path, args: &[String], flags: u32) -> std::io::Result<()> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    // Hide the console entirely on Windows so Connect feels like Zest, not a
-    // terminal handoff. The system browser still opens for OAuth.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(flags);
     }
+    #[cfg(not(windows))]
+    let _ = flags;
 
     cmd.spawn()?;
     Ok(())
 }
 
-/// Locate CLIProxyAPI: `ZEST_CLIPROXY_PATH`, then walk up from cwd for
-/// `tools/CLIProxyAPI/cli-proxy-api[.exe]` next to `config.yaml`.
-fn find_cliproxy() -> Option<(PathBuf, PathBuf)> {
+/// Where CLIProxyAPI is installed, as `(executable, config)`.
+///
+/// Only reports an install whose config sits beside the binary — a
+/// hand-installed one. A bundled gateway has no writable directory next to it,
+/// so its config comes from [`crate::gateway::provision`] instead; use
+/// [`cliproxy_exe`] when the question is just "is a binary available".
+pub fn cliproxy_install() -> Option<(PathBuf, PathBuf)> {
+    find_cliproxy()
+}
+
+/// Locate the CLIProxyAPI **executable**, with or without a config beside it.
+///
+/// `ZEST_CLIPROXY_PATH` first — that is how the desktop points core at a bundled
+/// sidecar — then walk up from cwd for a development checkout.
+pub fn cliproxy_exe() -> Option<PathBuf> {
     if let Ok(raw) = std::env::var("ZEST_CLIPROXY_PATH") {
         let exe = PathBuf::from(raw.trim());
         if exe.is_file() {
-            let config = exe.parent()?.join("config.yaml");
-            if config.is_file() {
-                return Some((exe, config));
-            }
+            return Some(exe);
         }
     }
 
     let mut dir = std::env::current_dir().ok()?;
     for _ in 0..8 {
-        let base = dir.join("tools").join("CLIProxyAPI");
-        let exe = base.join(cliproxy_bin_name());
-        let config = base.join("config.yaml");
-        if exe.is_file() && config.is_file() {
-            return Some((exe, config));
+        let exe = dir
+            .join("tools")
+            .join("CLIProxyAPI")
+            .join(cliproxy_bin_name());
+        if exe.is_file() {
+            return Some(exe);
         }
         if !dir.pop() {
             break;
         }
     }
     None
+}
+
+/// A hand-installed CLIProxyAPI: an executable with its own `config.yaml`.
+fn find_cliproxy() -> Option<(PathBuf, PathBuf)> {
+    let exe = cliproxy_exe()?;
+    let config = exe.parent()?.join("config.yaml");
+    config.is_file().then_some((exe, config))
 }
 
 fn cliproxy_bin_name() -> &'static str {

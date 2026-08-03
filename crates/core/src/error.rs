@@ -34,11 +34,46 @@ pub enum HarnessError {
     #[error("stream idle timeout")]
     StreamIdleTimeout,
 
+    /// Retry gave up, wrapping the failure of the final attempt.
+    ///
+    /// A wrapper rather than a formatted string because the attempt count has to
+    /// reach the user *and* the classification has to survive: `reqwest::Error`
+    /// cannot be rebuilt with a note appended, so flattening it into text was
+    /// discarding `is_connect()` — the one bit that tells "the gateway is not
+    /// running" apart from "your session is bad".
+    #[error("{source} (failed after {attempts} attempts)")]
+    Exhausted {
+        attempts: u32,
+        source: Box<HarnessError>,
+    },
+
     #[error("{0}")]
     Other(String),
 }
 
 impl HarnessError {
+    /// The failure underneath any retry wrapper.
+    ///
+    /// Every classifier below asks about the *original* failure, so none of them
+    /// should have to know whether retry happened to give up on it.
+    pub fn root(&self) -> &Self {
+        match self {
+            Self::Exhausted { source, .. } => source.root(),
+            other => other,
+        }
+    }
+
+    /// Whether the request never reached a server: DNS, TCP connect, TLS, or a
+    /// timeout with no response.
+    ///
+    /// Kept apart from [`Self::is_auth_problem`] because the two need opposite
+    /// advice. Nothing is listening on the gateway's port is fixed by starting
+    /// the gateway; signing in again cannot help, and telling someone to
+    /// reconnect sends them through an OAuth flow that changes nothing.
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self.root(), Self::Http(e) if e.is_connect() || e.is_timeout())
+    }
+
     /// Whether this failure means the provider's credentials need renewing.
     ///
     /// The distinction that matters: a rate limit will pass on its own, a bad
@@ -49,7 +84,7 @@ impl HarnessError {
     /// for an account it holds but cannot use, which is indistinguishable from
     /// "temporarily overloaded" unless the body is read.
     pub fn is_auth_problem(&self) -> bool {
-        let Self::Api { status, body } = self else {
+        let Self::Api { status, body } = self.root() else {
             return false;
         };
         if matches!(status, 401 | 403) {
@@ -79,6 +114,10 @@ impl HarnessError {
         match self {
             Self::Http(e) => e.is_timeout() || e.is_connect(),
             Self::Api { status, .. } => matches!(status, 408 | 429 | 500 | 502 | 503 | 529),
+            // Deliberately not delegating to the inner error. The attempts are
+            // already spent; reporting "retryable" here would invite an outer
+            // loop to spend them again.
+            Self::Exhausted { .. } => false,
             _ => false,
         }
     }
@@ -178,5 +217,43 @@ mod tests {
         }
         assert!(!HarnessError::Cancelled.is_auth_problem());
         assert!(!HarnessError::StreamIdleTimeout.is_auth_problem());
+    }
+
+    /// The regression that made this variant necessary: three failed attempts
+    /// used to turn a 503 `auth_unavailable` into an unparseable body, and a
+    /// refused connection into a string that no longer looked like a transport
+    /// failure at all. Both classifiers must see through the wrapper.
+    #[test]
+    fn giving_up_does_not_change_what_the_failure_was() {
+        let auth = HarnessError::Exhausted {
+            attempts: 3,
+            source: Box::new(HarnessError::Api {
+                status: 503,
+                body: r#"{"error":{"message":"auth_unavailable: no auth available"}}"#.into(),
+            }),
+        };
+        assert!(auth.is_auth_problem(), "still an auth problem after retries");
+        assert!(!auth.is_unreachable(), "a served 503 did reach a server");
+        // The attempt count still reaches the user.
+        assert!(
+            auth.to_string().contains("failed after 3 attempts"),
+            "{auth}"
+        );
+        // And the body stays valid JSON, which `api_error_message` parses.
+        assert!(matches!(auth.root(), HarnessError::Api { .. }));
+
+        // An exhausted retry is not itself retryable — the attempts are spent.
+        assert!(!auth.is_transient());
+    }
+
+    #[test]
+    fn an_unreachable_endpoint_is_not_an_auth_problem() {
+        // Signing in again cannot make a dead port answer, so these two must
+        // never be confused: they carry opposite advice.
+        let refused = HarnessError::Exhausted {
+            attempts: 3,
+            source: Box::new(HarnessError::Other("connection refused".into())),
+        };
+        assert!(!refused.is_auth_problem());
     }
 }
