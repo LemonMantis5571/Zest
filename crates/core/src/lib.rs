@@ -33,10 +33,13 @@ pub use anthropic::types::{
 };
 pub use auth::{
     can_start_login, detect_all, gateway_auth_present, login_command, resolve_login, start_login,
-    AuthStatus, LoginSpawn, ProviderSlot,
+    uses_gateway_auth, AuthStatus, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
-pub use commands::{expand as expand_command, parse_command, Expansion, ParsedCommand};
+pub use commands::{
+    expand as expand_command, expand_as as expand_command_as, parse_command, Expansion,
+    ParsedCommand,
+};
 pub use config::{load_env, user_config_path, Config, ProviderConfig, Routing, Rule, Target};
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
