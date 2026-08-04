@@ -645,10 +645,9 @@ mod daily_tests {
         ledger.trim_daily();
         assert_eq!(ledger.daily.len(), DAILY_RETENTION_DAYS);
         // The oldest went, not the newest.
-        assert!(ledger.daily.contains_key(&format!(
-            "2020-01-{:05}",
-            DAILY_RETENTION_DAYS + 24
-        )));
+        assert!(ledger
+            .daily
+            .contains_key(&format!("2020-01-{:05}", DAILY_RETENTION_DAYS + 24)));
         assert!(!ledger.daily.contains_key("2020-01-00000"));
     }
 
