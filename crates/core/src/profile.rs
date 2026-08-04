@@ -120,7 +120,11 @@ pub fn derive(
         total_messages: chats.iter().map(|c| c.message_count as u32).sum(),
         total_tokens: lifetime_tokens,
         total_requests: lifetime_requests,
-        peak_day_tokens: daily.values().map(DayUsage::total_tokens).max().unwrap_or(0),
+        peak_day_tokens: daily
+            .values()
+            .map(DayUsage::total_tokens)
+            .max()
+            .unwrap_or(0),
         longest_chat_secs: chats
             .iter()
             .map(|c| c.updated_at.saturating_sub(c.created_at))
@@ -192,7 +196,11 @@ mod tests {
 
     #[test]
     fn a_streak_runs_up_to_today() {
-        let chats = vec![chat(at(10), at(10), 2), chat(at(11), at(11), 2), chat(at(12), at(12), 2)];
+        let chats = vec![
+            chat(at(10), at(10), 2),
+            chat(at(11), at(11), 2),
+            chat(at(12), at(12), 2),
+        ];
         let stats = derive(&chats, &BTreeMap::new(), 0, 0, 12);
         assert_eq!(stats.current_streak_days, 3);
         assert_eq!(stats.longest_streak_days, 3);
@@ -202,8 +210,14 @@ mod tests {
     #[test]
     fn a_streak_survives_until_a_full_day_is_missed() {
         let chats = vec![chat(at(9), at(9), 1), chat(at(10), at(10), 1)];
-        assert_eq!(derive(&chats, &BTreeMap::new(), 0, 0, 11).current_streak_days, 2);
-        assert_eq!(derive(&chats, &BTreeMap::new(), 0, 0, 12).current_streak_days, 0);
+        assert_eq!(
+            derive(&chats, &BTreeMap::new(), 0, 0, 11).current_streak_days,
+            2
+        );
+        assert_eq!(
+            derive(&chats, &BTreeMap::new(), 0, 0, 12).current_streak_days,
+            0
+        );
     }
 
     #[test]
@@ -266,8 +280,14 @@ mod tests {
         );
 
         let stats = derive(&chats, &daily, 5_000, 42, 9);
-        let old = stats.days.iter().find(|d| d.chats > 0 && d.tokens.is_none());
-        assert!(old.is_some(), "the pre-metering day keeps a null token figure");
+        let old = stats
+            .days
+            .iter()
+            .find(|d| d.chats > 0 && d.tokens.is_none());
+        assert!(
+            old.is_some(),
+            "the pre-metering day keeps a null token figure"
+        );
 
         let metered = stats.days.last().unwrap();
         assert_eq!(metered.tokens, Some(120));
