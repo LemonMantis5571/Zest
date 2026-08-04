@@ -232,7 +232,10 @@ mod tests {
                 body: r#"{"error":{"message":"auth_unavailable: no auth available"}}"#.into(),
             }),
         };
-        assert!(auth.is_auth_problem(), "still an auth problem after retries");
+        assert!(
+            auth.is_auth_problem(),
+            "still an auth problem after retries"
+        );
         assert!(!auth.is_unreachable(), "a served 503 did reach a server");
         // The attempt count still reaches the user.
         assert!(
