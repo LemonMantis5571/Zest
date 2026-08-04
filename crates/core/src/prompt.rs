@@ -54,8 +54,9 @@ Another provider is available through `delegate`, and routing maps a task \
 pieces that are cheaper to do yourself.
 - Send independent delegations **in the same turn** — they run concurrently. \
 Waiting for one before asking for the next doubles the wall-clock for nothing.
-- A worker sees none of this conversation. Give it the file paths, the \
-constraints, and the shape of the answer you want back.
+- Zest attaches a bounded, sanitized context handoff with the original/current \
+prompts, relevant assistant text, reasoning summaries, and clipped tool evidence. \
+Still give the worker a precise task boundary, file paths, and result shape.
 - Read what comes back before acting on it. A worker can be wrong, and it is \
 your name on the result.";
 

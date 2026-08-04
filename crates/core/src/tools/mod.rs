@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::anthropic::types::ToolDef;
+use crate::anthropic::types::{Message, ToolDef};
 use crate::skills::SkillSet;
 
 use self::approval::ToolRisk;
@@ -55,6 +55,15 @@ pub trait Tool: Send + Sync {
     /// Defaults to read — safe tools do not need an approval prompt.
     fn risk(&self) -> ToolRisk {
         ToolRisk::Read
+    }
+
+    /// Refresh model-visible conversation context before a tool batch runs.
+    /// Most tools are stateless; orchestration tools can project this into a
+    /// bounded handoff for a worker.
+    fn update_context(&self, _messages: &[Message]) {}
+
+    fn uses_context(&self) -> bool {
+        false
     }
 
     /// Build a prepared call once before optional approval + execution.
@@ -123,6 +132,18 @@ impl ToolRegistry {
             .iter()
             .find(|t| t.name() == name)
             .map(|t| t.risk())
+    }
+
+    pub fn update_context(&self, messages: &[Message]) {
+        for tool in &self.tools {
+            if tool.uses_context() {
+                tool.update_context(messages);
+            }
+        }
+    }
+
+    pub fn uses_context(&self) -> bool {
+        self.tools.iter().any(|tool| tool.uses_context())
     }
 
     pub fn prepare(&self, name: &str, input: Value) -> Result<PreparedToolCall, String> {
