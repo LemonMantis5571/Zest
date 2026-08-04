@@ -8,9 +8,10 @@ mod attachments;
 mod context_meter;
 mod session;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -29,7 +30,7 @@ use zest_core::{
     GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority, PersistWorker, ProfileStats,
     ProjectSessionState, ProviderConfig, ProviderRegistry, ProviderSlot, RuntimeBuilder, SkillSet,
     SkillSummary, StoredMessage, StreamEvent, Thread, ThreadLoadError, ThreadStore, ThreadSummary,
-    ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
+    ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -167,6 +168,27 @@ struct AppState {
     /// Mode + session grants. Outlives any one project so switching folders
     /// does not silently reset the user's chosen permission level.
     policy: Arc<Mutex<ApprovalPolicy>>,
+    /// In-memory summaries keep the sidebar from reparsing every full thread
+    /// JSON file after each navigation or completed turn. File metadata is the
+    /// invalidation signal, so changes made by another process are still seen.
+    chat_summary_cache: Mutex<ChatSummaryCache>,
+}
+
+#[derive(Default)]
+struct ChatSummaryCache {
+    projects: HashMap<PathBuf, ProjectSummaryCache>,
+}
+
+#[derive(Default)]
+struct ProjectSummaryCache {
+    files: HashMap<String, CachedThreadSummary>,
+}
+
+#[derive(Clone)]
+struct CachedThreadSummary {
+    modified: Option<SystemTime>,
+    length: u64,
+    summary: ThreadSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1403,14 +1425,92 @@ fn project_display_name(root: &Path) -> String {
         .unwrap_or_else(|| display_path(root))
 }
 
+/// Return thread summaries without reparsing unchanged conversation files.
+///
+/// The thread format intentionally keeps the full UI projection and provider
+/// wire history together, which makes a full JSON parse needlessly expensive
+/// for a sidebar that only needs six metadata fields. Keep the cache in the
+/// desktop process and use file metadata as a cheap cross-process invalidation
+/// signal. A changed, new, corrupt, or removed file is handled exactly like the
+/// uncached scanner below: it is reparsed or skipped rather than making the
+/// sidebar fail.
+fn list_cached_threads(
+    store: &ThreadStore,
+    provider_id: Option<&str>,
+    cache: &mut ProjectSummaryCache,
+) -> Vec<ThreadSummary> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(store.dir()) else {
+        cache.files.clear();
+        return out;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".json") || name.contains(".corrupt") {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let modified = meta.modified().ok();
+        let length = meta.len();
+        seen.insert(name.to_string());
+
+        let summary = cache
+            .files
+            .get(name)
+            .filter(|cached| cached.modified == modified && cached.length == length)
+            .map(|cached| cached.summary.clone())
+            .or_else(|| {
+                let body = std::fs::read_to_string(&path).ok()?;
+                let thread = serde_json::from_str::<Thread>(&body).ok()?;
+                if thread.version > THREAD_FORMAT_VERSION {
+                    return None;
+                }
+                let summary = thread.summary();
+                cache.files.insert(
+                    name.to_string(),
+                    CachedThreadSummary {
+                        modified,
+                        length,
+                        summary: summary.clone(),
+                    },
+                );
+                Some(summary)
+            });
+
+        if let Some(summary) = summary {
+            if let Some(wanted) = provider_id {
+                if summary.provider_id.as_deref() != Some(wanted) {
+                    continue;
+                }
+            }
+            out.push(summary);
+        } else {
+            // Do not retain an old summary after a file becomes corrupt or
+            // unsupported; a later repair must be allowed to repopulate it.
+            cache.files.remove(name);
+        }
+    }
+
+    cache.files.retain(|name, _| seen.contains(name));
+    out.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+    out
+}
+
 /// Chats grouped by known project folders (MRU), for the sidebar.
 #[tauri::command]
 fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, String> {
-    let (provider_id, active_root) = state
+    let active_root = state
         .sessions
         .with_session_mut(|session| {
             remember_workspace(&session.root);
-            (session.provider_id.clone(), session.root.clone())
+            session.root.clone()
         })
         .map_err(map_session_err)?;
 
@@ -1419,13 +1519,22 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         roots.insert(0, active_root.clone());
     }
 
+    let cache_roots: HashSet<PathBuf> = roots.iter().cloned().collect();
+    let mut cache = state
+        .chat_summary_cache
+        .lock()
+        .map_err(|_| "chat summary cache lock poisoned".to_string())?;
     let mut out = Vec::new();
     for root in roots {
         if !root.is_dir() {
             continue;
         }
         let threads = match open_store(&root) {
-            Ok(store) => store.list_for_provider(&provider_id).unwrap_or_default(),
+            Ok(store) => list_cached_threads(
+                &store,
+                None,
+                cache.projects.entry(root.clone()).or_default(),
+            ),
             Err(_) => Vec::new(),
         };
         let active = root == active_root;
@@ -1436,6 +1545,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             threads,
         });
     }
+    cache.projects.retain(|root, _| cache_roots.contains(root));
 
     // Active project first; then by newest thread activity.
     out.sort_by(|a, b| match (a.active, b.active) {
@@ -1448,6 +1558,51 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         }
     });
     Ok(out)
+}
+
+#[cfg(test)]
+mod chat_summary_tests {
+    use super::*;
+
+    #[test]
+    fn cached_summaries_follow_thread_changes_and_deletes() {
+        let root = std::env::temp_dir().join(format!("zest-chat-cache-{}", new_id("test")));
+        let store = ThreadStore::open(&root).unwrap();
+        let mut first = Thread::new().with_provider("codex");
+        let second = Thread::new().with_provider("codex");
+        first.apply_user("user-1", "hello");
+        store.save(&first).unwrap();
+        store.save(&second).unwrap();
+
+        let mut cache = ProjectSummaryCache::default();
+        let initial = list_cached_threads(&store, Some("codex"), &mut cache);
+        assert_eq!(initial.len(), 2);
+        assert_eq!(cache.files.len(), 2);
+
+        let other_provider = Thread::new().with_provider("claude");
+        store.save(&other_provider).unwrap();
+        let all_providers = list_cached_threads(&store, None, &mut cache);
+        assert_eq!(all_providers.len(), 3);
+        assert!(all_providers
+            .iter()
+            .any(|summary| summary.id == other_provider.id));
+
+        first.apply_user("user-2", "world");
+        store.save(&first).unwrap();
+        let changed = list_cached_threads(&store, Some("codex"), &mut cache);
+        let changed_first = changed
+            .iter()
+            .find(|summary| summary.id == first.id)
+            .unwrap();
+        assert_eq!(changed_first.message_count, 2);
+
+        store.delete(&second.id).unwrap();
+        let remaining = list_cached_threads(&store, Some("codex"), &mut cache);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(cache.files.len(), 2);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// Switch project (and optional thread) while keeping the current provider.
@@ -2842,6 +2997,7 @@ pub fn run() {
             workspace_root: Mutex::new(load_persisted_workspace()),
             workspace_config: Mutex::new(None),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
+            chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
         })
         .invoke_handler(tauri::generate_handler![
             list_providers,

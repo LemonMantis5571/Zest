@@ -34,6 +34,7 @@ import {
   mergeSessionOptions,
   rollbackSessionOptions,
 } from "@/lib/sessionOptions";
+import { markStartup, measureStartup } from "@/lib/startupPerf";
 import type {
   ApprovalChoice,
   ApprovalMode,
@@ -626,6 +627,7 @@ export default function App() {
   useEffect(() => {
     if (bootStarted.current) return;
     bootStarted.current = true;
+    markStartup("boot-effect");
 
     // Before any turn is recorded: core buckets usage by day, and only the
     // webview knows what day it is here. Failing is not worth blocking boot —
@@ -660,6 +662,8 @@ export default function App() {
           })),
         ]);
         setProviders(rows);
+        markStartup("backend-ready");
+        measureStartup("backend-ready", "boot-effect");
         if (folder) setWorkspacePath(folder);
         setProfile(userProfile);
         void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
@@ -671,10 +675,14 @@ export default function App() {
             // startSession probes gateway providers; catch here so a dead Claude
             // session lands on the picker with Connect instead of a chat error.
             await enterChat(ready.id);
+            markStartup("session-ready");
+            measureStartup("session-ready", "boot-effect");
             return;
           } catch (err) {
             setPickerError(String(err));
             setScreen("picker");
+            markStartup("picker-error");
+            measureStartup("picker-error", "boot-effect");
             return;
           }
         }
@@ -686,9 +694,13 @@ export default function App() {
           null;
         setSelectedId(fallback?.id ?? null);
         setScreen("picker");
+        markStartup("picker-ready");
+        measureStartup("picker-ready", "boot-effect");
       } catch (err) {
         setPickerError(String(err));
         setScreen("picker");
+        markStartup("picker-error");
+        measureStartup("picker-error", "boot-effect");
       }
     })();
   }, [applySession, enterChat, handleChatEvent]);
