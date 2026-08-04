@@ -1,5 +1,5 @@
 import { ArrowLeftIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { UserAvatarButton } from "@/components/UserAvatarButton";
@@ -26,6 +26,26 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
   const [skillCount, setSkillCount] = useState<number | null>(null);
   const [metric, setMetric] = useState<Metric>("activity");
   const [error, setError] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Escape returns to chat, matching every other dismissable surface in the app.
+  // Safe as a plain document listener because the profile is a whole screen
+  // rather than an overlay: nothing is layered above it to swallow the key
+  // first, and editing the profile navigates away before opening Settings.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onBack();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onBack]);
+
+  // Move focus onto the screen when it opens. Without this the tab order and
+  // the screen reader stay wherever they were in the chat behind it, and the
+  // new page is announced to nobody.
+  useEffect(() => {
+    rootRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -52,11 +72,25 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
   const hasTokenData = (stats?.peakDayTokens ?? 0) > 0;
 
   return (
-    <div className="mx-auto flex w-full max-w-[880px] flex-col gap-7 px-6 py-8 animate-in fade-in slide-in-from-bottom-2 duration-200">
+    <div
+      ref={rootRef}
+      tabIndex={-1}
+      role="region"
+      aria-label="Your profile"
+      className="mx-auto flex w-full max-w-[880px] flex-col gap-7 px-6 py-8 outline-none animate-in fade-in slide-in-from-bottom-2 duration-200"
+    >
       <div className="flex items-center">
         <Button type="button" variant="ghost" size="sm" onClick={onBack}>
           <ArrowLeftIcon className="size-3.5" />
           Back to chat
+          {/* The shortcut is only accessible if it is discoverable. Hidden from
+              screen readers, which get it from the button's own label. */}
+          <kbd
+            aria-hidden
+            className="ml-1.5 rounded border border-border/70 px-1 py-px font-mono text-[10px] leading-none text-muted-foreground"
+          >
+            Esc
+          </kbd>
         </Button>
       </div>
 
@@ -89,7 +123,7 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
       <section className="flex flex-col gap-3">
         <div className="flex items-baseline justify-between gap-3">
           <h2 className="m-0 text-[13px] font-semibold tracking-[-0.1px]">Activity</h2>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1" role="group" aria-label="Heatmap metric">
             <MetricTab
               active={metric === "activity"}
               onClick={() => setMetric("activity")}
@@ -193,6 +227,11 @@ function MetricTab({
       onClick={onClick}
       disabled={disabled}
       title={hint}
+      // `aria-pressed` is what makes these announce as a toggle rather than two
+      // unrelated buttons. A disabled button's `title` is not reliably read, so
+      // the reason goes in the accessible name instead.
+      aria-pressed={active}
+      aria-label={hint ? `${label} — ${hint}` : undefined}
       className={cn(
         "cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium transition-colors",
         active ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
@@ -207,12 +246,23 @@ function MetricTab({
 type Cell = { date: string; point: DayPoint | null };
 
 function Heatmap({ cells, metric }: { cells: Cell[]; metric: Metric }) {
-  const peak = useMemo(() => {
-    const values = cells
-      .map((c) => valueOf(c.point, metric))
-      .filter((v): v is number => v !== null);
-    return values.length ? Math.max(...values) : 0;
-  }, [cells, metric]);
+  const values = useMemo(
+    () =>
+      cells.map((c) => valueOf(c.point, metric)).filter((v): v is number => v !== null && v > 0),
+    [cells, metric]
+  );
+  const peak = values.length ? Math.max(...values) : 0;
+
+  // A label saying only "a heatmap" tells a screen reader user nothing they can
+  // act on. Summarise the figures the sighted reading conveys: how much, spread
+  // over how many days, and the best one.
+  const noun = metric === "tokens" ? "tokens" : "chats";
+  const total = values.reduce((sum, v) => sum + v, 0);
+  const summary = values.length
+    ? `${compact(total)} ${noun} across ${values.length} active ${
+        values.length === 1 ? "day" : "days"
+      } in the last ${WEEKS} weeks. Busiest day ${compact(peak)} ${noun}.`
+    : `No ${noun} recorded in the last ${WEEKS} weeks.`;
 
   return (
     <div className="overflow-x-auto">
@@ -220,7 +270,7 @@ function Heatmap({ cells, metric }: { cells: Cell[]; metric: Metric }) {
         className="grid w-max grid-flow-col gap-[3px]"
         style={{ gridTemplateRows: "repeat(7, minmax(0, 1fr))" }}
         role="img"
-        aria-label={`${metric === "tokens" ? "Token" : "Chat"} activity over the last ${WEEKS} weeks`}
+        aria-label={summary}
       >
         {cells.map((cell) => (
           <div
