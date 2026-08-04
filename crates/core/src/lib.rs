@@ -34,16 +34,19 @@ pub use anthropic::types::{
     DEFAULT_MODEL,
 };
 pub use auth::{
-    can_start_login, cliproxy_exe, cliproxy_install, detect_all, gateway_auth_present,
-    login_command, resolve_login, start_login, uses_gateway_auth, AuthStatus, LoginSpawn,
-    ProviderSlot,
+    adopt_bundled_gateway, can_start_login, cliproxy_exe, cliproxy_install, detect_all,
+    gateway_auth_present, login_command, resolve_login, start_login, uses_gateway_auth, AuthStatus,
+    LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use commands::{
     expand as expand_command, expand_as as expand_command_as, parse_command, Expansion,
     ParsedCommand,
 };
-pub use config::{load_env, user_config_path, Config, ProviderConfig, Routing, Rule, Target};
+pub use config::{
+    ensure_user_config, load_env, user_config_path, Config, ProviderConfig, Routing, Rule, Target,
+    DEFAULT_USER_CONFIG,
+};
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
 pub use gateway::{
@@ -53,9 +56,7 @@ pub use gateway::{
 };
 pub use persist::{PersistPriority, PersistWorker, DELTA_CHECKPOINT_MS};
 pub use prefs::{ProjectSessionState, ProviderSessionPrefs};
-pub use profile::{
-    derive as derive_profile_stats, ChatFacts, DayPoint, ProfileStats,
-};
+pub use profile::{derive as derive_profile_stats, ChatFacts, DayPoint, ProfileStats};
 pub use prompt::{
     compose_for_project, compose_system, compose_system_with_docs, custom_system_path, env_context,
     load_custom_system, load_project_docs, save_custom_system, truncate_chars, DEFAULT_SYSTEM,

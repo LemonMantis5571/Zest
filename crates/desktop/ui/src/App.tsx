@@ -176,6 +176,11 @@ function formatInvokeError(err: unknown): string {
   return raw;
 }
 
+function shouldOfferProviderReconnect(err: unknown): boolean {
+  const message = formatInvokeError(err).toLowerCase();
+  return message.includes("needs connect again") || message.includes("auth_unavailable");
+}
+
 const backend = getBackend();
 
 export default function App() {
@@ -313,6 +318,17 @@ export default function App() {
         if (row && fileAppeared) {
           stopPolling();
           await finishVerifiedLogin(row);
+          return;
+        }
+
+        const login = await backend.loginStatus();
+        if (login.state === "exited") {
+          stopPolling();
+          setWaitingHint("Sign-in stopped");
+          setWaitingError(
+            login.detail ??
+              "The browser sign-in stopped before Zest received the credentials."
+          );
           return;
         }
       } catch {
@@ -500,7 +516,12 @@ export default function App() {
         applySession(info);
         return info;
       } catch (err) {
-        markProviderVerifyFailed(providerId);
+        // Setup failures (for example, a new folder without a provider config)
+        // are not authentication failures. Marking every start error as a
+        // failed verification made the picker incorrectly say "Reconnect".
+        if (shouldOfferProviderReconnect(err)) {
+          markProviderVerifyFailed(providerId);
+        }
         throw err;
       }
     },
@@ -666,6 +687,7 @@ export default function App() {
 
   async function cancelWait() {
     stopPolling();
+    await backend.cancelLogin().catch(() => {});
     setWaitingError(null);
     if (session) {
       setScreen("chat");
@@ -887,6 +909,7 @@ export default function App() {
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
       if (result.sessionEnded || session) {
         const providerId = session?.provider ?? selectedId;
+        if (providerId) await loadProviders(providerId);
         setSession(null);
         sessionIdRef.current = null;
         threadIdRef.current = null;
@@ -896,7 +919,7 @@ export default function App() {
           try {
             await enterChat(providerId);
           } catch (err) {
-            setPickerError(String(err));
+            setPickerError(formatInvokeError(err));
             setScreen("picker");
           }
         } else {

@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  CheckIcon,
-  CopyIcon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
@@ -19,6 +17,7 @@ import {
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { Composer } from "@/components/Composer";
 import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
+import { MarkdownActions } from "@/components/MarkdownActions";
 import { looksLikeDocument } from "@/lib/documentShape";
 import { buildablePlanId } from "@/lib/planActions";
 import { Markdown } from "@/components/Markdown";
@@ -69,7 +68,6 @@ function shortRoot(root: string): string {
   if (parts.length <= 2) return cleaned;
   return parts.slice(-2).join("/");
 }
-
 type Props = {
   session: SessionInfo;
   messages: ChatMessage[];
@@ -365,7 +363,7 @@ export function ChatScreen({
         </header>
 
         <div className="relative min-h-0 flex-1">
-          <MessageScrollerProvider>
+          <MessageScrollerProvider autoScroll scrollEdgeThreshold={24}>
             <MessageScroller className="absolute inset-0 pb-40">
               <MessageScrollerViewport className="scroll-fade-b">
                 <MessageScrollerContent className="mx-auto w-full max-w-[var(--chat-max)] gap-6 px-4 py-6">
@@ -512,7 +510,10 @@ export function ChatScreen({
                                     msg.streaming && !msg.text && "shimmer-text"
                                   )}
                                 >
-                                  <Markdown className="text-xs text-[#8a8f98] [&_a]:text-[#6b86d4] [&_p]:mb-1.5 [&_p]:leading-relaxed [&_p]:text-[#8a8f98] [&_strong]:font-medium [&_strong]:text-[#9aa0a8]">
+                                  <Markdown
+                                    streaming={msg.streaming}
+                                    className="text-xs text-[#8a8f98] [&_a]:text-[#6b86d4] [&_p]:mb-1.5 [&_p]:leading-relaxed [&_p]:text-[#8a8f98] [&_strong]:font-medium [&_strong]:text-[#9aa0a8]"
+                                  >
                                     {msg.thinking}
                                   </Markdown>
                                 </MarkerContent>
@@ -548,7 +549,7 @@ export function ChatScreen({
                                       : undefined
                                   }
                                 >
-                                  <Markdown>{msg.text}</Markdown>
+                                  <Markdown streaming={msg.streaming}>{msg.text}</Markdown>
                                   {msg.streaming ? (
                                     <span className="ml-1.5 inline-flex items-center gap-1.5 align-middle">
                                       <ZestPulse size={12} />
@@ -559,7 +560,7 @@ export function ChatScreen({
                               ) : (
                                 <div className="group/assistant relative">
                                   <div className="relative">
-                                    <Markdown>{msg.text}</Markdown>
+                                    <Markdown streaming={msg.streaming}>{msg.text}</Markdown>
                                     {msg.streaming ? (
                                       <span className="ml-1.5 inline-flex items-center gap-1.5 align-middle">
                                         <ZestPulse size={12} />
@@ -568,8 +569,8 @@ export function ChatScreen({
                                     ) : null}
                                   </div>
                                   {!msg.streaming ? (
-                                    <div className="mt-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/assistant:opacity-100 focus-within:opacity-100">
-                                      <CopyButton text={msg.text} />
+                                    <div className="mt-2 flex items-center gap-0.5 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100">
+                                      <MarkdownActions text={msg.text} />
                                     </div>
                                   ) : null}
                                 </div>
@@ -731,30 +732,5 @@ export function ChatScreen({
 
       <DiffViewer target={diffTarget} onClose={() => setDiffTarget(null)} />
     </section>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon-sm"
-      className={cn("text-muted-foreground hover:text-foreground")}
-      title="Copy"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          window.setTimeout(() => setCopied(false), 1200);
-        } catch {
-          /* ignore */
-        }
-      }}
-    >
-      {copied ? <CheckIcon className="size-3.5 text-[var(--success)]" /> : <CopyIcon className="size-3.5" />}
-    </Button>
   );
 }
