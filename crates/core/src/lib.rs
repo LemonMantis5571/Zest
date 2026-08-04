@@ -14,6 +14,7 @@ pub mod config;
 pub mod error;
 pub mod fsutil;
 pub mod gateway;
+pub mod handoff;
 pub mod persist;
 pub mod prefs;
 pub mod profile;
@@ -54,6 +55,7 @@ pub use gateway::{
     runtime as gateway_runtime, GatewayState, Provisioned, DEFAULT_PORT as GATEWAY_DEFAULT_PORT,
     GATEWAY_KEY_ENV,
 };
+pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
 pub use persist::{PersistPriority, PersistWorker, DELTA_CHECKPOINT_MS};
 pub use prefs::{ProjectSessionState, ProviderSessionPrefs};
 pub use profile::{derive as derive_profile_stats, ChatFacts, DayPoint, ProfileStats};

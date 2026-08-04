@@ -247,6 +247,13 @@ impl Agent {
                     }
 
                     Self::check_cancel(cancel)?;
+                    if self.tools.uses_context() {
+                        let mut sensitive_ids = self.sensitive_tool_ids.clone();
+                        sensitive_ids.extend(turn_sensitive.iter().cloned());
+                        let handoff_messages =
+                            redact_sensitive_staged(staged.clone(), &sensitive_ids);
+                        self.tools.update_context(&handoff_messages);
+                    }
                     let outcomes = self.execute_tool_calls(&calls, on_event, cancel).await;
                     Self::check_cancel(cancel)?;
 
@@ -766,6 +773,72 @@ mod tests {
                 limits: None,
             })
         }
+    }
+
+    struct ContextCaptureTool {
+        seen: Arc<Mutex<Vec<Message>>>,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for ContextCaptureTool {
+        fn name(&self) -> &str {
+            "capture_context"
+        }
+        fn description(&self) -> &str {
+            "test context projection"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object", "properties": {} })
+        }
+        fn update_context(&self, messages: &[Message]) {
+            if let Ok(mut seen) = self.seen.lock() {
+                *seen = messages.to_vec();
+            }
+        }
+        fn uses_context(&self) -> bool {
+            true
+        }
+        async fn run(
+            &self,
+            _input: serde_json::Value,
+        ) -> std::result::Result<crate::tools::ToolOutcome, String> {
+            Ok(crate::tools::ToolOutcome::text("captured"))
+        }
+    }
+
+    #[tokio::test]
+    async fn contextual_tools_receive_current_staged_history_with_secrets_redacted() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(ContextCaptureTool { seen: seen.clone() }));
+        let provider: Arc<dyn Provider> = Arc::new(ToolCallingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec!["capture_context"],
+        });
+        let mut agent = Agent::new(provider, tools);
+        agent.messages = vec![
+            Message::assistant(vec![json!({
+                "type": "tool_use",
+                "id": "sensitive-1",
+                "name": "read_file",
+                "input": { "path": ".env" }
+            })]),
+            Message::user_blocks(vec![tool_result(
+                "sensitive-1",
+                "API_KEY=top-secret",
+                false,
+            )]),
+        ];
+        agent.sensitive_tool_ids.push("sensitive-1".into());
+
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        agent.send("current user prompt", &mut sink).await.unwrap();
+
+        let json = serde_json::to_string(&*seen.lock().unwrap()).unwrap();
+        assert!(json.contains("current user prompt"));
+        assert!(json.contains("capture_context"));
+        assert!(json.contains(REDACTED_SENSITIVE_RESULT));
+        assert!(!json.contains("top-secret"));
     }
 
     /// The invariant that makes concurrency safe: tools may finish in any
