@@ -2780,6 +2780,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             sessions: SessionController::new(),
             approvals: Arc::new(ApprovalHub::new()),
