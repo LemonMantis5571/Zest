@@ -28,7 +28,7 @@ It is **not LimeBot**, and that distinction matters for every decision here:
 | Shape | Personal AI assistant | Coding agent |
 | Interaction | Long-running, multi-channel (Discord, Telegram, WhatsApp, web) | Invoked in a project directory, one session at a time |
 | Emphasis | Memory, persona, conversation | Filesystem, tools, approvals, diffs |
-| Stack | Python + Node CLI + React web UI | Rust, single binary |
+| Stack | Python + Node CLI + React web UI | Rust + Tauri, one installer with a bundled gateway sidecar |
 | Relationship | Reference implementation | Shares design lessons, no code and no runtime |
 
 Zest borrows LimeBot's accumulated design — skill layout, prompt work, config shape — as
@@ -57,10 +57,11 @@ Planned, and the actual point of the project:
 - **Router + delegated workers** — parent chat stays provider-pinned; multi-provider work goes
   through `delegate` workers resolved by routing policy + ledger fallback (v1 decision).
 - **Usage ledger** — per-provider consumption and remaining headroom, persisted across runs.
-- **Gateway (transitional)** — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) already
-  holds OAuth logins for Codex, Claude, Gemini/Antigravity, Grok and Kimi and re-exposes them as
-  the Messages API. Fastest path to a second and third provider; see `memory/decisions.md` for why
-  it is transitional rather than permanent.
+- **Gateway (bundled runtime)** — Zest pins and ships
+  [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Tauri sidecar. It holds OAuth
+  logins for Codex, Claude, Gemini/Antigravity, Grok and Kimi and re-exposes them through compatible
+  APIs. Zest owns provisioning, loopback security, supervision, diagnostics and UX; CLIProxyAPI
+  owns vendor OAuth and protocol translation. A hand-installed gateway remains an override.
 
 ## Important Constraints
 
@@ -75,9 +76,10 @@ Planned, and the actual point of the project:
   "remaining quota" endpoint. Where a provider reports headroom, read it; where it does not, meter
   locally against a configured budget and label the number as an estimate. Never present a guess
   as a reading.
-- **No shipped runtime dependencies, long term.** A proxy is acceptable while bootstrapping
-  providers and should not survive into a release; supervising a second process is the problem a
-  single binary exists to avoid.
+- **One install, managed runtime.** The desktop installer includes the pinned CLIProxyAPI sidecar,
+  so users install and configure nothing separately. Native provider clients may replace it one
+  provider at a time behind `Provider` only when documented APIs make that safer; do not rebuild a
+  second monolithic gateway inside Zest.
 - **The permission layer gates dangerous tools.** `write_file` and `edit_file` ship with an
   approval gate and atomic replace. `bash` ships behind the same gate: a small set of
   genuinely read-only, metacharacter-free commands (`cargo check`, `git status`, …) runs

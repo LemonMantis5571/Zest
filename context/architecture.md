@@ -13,6 +13,7 @@ approvals, and project-scoped thread persistence.
 crates/core/     zest-core
   anthropic/     Messages API client + SSE (message_stop required; idle/connect timeouts)
   auth.rs        detect sign-ins; start_login spawns vendor CLI
+  gateway.rs     provision and supervise the bundled CLIProxyAPI sidecar
   cancel.rs      async CancelToken (races stream/tools/approvals; HTTP abort on drop)
   thread.rs      provider-owned threads; typed load errors; never rewrite newer formats
   prefs.rs       project-scoped provider sticky state (`.zest/session-state.json`)
@@ -25,7 +26,7 @@ crates/core/     zest-core
   agent.rs       transactional loop, concurrent ungated tools, sequential gated
                  ones; ledger-before-late-cancel; multimodal send
 crates/cli/      zest — REPL + doctor --live
-crates/desktop/  zest-desktop — Tauri chat shell (ui/ + session controller)
+crates/desktop/  zest-desktop — Tauri chat shell + pinned gateway sidecar
                  attachments, context meter, known workspaces, profile avatar
 ```
 
@@ -77,9 +78,8 @@ served a live turn, because no provider has ever been reachable with a working c
           │ picks provider + model
           ▼
     ┌──────────────────── Provider (trait) ────────────────────┐
-    │  Anthropic          Codex             Antigravity        │
-    │  native client      via gateway       via gateway        │
-    │  Claude login       Codex login       Google login       │
+    │  Anthropic API      Codex/Claude subscriptions   Antigravity │
+    │  native API key     via bundled gateway          via gateway │
     └──────────────────────────────────────────────────────────┘
           │ streams back
           ▼
@@ -102,8 +102,9 @@ sign in and write credentials; Zest reads whether that happened. `AuthStatus` di
 `NotLoggedIn` from `Unknown` — Claude and Antigravity keep credentials somewhere unreadable on
 Windows, and reporting those as logged-out would push the user to re-authenticate for nothing.
 The desktop **Connect** button calls `start_login` / `resolve_login`: silent spawn (no console on
-Windows), system browser for ChatGPT/Claude, then re-detect. Codex prefers CLIProxyAPI
-`-codex-login` when that binary is present under `tools/CLIProxyAPI`.
+Windows), system browser for ChatGPT/Claude, then re-detect. Subscription OAuth runs through the
+same bundled CLIProxyAPI binary and generated config that serve chat. A hand-installed gateway with
+its own config keeps precedence.
 
 Crucially, *how* a provider is reached is an implementation detail behind the trait. Anthropic is
 native today. Codex and Antigravity can be reached through CLIProxyAPI to get working quickly, then
@@ -135,14 +136,15 @@ attributing exhaustion.
 - **Anthropic Messages API** — `https://api.anthropic.com/v1/messages`, `anthropic-version: 2023-06-01`.
   Auth via `x-api-key`; an `Authorization: Bearer` header is sent alongside because gateways differ
   on which they read, and the real API ignores the extra one.
-- **Messages-API gateways** — `ZEST_BASE_URL` swaps the origin. When the host is not Anthropic's,
-  `thinking` and `output_config.effort` are omitted, since a GPT or Gemini backend has no use for
-  them. Development convenience only; never a shipped dependency.
+- **Messages-API gateways** — the desktop bundles a pinned CLIProxyAPI sidecar and `ZEST_BASE_URL`
+  may swap the origin. When the host is not Anthropic's, `thinking` and `output_config.effort` are
+  omitted, since a GPT or Gemini backend has no use for them.
 - **agentic-lemon** — generated `AGENTS.md`, `PROJECT_CONTEXT.md`, `context/`, `memory/`,
   `skills/`, `references/`. Documentation only, no runtime role.
 
 ### Dependencies
 
 `tokio`, `reqwest` (rustls, no OpenSSL), `serde` / `serde_json`, `futures-util`, `async-trait`,
-`thiserror`. Deliberately no Anthropic SDK — none exists officially for Rust, and the hand-written
-client is a few hundred lines with full control over streaming.
+`thiserror`. The desktop package additionally contains the pinned CLIProxyAPI executable and MIT
+notice. Deliberately no Anthropic SDK — none exists officially for Rust, and the hand-written client
+is a few hundred lines with full control over streaming.
