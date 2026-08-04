@@ -15,6 +15,8 @@ import {
   restoreApprovalCard,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
+import { isLongTurn } from "@/lib/notificationPolicy";
+import { isWindowActive, notifyWhenAway } from "@/lib/notifications";
 import { revealCount } from "@/lib/reveal";
 import {
   DEFAULT_CODEX_MODEL,
@@ -236,6 +238,8 @@ export default function App() {
   const threadIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const currentTurnIdRef = useRef<string | null>(null);
+  const turnStartedAtRef = useRef<number | null>(null);
+  const notifiedApprovalIdsRef = useRef(new Set<string>());
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const attachmentsRef = useRef(attachments);
@@ -395,6 +399,51 @@ export default function App() {
         description: effects.warningToast,
       });
     }
+
+    if (event.kind === "user" && state.currentTurnId === event.turn_id) {
+      turnStartedAtRef.current = Date.now();
+      notifiedApprovalIdsRef.current.clear();
+    }
+
+    if (event.kind === "approval_needed") {
+      if (!notifiedApprovalIdsRef.current.has(event.approval_id)) {
+        notifiedApprovalIdsRef.current.add(event.approval_id);
+        const description = event.summary
+          ? `${event.tool_name}: ${event.summary}`
+          : `${event.tool_name} is waiting for your approval.`;
+        if (isWindowActive()) {
+          toast.add({
+            type: "warning",
+            title: "Approval needed",
+            description,
+          });
+        } else {
+          void notifyWhenAway("Approval needed", description);
+        }
+      }
+    }
+
+    if (event.kind === "done") {
+      const startedAt = turnStartedAtRef.current;
+      if (startedAt != null && isLongTurn(Date.now() - startedAt)) {
+        if (isWindowActive()) {
+          toast.add({
+            type: "success",
+            title: "Response ready",
+            description: "Zest finished the turn.",
+          });
+        } else {
+          void notifyWhenAway("Zest finished", "Your response is ready.");
+        }
+      }
+      turnStartedAtRef.current = null;
+      notifiedApprovalIdsRef.current.clear();
+    }
+
+    if (event.kind === "error" || event.kind === "cancelled") {
+      turnStartedAtRef.current = null;
+      notifiedApprovalIdsRef.current.clear();
+    }
   }, []);
 
   const flushDeltaQueue = useCallback(
@@ -482,6 +531,8 @@ export default function App() {
     messagesRef.current = messages;
     activeAssistantId.current = null;
     currentTurnIdRef.current = null;
+    turnStartedAtRef.current = null;
+    notifiedApprovalIdsRef.current.clear();
     setSending(false);
     sendingRef.current = false;
     threadIdRef.current = info.threadId;
