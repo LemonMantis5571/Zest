@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
   SettingsIcon,
-  SquarePenIcon,
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
@@ -150,6 +149,234 @@ function focusComposer() {
   el.setSelectionRange(len, len);
 }
 
+type ChatMessageRowProps = {
+  message: ChatMessage;
+  isLast: boolean;
+  sending: boolean;
+  approvalMode: ApprovalMode;
+  planToBuild: string | null;
+  onBuildPlan?: () => void;
+  onResolveApproval: (
+    approvalId: string,
+    decision: ApprovalChoice
+  ) => Promise<void>;
+  onOpenDiff: (path: string, diff: string) => void;
+  onReconnectProvider?: (providerId: string) => void;
+};
+
+/**
+ * Keep settled messages out of the streaming render path. Appending a delta
+ * still updates the active row, but unchanged rows now retain their existing
+ * React subtree instead of rebuilding every tool card and Markdown document.
+ */
+const ChatMessageRow = memo(function ChatMessageRow({
+  message: msg,
+  isLast,
+  sending,
+  approvalMode,
+  planToBuild,
+  onBuildPlan,
+  onResolveApproval,
+  onOpenDiff,
+  onReconnectProvider,
+}: ChatMessageRowProps) {
+  if (msg.role === "user") {
+    return (
+      <MessageScrollerItem messageId={msg.id} scrollAnchor={isLast}>
+        <Message align="end" className="justify-end">
+          <MessageContent className="items-end gap-1.5">
+            {msg.attachments && msg.attachments.length > 0 ? (
+              <AttachmentGroup className="justify-end">
+                {msg.attachments.map((att) => (
+                  <Attachment key={`${msg.id}-${att.name}`} size="sm">
+                    <AttachmentMedia variant="icon">
+                      {att.kind === "pdf" ? (
+                        <FileTextIcon />
+                      ) : att.kind === "image" ? (
+                        <ImageIcon />
+                      ) : (
+                        <FileIcon />
+                      )}
+                    </AttachmentMedia>
+                    <AttachmentContent>
+                      <AttachmentTitle>{att.name}</AttachmentTitle>
+                    </AttachmentContent>
+                  </Attachment>
+                ))}
+              </AttachmentGroup>
+            ) : null}
+            {msg.text.trim() ? (
+              <Bubble variant="secondary" align="end" className="max-w-[85%]">
+                <BubbleContent className="whitespace-pre-wrap bg-[var(--user-bubble)] text-[13.5px] leading-relaxed text-foreground">
+                  <LinkifyText text={msg.text} />
+                </BubbleContent>
+              </Bubble>
+            ) : null}
+          </MessageContent>
+        </Message>
+      </MessageScrollerItem>
+    );
+  }
+
+  return (
+    <MessageScrollerItem messageId={msg.id} scrollAnchor={isLast}>
+      <Message align="start">
+        <MessageContent className="max-w-full gap-2.5">
+          <div className="text-[11px] font-medium tracking-wide text-muted-foreground/80">
+            Zest
+          </div>
+
+          {msg.tools.length > 0 ? (
+            <div className="flex w-full max-w-full flex-col gap-0.5">
+              {groupToolRuns(msg.tools).map((run) =>
+                run.kind === "group" ? (
+                  <ToolRunGroup
+                    key={`group-${run.tools[0].id}`}
+                    tools={run.tools}
+                    summary={run.summary}
+                    onResolveApproval={onResolveApproval}
+                    onOpenDiff={onOpenDiff}
+                  />
+                ) : (
+                  <ToolCallRow
+                    key={run.tool.id}
+                    tool={run.tool}
+                    onResolveApproval={onResolveApproval}
+                    onOpenDiff={onOpenDiff}
+                  />
+                )
+              )}
+            </div>
+          ) : null}
+
+          {msg.thinking ? (
+            <Marker
+              role="status"
+              className="items-start gap-2 border-0 bg-transparent px-0 py-0.5 text-xs text-[#8a8f98]"
+            >
+              {msg.streaming && !msg.text ? (
+                <MarkerIcon className="mt-0.5">
+                  <ZestPulse size={14} />
+                </MarkerIcon>
+              ) : null}
+              <MarkerContent
+                className={cn(
+                  "min-w-0 text-[#8a8f98]",
+                  msg.streaming && !msg.text && "shimmer-text"
+                )}
+              >
+                <Markdown
+                  streaming={msg.streaming}
+                  className="text-xs text-[#8a8f98] [&_a]:text-[#6b86d4] [&_p]:mb-1.5 [&_p]:leading-relaxed [&_p]:text-[#8a8f98] [&_strong]:font-medium [&_strong]:text-[#9aa0a8]"
+                >
+                  {msg.thinking}
+                </Markdown>
+              </MarkerContent>
+            </Marker>
+          ) : null}
+
+          {msg.text ? (
+            msg.command && looksLikeDocument(msg.text) ? (
+              <CommandOutputCard
+                command={msg.command}
+                text={msg.text}
+                streaming={msg.streaming}
+                action={
+                  msg.id === planToBuild && onBuildPlan
+                    ? {
+                        label: "Build plan",
+                        hint:
+                          approvalMode === "plan"
+                            ? "Leaves Plan mode so the steps can run"
+                            : undefined,
+                        disabled: sending,
+                        onClick: onBuildPlan,
+                      }
+                    : undefined
+                }
+              >
+                <Markdown streaming={msg.streaming}>{msg.text}</Markdown>
+                {msg.streaming ? (
+                  <span className="ml-1.5 inline-flex items-center gap-1.5 align-middle">
+                    <ZestPulse size={12} />
+                    <span className="inline-block h-4 w-1.5 animate-pulse bg-foreground/70" />
+                  </span>
+                ) : null}
+              </CommandOutputCard>
+            ) : (
+              <div className="group/assistant relative">
+                <div className="relative">
+                  <Markdown streaming={msg.streaming}>{msg.text}</Markdown>
+                  {msg.streaming ? (
+                    <span className="ml-1.5 inline-flex items-center gap-1.5 align-middle">
+                      <ZestPulse size={12} />
+                      <span className="inline-block h-4 w-1.5 animate-pulse bg-foreground/70" />
+                    </span>
+                  ) : null}
+                </div>
+                {!msg.streaming ? (
+                  <div className="mt-2 flex items-center gap-0.5 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100">
+                    <MarkdownActions text={msg.text} />
+                  </div>
+                ) : null}
+              </div>
+            )
+          ) : null}
+
+          {msg.error ? (
+            <Bubble variant="destructive" align="start">
+              <BubbleContent>
+                {msg.error}
+                {msg.reconnectProvider && onReconnectProvider ? (
+                  <div className="mt-2.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        onReconnectProvider(msg.reconnectProvider as string)
+                      }
+                    >
+                      Reconnect {msg.reconnectProvider}
+                    </Button>
+                  </div>
+                ) : null}
+              </BubbleContent>
+            </Bubble>
+          ) : null}
+
+          {msg.streaming &&
+          !msg.text &&
+          !msg.thinking &&
+          msg.tools.length === 0 ? (
+            <Marker role="status">
+              <MarkerIcon>
+                <ZestPulse size={14} />
+              </MarkerIcon>
+              <MarkerContent className="shimmer-text">Thinking...</MarkerContent>
+            </Marker>
+          ) : null}
+
+          {msg.streaming &&
+          !msg.text &&
+          msg.tools.length > 0 &&
+          !msg.tools.some(
+            (tool) =>
+              tool.status === "running" || tool.status === "awaiting_approval"
+          ) ? (
+            <Marker role="status">
+              <MarkerIcon>
+                <ZestPulse size={14} />
+              </MarkerIcon>
+              <MarkerContent className="shimmer-text">Working...</MarkerContent>
+            </Marker>
+          ) : null}
+        </MessageContent>
+      </Message>
+    </MessageScrollerItem>
+  );
+});
+
 export function ChatScreen({
   session,
   messages,
@@ -197,6 +424,10 @@ export function ChatScreen({
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
+  const openDiff = useCallback(
+    (path: string, diff: string) => setDiffTarget({ path, diff }),
+    []
+  );
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = shortRoot(session.root);
   const awaitingApprovals = useMemo(
@@ -287,10 +518,12 @@ export function ChatScreen({
         open={sidebarOpen}
         activeThreadId={session.threadId}
         activeProjectPath={session.root}
+        activeProviderId={session.provider}
         sending={sending}
         onOpenChange={setSidebar}
         onNewChat={onNewChat}
         onLoadThread={onLoadThread}
+        onSwitchProvider={onSwitchProvider}
         onOpenProjectChat={onOpenProjectChat}
         onDeleteThread={onDeleteThread}
         onOpenFolder={onOpenFolder}
@@ -326,16 +559,6 @@ export function ChatScreen({
             </div>
           </div>
           <div className="flex items-center gap-0.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="New chat (Ctrl+N)"
-              onClick={onNewChat}
-              disabled={sending}
-            >
-              <SquarePenIcon />
-            </Button>
             <Button
               type="button"
               variant="ghost"
@@ -428,230 +651,20 @@ export function ChatScreen({
                     </MessageScrollerItem>
                   ) : null}
 
-                  {messages.map((msg, index) => {
-                    const isLast = index === messages.length - 1;
-                    if (msg.role === "user") {
-                      return (
-                        <MessageScrollerItem
-                          key={msg.id}
-                          messageId={msg.id}
-                          scrollAnchor={isLast}
-                        >
-                          <Message align="end" className="justify-end">
-                            <MessageContent className="items-end gap-1.5">
-                              {msg.attachments && msg.attachments.length > 0 ? (
-                                <AttachmentGroup className="justify-end">
-                                  {msg.attachments.map((att) => (
-                                    <Attachment key={`${msg.id}-${att.name}`} size="sm">
-                                      <AttachmentMedia variant="icon">
-                                        {att.kind === "pdf" ? (
-                                          <FileTextIcon />
-                                        ) : att.kind === "image" ? (
-                                          <ImageIcon />
-                                        ) : (
-                                          <FileIcon />
-                                        )}
-                                      </AttachmentMedia>
-                                      <AttachmentContent>
-                                        <AttachmentTitle>{att.name}</AttachmentTitle>
-                                      </AttachmentContent>
-                                    </Attachment>
-                                  ))}
-                                </AttachmentGroup>
-                              ) : null}
-                              {msg.text.trim() ? (
-                                <Bubble variant="secondary" align="end" className="max-w-[85%]">
-                                  <BubbleContent className="whitespace-pre-wrap bg-[var(--user-bubble)] text-[13.5px] leading-relaxed text-foreground">
-                                    <LinkifyText text={msg.text} />
-                                  </BubbleContent>
-                                </Bubble>
-                              ) : null}
-                            </MessageContent>
-                          </Message>
-                        </MessageScrollerItem>
-                      );
-                    }
-
-                    return (
-                      <MessageScrollerItem
-                        key={msg.id}
-                        messageId={msg.id}
-                        scrollAnchor={isLast}
-                      >
-                        <Message align="start">
-                          <MessageContent className="max-w-full gap-2.5">
-                            <div className="text-[11px] font-medium tracking-wide text-muted-foreground/80">
-                              Zest
-                            </div>
-
-                            {msg.tools.length > 0 ? (
-                              <div className="flex w-full max-w-full flex-col gap-0.5">
-                                {groupToolRuns(msg.tools).map((run) =>
-                                  run.kind === "group" ? (
-                                    <ToolRunGroup
-                                      key={`group-${run.tools[0].id}`}
-                                      tools={run.tools}
-                                      summary={run.summary}
-                                      onResolveApproval={onResolveApproval}
-                                      onOpenDiff={(path, diff) =>
-                                        setDiffTarget({ path, diff })
-                                      }
-                                    />
-                                  ) : (
-                                    <ToolCallRow
-                                      key={run.tool.id}
-                                      tool={run.tool}
-                                      onResolveApproval={onResolveApproval}
-                                      onOpenDiff={(path, diff) =>
-                                        setDiffTarget({ path, diff })
-                                      }
-                                    />
-                                  )
-                                )}
-                              </div>
-                            ) : null}
-
-                            {msg.thinking ? (
-                              <Marker
-                                role="status"
-                                className="items-start gap-2 border-0 bg-transparent px-0 py-0.5 text-xs text-[#8a8f98]"
-                              >
-                                {msg.streaming && !msg.text ? (
-                                  <MarkerIcon className="mt-0.5">
-                                    <ZestPulse size={14} />
-                                  </MarkerIcon>
-                                ) : null}
-                                <MarkerContent
-                                  className={cn(
-                                    "min-w-0 text-[#8a8f98]",
-                                    msg.streaming && !msg.text && "shimmer-text"
-                                  )}
-                                >
-                                  <Markdown
-                                    streaming={msg.streaming}
-                                    className="text-xs text-[#8a8f98] [&_a]:text-[#6b86d4] [&_p]:mb-1.5 [&_p]:leading-relaxed [&_p]:text-[#8a8f98] [&_strong]:font-medium [&_strong]:text-[#9aa0a8]"
-                                  >
-                                    {msg.thinking}
-                                  </Markdown>
-                                </MarkerContent>
-                              </Marker>
-                            ) : null}
-
-                            {msg.text ? (
-                              // The answer to a command reads as a document,
-                              // not a chat reply — frame it as one. Tool rows
-                              // stay outside the card: they are how the answer
-                              // was reached, not part of it.
-                              //
-                              // The shape test is what keeps Plan mode honest.
-                              // It tags every turn it produces, so a one-line
-                              // clarifying question would otherwise arrive
-                              // titled and savable as `plan.md`.
-                              msg.command && looksLikeDocument(msg.text) ? (
-                                <CommandOutputCard
-                                  command={msg.command}
-                                  text={msg.text}
-                                  streaming={msg.streaming}
-                                  action={
-                                    msg.id === planToBuild && onBuildPlan
-                                      ? {
-                                          label: "Build plan",
-                                          hint:
-                                            approvalMode === "plan"
-                                              ? "Leaves Plan mode so the steps can run"
-                                              : undefined,
-                                          disabled: sending,
-                                          onClick: onBuildPlan,
-                                        }
-                                      : undefined
-                                  }
-                                >
-                                  <Markdown streaming={msg.streaming}>{msg.text}</Markdown>
-                                  {msg.streaming ? (
-                                    <span className="ml-1.5 inline-flex items-center gap-1.5 align-middle">
-                                      <ZestPulse size={12} />
-                                      <span className="inline-block h-4 w-1.5 animate-pulse bg-foreground/70" />
-                                    </span>
-                                  ) : null}
-                                </CommandOutputCard>
-                              ) : (
-                                <div className="group/assistant relative">
-                                  <div className="relative">
-                                    <Markdown streaming={msg.streaming}>{msg.text}</Markdown>
-                                    {msg.streaming ? (
-                                      <span className="ml-1.5 inline-flex items-center gap-1.5 align-middle">
-                                        <ZestPulse size={12} />
-                                        <span className="inline-block h-4 w-1.5 animate-pulse bg-foreground/70" />
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                  {!msg.streaming ? (
-                                    <div className="mt-2 flex items-center gap-0.5 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100">
-                                      <MarkdownActions text={msg.text} />
-                                    </div>
-                                  ) : null}
-                                </div>
-                              )
-                            ) : null}
-
-                            {msg.error ? (
-                              <Bubble variant="destructive" align="start">
-                                <BubbleContent>
-                                  {msg.error}
-                                  {/* Only auth failures get this — signing in
-                                      again fixes nothing else, and the picker's
-                                      Reconnect is unreachable from here. */}
-                                  {msg.reconnectProvider && onReconnectProvider ? (
-                                    <div className="mt-2.5">
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() =>
-                                          onReconnectProvider(
-                                            msg.reconnectProvider as string
-                                          )
-                                        }
-                                      >
-                                        Reconnect {msg.reconnectProvider}
-                                      </Button>
-                                    </div>
-                                  ) : null}
-                                </BubbleContent>
-                              </Bubble>
-                            ) : null}
-
-                            {msg.streaming &&
-                            !msg.text &&
-                            !msg.thinking &&
-                            msg.tools.length === 0 ? (
-                              <Marker role="status">
-                                <MarkerIcon>
-                                  <ZestPulse size={14} />
-                                </MarkerIcon>
-                                <MarkerContent className="shimmer-text">Thinking…</MarkerContent>
-                              </Marker>
-                            ) : null}
-
-                            {msg.streaming &&
-                            !msg.text &&
-                            msg.tools.length > 0 &&
-                            !msg.tools.some(
-                              (t) =>
-                                t.status === "running" || t.status === "awaiting_approval"
-                            ) ? (
-                              <Marker role="status">
-                                <MarkerIcon>
-                                  <ZestPulse size={14} />
-                                </MarkerIcon>
-                                <MarkerContent className="shimmer-text">Working…</MarkerContent>
-                              </Marker>
-                            ) : null}
-                          </MessageContent>
-                        </Message>
-                      </MessageScrollerItem>
-                    );
-                  })}
+                  {messages.map((msg, index) => (
+                    <ChatMessageRow
+                      key={msg.id}
+                      message={msg}
+                      isLast={index === messages.length - 1}
+                      sending={sending}
+                      approvalMode={approvalMode}
+                      planToBuild={planToBuild}
+                      onBuildPlan={onBuildPlan}
+                      onResolveApproval={onResolveApproval}
+                      onOpenDiff={openDiff}
+                      onReconnectProvider={onReconnectProvider}
+                    />
+                  ))}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
               <MessageScrollerButton />
