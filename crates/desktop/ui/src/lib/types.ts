@@ -259,3 +259,17 @@ export type ProfileStats = {
   /** ISO date metering began; earlier cells have no token figure. */
   meteringSince?: string;
 };
+
+/**
+ * A provider problem found *after* the chat was already usable.
+ *
+ * Since opening a chat no longer waits on a live turn, verification happens in
+ * the background — and a failure has to be reported without throwing the user
+ * out of a session that is otherwise working.
+ */
+export type SessionWarning = {
+  providerId: string;
+  message: string;
+  /** Whether signing in again is the actual fix. */
+  offerReconnect: boolean;
+};

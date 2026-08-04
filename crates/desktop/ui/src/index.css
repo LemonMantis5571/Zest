@@ -156,6 +156,28 @@
   }
 }
 
+/*
+ * Placeholder block for loading layouts.
+ *
+ * Separate from `.shimmer-text`, which clips its gradient to glyphs and so
+ * cannot stand in for a block. Deliberately low contrast: a placeholder that
+ * draws the eye competes with the content about to replace it.
+ */
+@keyframes zest-skeleton {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.zest-skeleton {
+  background: color-mix(in srgb, var(--foreground) 7%, transparent);
+  animation: zest-skeleton 1.6s ease-in-out infinite;
+}
+
 .shimmer-text {
   background: linear-gradient(
     90deg,
@@ -208,9 +230,22 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .zest-pulse-mark,
-  .zest-pulse-ring {
-    animation: none;
+  /*
+   * Everything, not a hand-maintained list. The previous block named only the
+   * two pulse classes, which left `.shimmer-text`, `.zest-skeleton`, and every
+   * Tailwind `animate-in` / `slide-in-from-*` utility still moving — and those
+   * are most of the motion in the app.
+   *
+   * Near-zero rather than `none` so animations still fire their `end` events;
+   * code that waits for one would otherwise hang.
+   */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 
   .zest-pulse-ring {
