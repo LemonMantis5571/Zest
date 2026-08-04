@@ -2,6 +2,25 @@
 
 Track notable changes here.
 
+## 2026-08-04 — Deleting an open chat no longer recreates it
+
+Deleting the active chat now leaves an unsaved in-memory draft instead of immediately writing
+another empty “Untitled chat” to the project history. The draft becomes a history row only when
+the first message is sent.
+
+## 2026-08-04 — The bundled gateway became a reproducible release input
+
+CLIProxyAPI no longer means “whatever GitHub calls latest when the build runs.” The repository now
+pins one reviewed version, release asset, archive SHA256 and extracted-binary SHA256 for every
+supported desktop target. The fetcher accepts only that manifest, records the extracted binary's
+provenance, and the fetch check, Rust release build and Tauri post-build staging check reject a
+stale, replaced or missing sidecar.
+
+The MIT notice is fail-closed too: missing or unexpected licence text stops verification and the
+build instead of producing a non-compliant installer. Project context now reflects the architecture
+already in code — one Zest installer, with CLIProxyAPI as a managed runtime component and native
+clients remaining a per-provider replacement seam rather than a second gateway project.
+
 ## 2026-08-03 — A profile screen, honest about what it can and cannot know
 
 Clicking the avatar now opens a profile screen instead of the Settings panel: a stat strip

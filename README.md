@@ -23,7 +23,7 @@ Zest reads and edits your project with tools, streams replies, and asks before w
 | [Rust](https://rustup.rs/) | **1.97.1** | Pinned in `rust-toolchain.toml` |
 | [Node.js](https://nodejs.org/) | **24.16.0** | `.nvmrc` / `package.json` engines |
 | npm | **11.13.0** | Comes with Node |
-| CLIProxyAPI | latest Windows amd64 | Local Codex OAuth gateway |
+| CLIProxyAPI | Bundled pinned release | Local Codex/Claude OAuth gateway |
 
 Optional: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) if you later enable a native Anthropic provider.
 
@@ -50,18 +50,20 @@ npm -v               # 11.13.0
 
 ### 3. Gateway (Codex, Claude)
 
-Zest bundles [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT) as
-a Tauri sidecar and starts it on demand, so a downloaded Zest needs no separate
-install. Fetch the binary once before building:
+Zest bundles a pinned [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+release (MIT) as a Tauri sidecar and starts it on demand, so a downloaded Zest
+needs no separate install. Fetch the binary once before building:
 
 ```powershell
 .\scripts\fetch-gateway.ps1
 ```
 
-That downloads the release for your target, verifies its SHA256 against the
-published `checksums.txt`, and drops it in `crates/desktop/binaries/`
-(gitignored — ~64MB). Add `-Target <triple>` to fetch sidecars for other
-platforms from the same machine.
+That reads `crates/desktop/gateway-release.json`, downloads exactly that release
+for your target, verifies it against the SHA256 committed in the repository, and
+drops it in `crates/desktop/binaries/` (gitignored — ~64MB). It never resolves
+`latest`. Add `-Target <triple>` for another platform; use `-Check` to verify the
+local binary and provenance without downloading, or `-CheckPin` to validate only
+the committed release metadata and MIT notice.
 
 On first run Zest writes a loopback-only `config.yaml` with a freshly generated
 key into `%APPDATA%\zest\gateway\`, pointed at the same `~/.cli-proxy-api`
@@ -335,7 +337,7 @@ than one provider, each row is tagged so this is visible rather than surprising.
 
 - Folder picker (sidebar or composer) adds/switches the active project
 - **+** on a project → new chat there
-- Trash → confirm, then delete (deleting the open chat starts a fresh empty one)
+- Trash → confirm, then delete (the open chat becomes an unsaved draft until the first message)
 - Composer footer shows folder, git branch, and context usage estimate
 
 ### Attachments & images
@@ -421,8 +423,8 @@ persist across restarts as well.
 .\scripts\verify.ps1
 ```
 
-ASCII-safe PowerShell 5.1 gate: `npm ci` → UI test/lint/build → `cargo fmt` / clippy `-D warnings` /
-tests → ts-rs binding drift → `npm audit` → RustSec (`cargo audit`) → `git diff --check`.
+ASCII-safe PowerShell 5.1 gate: gateway release pin → `npm ci` → UI test/lint/build → `cargo fmt` /
+clippy `-D warnings` / tests → ts-rs binding drift → `npm audit` → RustSec (`cargo audit`) → `git diff --check`.
 CI runs the same script on `windows-latest`. Root convenience: `npm run ui:test`.
 
 ```powershell
@@ -462,6 +464,8 @@ skip live doctor — do not invent a green result.
 ## Notes
 
 - The agent runs in **Rust**. Node is only used to build the desktop UI.
+- The desktop installer also carries the pinned CLIProxyAPI executable; Zest provisions and
+  supervises it, so users still install only Zest.
 - One chat stays on one provider; other accounts are used through delegated workers when configured.
 - `bash` has no OS sandbox — the approval gate is the containment. See `memory/decisions.md`.
 - Usage in Settings shows what Zest used — not your full subscription remaining.
