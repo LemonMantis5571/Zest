@@ -3,6 +3,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import * as tauriApi from "./api";
 import type { SkillSummary, SystemPromptInfo } from "./api";
 import { runFixtureStream } from "./fixture";
+import { safeMarkdownFilename } from "./markdownExport";
 import {
   CODEX_MODELS,
   DEFAULT_CODEX_MODEL,
@@ -18,6 +19,7 @@ import type {
   ChatEvent,
   ContextUsage,
   LoginStarted,
+  LoginStatus,
   PreparedAttachment,
   ProfileStats,
   ProjectChats,
@@ -46,6 +48,8 @@ export type DesktopBackend = {
   setLocalOffset(): Promise<void>;
   lastProvider(): Promise<string | null>;
   startLogin(id: string): Promise<LoginStarted>;
+  loginStatus(): Promise<LoginStatus>;
+  cancelLogin(): Promise<void>;
   startSession(
     id: string,
     options?: { model?: string; effort?: string }
@@ -65,6 +69,7 @@ export type DesktopBackend = {
   newThread(): Promise<SessionInfo>;
   deleteThread(id: string, projectPath?: string | null): Promise<SessionInfo>;
   sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
+  saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
   cancelTurn(): Promise<void>;
   resolveApproval(approvalId: string, decision: ApprovalChoice): Promise<void>;
   setApprovalMode(mode: ApprovalMode): Promise<string>;
@@ -121,6 +126,8 @@ export function createTauriBackend(): DesktopBackend {
     setLocalOffset: () => tauriApi.setLocalOffset(),
     lastProvider: () => tauriApi.lastProvider(),
     startLogin: (id) => tauriApi.startLogin(id),
+    loginStatus: () => tauriApi.loginStatus(),
+    cancelLogin: () => tauriApi.cancelLogin(),
     startSession: (id, options) => tauriApi.startSession(id, options),
     updateSessionOptions: (options) => tauriApi.updateSessionOptions(options),
     listThreads: () => tauriApi.listThreads(),
@@ -130,6 +137,8 @@ export function createTauriBackend(): DesktopBackend {
     newThread: () => tauriApi.newThread(),
     deleteThread: (id, projectPath) => tauriApi.deleteThread(id, projectPath),
     sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
+    saveMarkdown: (suggestedName, markdown) =>
+      tauriApi.saveMarkdown(suggestedName, markdown),
     cancelTurn: () => tauriApi.cancelTurn(),
     resolveApproval: (approvalId, decision) =>
       tauriApi.resolveApproval(approvalId, decision),
@@ -250,6 +259,12 @@ export function createFixtureBackend(): DesktopBackend {
     async startLogin() {
       return notAvailable("startLogin");
     },
+    async loginStatus() {
+      return { state: "idle", detail: null };
+    },
+    async cancelLogin() {
+      /* fixture: no child process to stop */
+    },
     async startSession() {
       session = { ...FIXTURE_SESSION, messages: [] };
       return { ...session };
@@ -351,6 +366,17 @@ export function createFixtureBackend(): DesktopBackend {
         text: text.trim() || "(attachment)",
       });
       chatHandler({ kind: "done", ...id, message_id: assistantId });
+    },
+    async saveMarkdown(suggestedName, markdown) {
+      const filename = safeMarkdownFilename(suggestedName, "response");
+      const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      return filename;
     },
     async cancelTurn() {
       /* no-op offline */

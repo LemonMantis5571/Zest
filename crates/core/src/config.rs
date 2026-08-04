@@ -10,6 +10,7 @@
 //!    stop the others from loading — it becomes a warning the picker can show.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -18,7 +19,12 @@ use crate::error::{HarnessError, Result};
 
 pub const CONFIG_FILE: &str = "zest.toml";
 
-#[derive(Debug, Default, Deserialize)]
+/// Safe starter config embedded in every build. It contains provider metadata,
+/// never a credential, so a fresh install can bootstrap user-global config
+/// without asking the user to copy files out of the source checkout.
+pub const DEFAULT_USER_CONFIG: &str = include_str!("../../../zest.toml");
+
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -29,7 +35,7 @@ pub struct Config {
     pub tools: ToolsConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsConfig {
     #[serde(default)]
@@ -131,7 +137,7 @@ fn default_anthropic_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Routing {
     /// Where a task goes when no rule matches.
@@ -225,6 +231,65 @@ pub fn load_env() {
 /// your Codex login changed by opening a different directory.
 pub fn user_config_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".zest").join(CONFIG_FILE))
+}
+
+/// Create the machine-level config on first launch, preserving anything the
+/// user already has. A project config still takes precedence when one exists.
+pub fn ensure_user_config() -> Result<Option<PathBuf>> {
+    // Fail during development/build verification if the committed starter
+    // config ever becomes invalid, instead of writing a broken first-run file.
+    Config::parse(DEFAULT_USER_CONFIG)?;
+
+    let Some(path) = user_config_path() else {
+        return Ok(None);
+    };
+    if ensure_config_file(&path, DEFAULT_USER_CONFIG)? {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
+fn ensure_config_file(path: &Path, contents: &str) -> Result<bool> {
+    if path.is_file() {
+        return Ok(false);
+    }
+    let parent = path.parent().ok_or_else(|| {
+        HarnessError::Other(format!("config path has no parent: {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| HarnessError::Other(format!("cannot create {}: {e}", parent.display())))?;
+
+    // create_new is deliberate: two Zest processes racing on first launch
+    // cannot replace a config that appeared between the existence check and
+    // this open.
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => {
+            return Err(HarnessError::Other(format!(
+                "cannot create {}: {e}",
+                path.display()
+            )))
+        }
+    };
+
+    if let Err(e) = (|| -> std::io::Result<()> {
+        file.write_all(contents.as_bytes())?;
+        file.flush()?;
+        file.sync_all()
+    })() {
+        let _ = std::fs::remove_file(path);
+        return Err(HarnessError::Other(format!(
+            "cannot write {}: {e}",
+            path.display()
+        )));
+    }
+    Ok(true)
 }
 
 impl Config {
@@ -567,6 +632,36 @@ timeout_ms = 5000
         let config = Config::parse(raw).expect("committed zest.toml must parse");
         assert!(config.tools.bash.enabled);
         assert!(config.lint().is_empty(), "{:?}", config.lint());
+    }
+
+    #[test]
+    fn first_run_config_is_valid_and_never_overwrites_user_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "zest-config-bootstrap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE);
+
+        assert!(ensure_config_file(&path, DEFAULT_USER_CONFIG).unwrap());
+        assert_eq!(
+            Config::load_from(&path)
+                .unwrap()
+                .default_target()
+                .unwrap()
+                .provider,
+            "codex"
+        );
+        assert!(!ensure_config_file(&path, "this must not replace the user's file").unwrap());
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("[providers.codex]"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -71,6 +71,11 @@ export type LoginStarted = {
   browserBody: string;
 };
 
+export type LoginStatus = {
+  state: "idle" | "running" | "exited";
+  detail: string | null;
+};
+
 export type { ModelCapability };
 
 export type ToolMetadata = ToolMetaView;

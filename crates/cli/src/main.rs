@@ -11,7 +11,14 @@ use zest_core::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    zest_core::adopt_bundled_gateway();
+    if let Err(err) = zest_core::ensure_user_config() {
+        eprintln!("warning: could not create the user config: {err}");
+    }
     zest_core::load_env();
+    if let Err(err) = zest_core::gateway_runtime() {
+        eprintln!("warning: could not initialize the bundled gateway: {err}");
+    }
 
     match std::env::args().nth(1).as_deref() {
         // Terminal form of the launch picker.
