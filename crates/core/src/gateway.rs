@@ -123,7 +123,9 @@ pub fn runtime() -> Result<Option<(PathBuf, PathBuf)>, String> {
     // it with a generated one would break a setup that works.
     let resolved = match cliproxy_install() {
         Some(pair) => Some(pair),
-        None => cliproxy_exe().map(|exe| provision().map(|p| (exe, p.config))).transpose()?,
+        None => cliproxy_exe()
+            .map(|exe| provision().map(|p| (exe, p.config)))
+            .transpose()?,
     };
 
     if let Some((_, config)) = resolved.as_ref() {
@@ -380,7 +382,10 @@ mod tests {
         }
         let url = "http://127.0.0.1:8317";
         assert_eq!(ensure_running(url).await, GatewayState::Listening);
-        assert!(is_listening(url), "should be accepting after ensure_running");
+        assert!(
+            is_listening(url),
+            "should be accepting after ensure_running"
+        );
         // Idempotent: a second call finds it already up and must not spawn again.
         assert_eq!(ensure_running(url).await, GatewayState::Listening);
     }
@@ -389,10 +394,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "zest-gateway-{name}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("zest-gateway-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -488,7 +490,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(provisioned.api_key, "zest-real");
-        assert_eq!(resolved, "zest-real", "the request must carry the config's key");
+        assert_eq!(
+            resolved, "zest-real",
+            "the request must carry the config's key"
+        );
     }
 
     #[test]
@@ -497,7 +502,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let block = dir.join("block.yaml");
-        std::fs::write(&block, "port: 8317\napi-keys:\n  - \"one\"\n  - 'two'\ndebug: false\n").unwrap();
+        std::fs::write(
+            &block,
+            "port: 8317\napi-keys:\n  - \"one\"\n  - 'two'\ndebug: false\n",
+        )
+        .unwrap();
         assert_eq!(keys_in_config(&block), vec!["one", "two"]);
 
         let inline = dir.join("inline.yaml");
@@ -588,7 +597,10 @@ mod tests {
                 "cli-proxy-api-x86_64-unknown-linux-gnu"
             });
         if !sidecar.is_file() {
-            eprintln!("no sidecar at {} - run scripts/fetch-gateway.ps1", sidecar.display());
+            eprintln!(
+                "no sidecar at {} - run scripts/fetch-gateway.ps1",
+                sidecar.display()
+            );
             return;
         }
         assert!(
@@ -611,7 +623,12 @@ mod tests {
         let key = std::env::var(GATEWAY_KEY_ENV).ok();
         std::env::remove_var(GATEWAY_KEY_ENV);
 
-        assert_eq!(state, GatewayState::Listening, "config dir: {}", dir.display());
+        assert_eq!(
+            state,
+            GatewayState::Listening,
+            "config dir: {}",
+            dir.display()
+        );
         assert!(dir.join("config.yaml").is_file(), "config was provisioned");
         assert!(dir.join("gateway.key").is_file(), "key was persisted");
         // The key the caller will authenticate with reached the environment.
