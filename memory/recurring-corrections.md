@@ -4,12 +4,18 @@ Track corrections that apply across the whole workspace.
 
 ## Corrections
 
+- **The gateway decision is closed** — Zest bundles the pinned CLIProxyAPI executable as a Tauri
+  sidecar and does not implement native subscription OAuth. Do not restate this as an open
+  single-binary decision. Revisit only for documented native OAuth/API access, API-key billing, or
+  a demonstrated sidecar security/reliability failure; replacements happen per provider behind
+  `Provider`, never as another monolithic gateway.
 - **Windows path equality** — `canonicalize()` yields `\\?\D:\…` while the UI often has a
   stripped display path. When comparing project roots (delete chat, active project), use
   `display_path` (or equivalent normalize) on both sides; never require byte-identical `PathBuf`s
   from the webview.
-- **Deleting the open chat** — backend deletes then creates a fresh empty thread. UI must notify
-  (toast) or the identical “Untitled chat” looks like a no-op.
+- **Deleting the open chat** — backend deletes then switches to an unsaved empty draft. Do not
+  create a new history row until the first message is sent; the UI should say that no new chat
+  was saved so the deletion is unambiguous.
 - **Empty system prompt** — `.zest/system.md` empty/missing is fine; base `DEFAULT_SYSTEM` still
   applies. Gateway down (`127.0.0.1:8317`) is a separate failure mode.
 - **WebView menus** — do not use Base UI Menu/Portal popovers; they have crashed the Tauri

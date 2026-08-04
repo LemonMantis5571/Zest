@@ -26,6 +26,10 @@ Step "toolchain check" {
   }
 }
 
+Step "gateway release pin" {
+  & (Join-Path $Root "scripts\fetch-gateway.ps1") -CheckPin
+}
+
 Step "npm ci" {
   npm ci --no-fund --no-audit
 }

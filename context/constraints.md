@@ -2,11 +2,14 @@
 
 ## Technical Constraints
 
-- **Rust only in the runtime path.** No Python, no Node. The deliverable is a single binary.
-- **One wire protocol.** The Messages API. Other backends go through a translating gateway, never
-  a second client inside the harness.
-- **No shipped runtime dependencies.** Proxies and sidecars are acceptable in development and
-  never in a release.
+- **Rust owns the Zest runtime path.** The agent, tools and desktop backend stay in Rust; Node is
+  build-only. The approved runtime exception is the pinned CLIProxyAPI sidecar bundled with the
+  desktop installer.
+- **Provider access stays behind `Provider`.** The bundled gateway translates subscription-backed
+  providers today. A documented native client may replace one provider later without changing the
+  router, but Zest does not build its own monolithic OAuth gateway.
+- **One installer, zero manual runtime setup.** Zest provisions, secures and supervises the bundled
+  sidecar. A hand-installed CLIProxyAPI remains an explicit override.
 - **Windows is the primary development platform.** MSVC toolchain, `rustls` rather than OpenSSL to
   avoid a C build dependency.
 - **Streaming always.** Non-streaming requests risk HTTP timeouts at meaningful `max_tokens`, and
