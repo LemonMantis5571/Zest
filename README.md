@@ -385,19 +385,25 @@ Looked up in this order:
 Environment variables load the same way: project `.env` (searching upward), then
 `~/.zest/.env`. First one wins, and a real environment variable beats both.
 
-**Set both user-global files once and every project works:**
+On first launch, Zest creates `~/.zest/zest.toml` from the safe starter config
+embedded in the app. It never overwrites an existing user file. The optional
+credential file can still be shared across projects:
 
 ```powershell
-mkdir $HOME\.zest -Force
-copy zest.toml $HOME\.zest\zest.toml
 copy .env      $HOME\.zest\.env
 ```
 
 Which accounts you are signed into, and the keys that reach them, are properties
-of your machine rather than of one repository. Without these, opening any folder
-outside the Zest checkout falls through to step 3 and cannot see your Codex login.
+of your machine rather than of one repository. This bootstrap means opening a
+folder outside the Zest checkout still sees the bundled Codex provider.
 A project `zest.toml` **replaces** the user one rather than merging — a merged
 provider table makes "which account is this about to spend" ambiguous.
+
+The desktop also carries the active provider configuration across a folder
+switch when the destination has neither project nor user-global config. This
+keeps an open Codex session usable in a new codebase without weakening the
+explicit project-config boundary; create `~/.zest/zest.toml` to make the setup
+persist across restarts as well.
 
 | Variable | Purpose |
 |----------|---------|
@@ -443,9 +449,9 @@ skip live doctor — do not invent a green result.
 | Can't reach gateway / connect errors | Start CLIProxyAPI (`.\scripts\start-gateway.ps1`); empty system prompt is fine |
 | Delete chat looks like a no-op | Deleting the open chat creates a fresh Untitled chat — look for the toast |
 | Project missing from sidebar | Open that folder once (picker); it is then stored under known workspaces |
-| Provider shows **Not configured** despite being signed in | Being signed in is only half of it — add a `[providers.<id>]` entry to `~/.zest/zest.toml` |
+| Provider shows **Not configured** despite being signed in | Being signed in is only half of it — add a `[providers.<id>]` entry to the project or user config |
 | `auth_unavailable` / 503 from the gateway mid-chat | That account's session died or is in cooldown. Click **Reconnect** on the error — it re-runs the gateway login, no terminal needed |
-| `provider 'codex' is not configured for <folder>` | That folder has no `zest.toml` and neither does `~/.zest/`. Copy one there (see Configuration) |
+| `provider 'codex' is not configured for <folder>` | A project config without Codex intentionally replaces the user config; add `[providers.codex]` there or remove the project config |
 | `provider 'codex' … could not be loaded: ZEST_GATEWAY_KEY is not set` | Copy `.env` to `~/.zest/.env`, or set the variable for your user account |
 | Smart App Control blocks build scripts | Windows Security → Smart App Control Off → reboot → `cargo clean` / rebuild |
 | `zest-desktop.exe` locked | Close the running app before `cargo run` / rebuild |

@@ -19,8 +19,11 @@
 //! login process with no console window, let the system browser finish ChatGPT/
 //! Claude sign-in, then re-detect. Zest never exchanges tokens itself.
 
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+
+const CODEX_OAUTH_CALLBACK_PORT: u16 = 1455;
 
 /// What a provider's sign-in looks like from the outside.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -75,6 +78,24 @@ pub struct LoginSpawn {
     pub browser_title: &'static str,
     /// Body copy while the system browser completes OAuth.
     pub browser_body: &'static str,
+}
+
+/// A login helper that Zest can observe after it has been launched.
+pub struct LoginProcess {
+    pub spawn: LoginSpawn,
+    child: Child,
+}
+
+impl LoginProcess {
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        self.child.kill()?;
+        let _ = self.child.wait();
+        Ok(())
+    }
 }
 
 /// Every provider Zest knows how to look for, in display order.
@@ -398,7 +419,13 @@ fn cliproxy_login(
 /// Spawn the vendor/gateway login flow with no console window. Credentials stay
 /// with the vendor — Zest only starts the process and later re-detects whether
 /// a store appeared.
-pub fn start_login(provider_id: &str) -> std::result::Result<LoginSpawn, String> {
+pub fn start_login(provider_id: &str) -> std::result::Result<LoginProcess, String> {
+    if provider_id == "codex" && !codex_callback_port_available() {
+        return Err(format!(
+            "Codex sign-in cannot start because localhost:{CODEX_OAUTH_CALLBACK_PORT} is already in use. Close any other Codex/Zest sign-in window and try again."
+        ));
+    }
+
     let spawn = resolve_login(provider_id).ok_or_else(|| match provider_id {
         "antigravity" => {
             "Antigravity has no CLI login Zest can launch — sign in from the Antigravity app".into()
@@ -407,7 +434,7 @@ pub fn start_login(provider_id: &str) -> std::result::Result<LoginSpawn, String>
         other => format!("no login command for provider `{other}`"),
     })?;
 
-    spawn_silent(&spawn.program, &spawn.args).map_err(|e| {
+    let child = spawn_silent(&spawn.program, &spawn.args).map_err(|e| {
         format!(
             "could not start `{} {}` — is it installed? ({e})",
             spawn.program.display(),
@@ -415,10 +442,14 @@ pub fn start_login(provider_id: &str) -> std::result::Result<LoginSpawn, String>
         )
     })?;
 
-    Ok(spawn)
+    Ok(LoginProcess { spawn, child })
 }
 
-fn spawn_silent(program: &Path, args: &[String]) -> std::io::Result<()> {
+fn codex_callback_port_available() -> bool {
+    TcpListener::bind(("127.0.0.1", CODEX_OAUTH_CALLBACK_PORT)).is_ok()
+}
+
+fn spawn_silent(program: &Path, args: &[String]) -> std::io::Result<Child> {
     // Hide the console entirely on Windows so Connect feels like Zest, not a
     // terminal handoff. The system browser still opens for OAuth.
     #[cfg(windows)]
@@ -442,12 +473,12 @@ pub(crate) fn spawn_detached(program: &Path, args: &[String]) -> std::io::Result
     #[cfg(windows)]
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     #[cfg(windows)]
-    return spawn_with_flags(program, args, DETACHED_PROCESS);
+    return spawn_with_flags(program, args, DETACHED_PROCESS).map(|_| ());
     #[cfg(not(windows))]
-    spawn_with_flags(program, args, 0)
+    spawn_with_flags(program, args, 0).map(|_| ())
 }
 
-fn spawn_with_flags(program: &Path, args: &[String], flags: u32) -> std::io::Result<()> {
+fn spawn_with_flags(program: &Path, args: &[String], flags: u32) -> std::io::Result<Child> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(Stdio::null())
@@ -462,8 +493,7 @@ fn spawn_with_flags(program: &Path, args: &[String], flags: u32) -> std::io::Res
     #[cfg(not(windows))]
     let _ = flags;
 
-    cmd.spawn()?;
-    Ok(())
+    cmd.spawn()
 }
 
 /// Where CLIProxyAPI is installed, as `(executable, config)`.
@@ -502,6 +532,31 @@ pub fn cliproxy_exe() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Adopt a bundled gateway placed beside the current Zest executable.
+///
+/// Desktop and CLI builds use the same portable layout. Keeping this resolver
+/// in core prevents one front-end from finding the sidecar while the other
+/// falls back to a development-only checkout search.
+pub fn adopt_bundled_gateway() -> bool {
+    if let Ok(raw) = std::env::var("ZEST_CLIPROXY_PATH") {
+        if PathBuf::from(raw.trim()).is_file() {
+            return true;
+        }
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let candidate = dir.join(cliproxy_bin_name());
+    if !candidate.is_file() {
+        return false;
+    }
+    std::env::set_var("ZEST_CLIPROXY_PATH", candidate);
+    true
 }
 
 /// A hand-installed CLIProxyAPI: an executable with its own `config.yaml`.

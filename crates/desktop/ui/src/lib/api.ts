@@ -11,6 +11,7 @@ import type {
   ChatEvent,
   ContextUsage,
   LoginStarted,
+  LoginStatus,
   PreparedAttachment,
   ProfileStats,
   ProviderRow,
@@ -51,6 +52,14 @@ export function lastProvider() {
 
 export function startLogin(id: string) {
   return invoke<LoginStarted>("start_login", { id });
+}
+
+export function loginStatus() {
+  return invoke<LoginStatus>("login_status");
+}
+
+export function cancelLogin() {
+  return invoke<void>("cancel_login");
 }
 
 export function startSession(
@@ -113,6 +122,13 @@ export function sendMessage(text: string, attachments?: AttachmentInput[]) {
   return invoke<void>("send_message", {
     text,
     attachments: attachments ?? null,
+  });
+}
+
+export function saveMarkdown(suggestedName: string, markdown: string) {
+  return invoke<string | null>("save_markdown", {
+    suggestedName,
+    markdown,
   });
 }
 
