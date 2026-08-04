@@ -3,6 +3,7 @@ import {
   BookOpenIcon,
   ChartColumnIcon,
   ChevronRightIcon,
+  KeyboardIcon,
   type LucideIcon,
   ScrollTextIcon,
   ServerIcon,
@@ -11,6 +12,10 @@ import {
   XIcon,
 } from "lucide-react";
 
+import {
+  KeyboardShortcuts,
+  useScrollIntoViewOnBump,
+} from "@/components/KeyboardShortcuts";
 import { RoutingSettings } from "@/components/RoutingSettings";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +41,8 @@ type Props = {
   effort: EffortId;
   sending: boolean;
   profile: UserProfile;
+  /** Bumped to open and scroll to the Keyboard shortcuts section. */
+  focusShortcuts?: number;
   /** Open the User section first (avatar click). */
   focusUser?: boolean;
   onClose: () => void;
@@ -60,12 +67,21 @@ function SettingsSection({
   hint,
   icon: Icon,
   defaultOpen = false,
+  openSignal = 0,
   children,
 }: {
   title: string;
   hint?: string;
   icon: LucideIcon;
   defaultOpen?: boolean;
+  /**
+   * Incrementing counter that forces the section open.
+   *
+   * A boolean cannot express "open it *again*": once `defaultOpen` has gone
+   * true it never changes, so a second request to jump here would silently do
+   * nothing if the user had collapsed the section in between.
+   */
+  openSignal?: number;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -73,6 +89,10 @@ function SettingsSection({
   useEffect(() => {
     if (defaultOpen) setOpen(true);
   }, [defaultOpen]);
+
+  useEffect(() => {
+    if (openSignal > 0) setOpen(true);
+  }, [openSignal]);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="border-b border-border/50">
@@ -118,6 +138,7 @@ export function SettingsPanel({
   sending,
   profile,
   focusUser = false,
+  focusShortcuts = 0,
   onClose,
   onChangeProvider,
   onReloadSession,
@@ -126,6 +147,7 @@ export function SettingsPanel({
   onProfileChange,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const shortcutsRef = useScrollIntoViewOnBump(focusShortcuts);
   const titleId = useId();
   const [provider, setProvider] = useState<ProviderRow | null>(null);
   const [loading, setLoading] = useState(false);
@@ -637,6 +659,17 @@ export function SettingsPanel({
               </ul>
             )}
           </SettingsSection>
+
+          <div ref={shortcutsRef}>
+            <SettingsSection
+              title="Keyboard shortcuts"
+              icon={KeyboardIcon}
+              hint="Rebind commands"
+              openSignal={focusShortcuts}
+            >
+              <KeyboardShortcuts />
+            </SettingsSection>
+          </div>
 
           {error ? (
             <p className="px-4 py-3 text-xs text-destructive">{error}</p>
