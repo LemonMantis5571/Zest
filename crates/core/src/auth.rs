@@ -546,18 +546,134 @@ pub fn adopt_bundled_gateway() -> bool {
             return true;
         }
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-    let Some(dir) = exe.parent() else {
-        return false;
-    };
-    let candidate = dir.join(cliproxy_bin_name());
-    if !candidate.is_file() {
-        return false;
+
+    // A hand-installed gateway still wins, as the README promises. Pointing the
+    // variable at the bundled binary here would pre-empt the walk-up search and
+    // quietly strand a tuned `tools/CLIProxyAPI` checkout — and, because the two
+    // configs list different `api-keys`, hand-starting the one Zest no longer
+    // uses is how `401 Invalid API key` happens.
+    if find_cliproxy().is_some() {
+        return true;
     }
+
+    let Some(candidate) = bundled_gateway_candidates().into_iter().find(|p| p.is_file()) else {
+        return false;
+    };
     std::env::set_var("ZEST_CLIPROXY_PATH", candidate);
     true
+}
+
+/// Where a bundled gateway might be, best first.
+fn bundled_gateway_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // Development: the sidecar *source*, deliberately not the copy that Tauri
+    // places beside the executable. `tauri-build` rewrites that copy on every
+    // build, and Windows refuses to overwrite a running `.exe` — so spawning it
+    // makes the gateway lock the next rebuild with a PermissionDenied panic in
+    // the build script. The source file is only ever read, never rewritten.
+    #[cfg(debug_assertions)]
+    if let Some(dir) = dev_sidecar_dir() {
+        candidates.push(dir.join(format!(
+            "cli-proxy-api-{}{}",
+            current_target_triple(),
+            std::env::consts::EXE_SUFFIX
+        )));
+    }
+
+    // Installed: Tauri places the sidecar next to the main executable and strips
+    // the target-triple suffix, so the bundled path is predictable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(cliproxy_bin_name()));
+        }
+    }
+
+    candidates
+}
+
+/// `crates/desktop/binaries` in a development checkout, found by walking up from
+/// the running binary rather than from cwd — the CLI and the desktop app are
+/// launched from wherever the user happens to be.
+#[cfg(debug_assertions)]
+fn dev_sidecar_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?.to_path_buf();
+    for _ in 0..8 {
+        let candidate = dir.join("crates").join("desktop").join("binaries");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// The target triple this build was compiled for, as the sidecar filename spells
+/// it. `TAURI_ENV_TARGET_TRIPLE` is set by `tauri-build`; the CLI has no build
+/// script, so it falls back to composing one from the compile-time target.
+#[cfg(debug_assertions)]
+fn current_target_triple() -> String {
+    match option_env!("TAURI_ENV_TARGET_TRIPLE") {
+        Some(triple) => triple.to_string(),
+        None => format!(
+            "{}-{}-{}",
+            std::env::consts::ARCH,
+            if cfg!(windows) {
+                "pc"
+            } else if cfg!(target_os = "macos") {
+                "apple"
+            } else {
+                "unknown"
+            },
+            if cfg!(windows) {
+                "windows-msvc"
+            } else if cfg!(target_os = "macos") {
+                "darwin"
+            } else {
+                "linux-gnu"
+            }
+        ),
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod bundled_gateway_tests {
+    use super::*;
+
+    /// The dev candidate must be the sidecar *source*, never the copy beside the
+    /// running executable. Spawning that copy locks it, and `tauri-build`
+    /// rewrites it on the next build — which failed with PermissionDenied.
+    #[test]
+    fn dev_prefers_the_sidecar_source_over_the_build_copy() {
+        let Some(dir) = dev_sidecar_dir() else {
+            eprintln!("not a development checkout - nothing to assert");
+            return;
+        };
+        assert!(dir.ends_with(std::path::Path::new("crates/desktop/binaries")), "{dir:?}");
+
+        let candidates = bundled_gateway_candidates();
+        let first = candidates.first().expect("a dev candidate");
+        assert!(first.starts_with(&dir), "dev candidate should be the source: {first:?}");
+
+        // And it must not be whatever sits next to the test binary.
+        let beside_exe = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join(cliproxy_bin_name())));
+        assert_ne!(Some(first.clone()), beside_exe);
+    }
+
+    #[test]
+    fn the_dev_candidate_matches_the_name_fetch_gateway_writes() {
+        let triple = current_target_triple();
+        // scripts/fetch-gateway.ps1 writes `cli-proxy-api-<triple>[.exe]`.
+        assert!(triple.contains('-'), "{triple}");
+        if cfg!(windows) {
+            assert!(triple.ends_with("-pc-windows-msvc"), "{triple}");
+        }
+    }
 }
 
 /// A hand-installed CLIProxyAPI: an executable with its own `config.yaml`.
