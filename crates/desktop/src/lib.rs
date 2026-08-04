@@ -684,9 +684,27 @@ fn now_secs() -> u64 {
 async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let root = resolve_workspace_root(&state)?;
     let config = config_for_session(&state, &root)?;
-    prove_provider_serves(&config, &id)
-        .await
-        .map_err(|e| e.user_message())
+    let label = detect_all()
+        .into_iter()
+        .find(|s| s.id == id)
+        .map(|s| s.label.to_string())
+        .unwrap_or_else(|| id.clone());
+
+    // This is now the only place the "Connect again" wording is produced, because
+    // opening a chat no longer probes. It stays tied to `needs_reconnect` so an
+    // unreachable gateway is never reported as a credential problem — telling
+    // someone to re-run OAuth cannot start a process that is not running.
+    prove_provider_serves(&config, &id).await.map_err(|failure| {
+        let detail = failure.user_message();
+        if failure.needs_reconnect() {
+            format!(
+                "{label} needs Connect again — the gateway has a session file but \
+cannot use it yet.\n\n{detail}"
+            )
+        } else {
+            detail
+        }
+    })
 }
 
 /// Why a provider could not be proven able to serve.
@@ -716,7 +734,41 @@ impl ProbeFailure {
     }
 }
 
+/// Prove the provider can actually serve: gateway up **and** account working.
+///
+/// Both halves, for an explicit Connect or verify. Opening a chat deliberately
+/// runs only the first half — see [`ensure_gateway_ready`].
 async fn prove_provider_serves(config: &Config, id: &str) -> Result<(), ProbeFailure> {
+    ensure_gateway_ready(config, id).await?;
+    probe_provider(config, id).await
+}
+
+/// Make the local gateway available, without spending a turn to find out whether
+/// the account behind it works.
+///
+/// Cheap and local — a TCP check, and a process spawn when nothing answers. This
+/// is the half that has to happen before a chat opens, because every turn needs
+/// the port open; proving the *account* is a network round trip that costs tokens
+/// and belongs behind the UI rather than in front of it.
+async fn ensure_gateway_ready(config: &Config, id: &str) -> Result<(), ProbeFailure> {
+    // Start the local gateway rather than probing a port nothing is listening on.
+    // Its being down is the ordinary state after a reboot, not a user error, and
+    // Zest launches this same binary to sign in — so it can launch it to serve.
+    if let Some(base_url) = local_gateway_url(config, id) {
+        if let GatewayState::Unavailable(reason) = ensure_gateway_running(&base_url).await {
+            return Err(ProbeFailure::Setup(format!(
+                "The model gateway is installed but did not come up.\n\n{reason}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Send one minimal turn to find out whether the account can serve.
+///
+/// A credentials file on disk is not a working session: a gateway can hold an
+/// account it has put in cooldown, and that never shows up locally.
+async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
     zest_core::load_env();
     let (registry, skipped) = ProviderRegistry::from_config(config);
 
@@ -729,17 +781,6 @@ async fn prove_provider_serves(config: &Config, id: &str) -> Result<(), ProbeFai
                 .unwrap_or_else(|| format!("provider `{id}` is not configured")),
         )
     })?;
-
-    // Start the local gateway rather than probing a port nothing is listening on.
-    // Its being down is the ordinary state after a reboot, not a user error, and
-    // Zest launches this same binary to sign in — so it can launch it to serve.
-    if let Some(base_url) = local_gateway_url(config, id) {
-        if let GatewayState::Unavailable(reason) = ensure_gateway_running(&base_url).await {
-            return Err(ProbeFailure::Setup(format!(
-                "The model gateway is installed but did not come up.\n\n{reason}"
-            )));
-        }
-    }
 
     let model = provider.default_model().to_string();
     probe(provider.as_ref(), &model)
@@ -1171,28 +1212,16 @@ async fn start_session(
         return Err(format!("{} is not ready — connect it first", slot.label));
     }
 
-    // Gateway "Signed in" is only a file check. Prove the account can serve
-    // before opening chat — otherwise a cooled-down Claude session looks ready
-    // and the first user message fails with 503 auth_unavailable.
-    //
-    // Only a *credential* failure earns the "Connect again" wording. Attaching it
-    // to every failure told people to re-run OAuth when the real problem was a
-    // gateway that was not running, which signing in again cannot fix.
+    // Only the local half. Opening a chat waits for the gateway's port, which is
+    // cheap, and *not* for a live turn against the account, which is a network
+    // round trip that costs tokens — that used to make every launch sit on
+    // "Opening your session…" until the model answered. The caller verifies the
+    // account in the background and surfaces a banner if it turns out to be
+    // unusable, so a cooled-down session is reported rather than waited for.
     if uses_gateway_auth(&id) {
-        prove_provider_serves(&config, &id)
+        ensure_gateway_ready(&config, &id)
             .await
-            .map_err(|failure| {
-                let detail = failure.user_message();
-                if failure.needs_reconnect() {
-                    format!(
-                        "{label} needs Connect again before chat — the gateway has a \
-session file but cannot use it yet.\n\n{detail}",
-                        label = slot.label
-                    )
-                } else {
-                    detail
-                }
-            })?;
+            .map_err(|failure| failure.user_message())?;
     }
 
     persist_choice(&id)?;
@@ -1515,8 +1544,9 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
         .and_then(|r| r)
 }
 
-/// Delete a saved chat. If it is the active thread, switches the session to a
-/// fresh empty thread for the same provider. `project_path` deletes from another
+/// Delete a saved chat. If it is the active thread, switches the session to an
+/// unsaved empty draft for the same provider. The draft becomes a saved chat
+/// when its first message is persisted. `project_path` deletes from another
 /// known project without switching the open workspace.
 #[tauri::command]
 fn delete_thread(
@@ -1550,12 +1580,12 @@ fn delete_thread(
             let same_project = display_path(&session.root) == display_path(&target_root)
                 || session.root == target_root;
             if same_project && session.thread_id == id {
-                let thread = store
-                    .create_for_provider(&session.provider_id)
-                    .map_err(|e| e.to_string())?;
+                let thread = Thread::new().with_provider(&session.provider_id);
                 session.agent.clear_messages();
                 session.thread_id = thread.id.clone();
                 session.thread = thread;
+                // Keep the active provider pointing at the draft, but do not
+                // create a history row until the user sends a message.
                 persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             }
             Ok(session_info_from(session, None))
@@ -2729,6 +2759,27 @@ mod tests {
         assert!(message.contains("needs signing in again"), "{message}");
         // The provider's own wording survives, because the body stayed parseable.
         assert!(message.contains("auth_unavailable"), "{message}");
+    }
+
+    /// Opening a chat must not be gated on a credential check.
+    ///
+    /// `ensure_gateway_ready` can only ever fail with `Setup` — it does not build
+    /// a registry or send a turn — so a cooled-down account cannot keep the chat
+    /// from rendering. That is what moves the network round trip off the launch
+    /// path; verification runs behind the UI and reports itself in a banner.
+    #[test]
+    fn opening_a_chat_cannot_fail_for_a_credential_reason() {
+        // The only failure `ensure_gateway_ready` constructs.
+        let blocked = ProbeFailure::Setup("The model gateway did not come up".into());
+        assert!(!blocked.needs_reconnect());
+
+        // A native provider has no local gateway, so there is nothing to wait for
+        // at all — the readiness half is a no-op and start is pure setup.
+        let config = Config::parse(
+            "[providers.anthropic]\nkind = \"anthropic\"\napi_key_env = \"ANTHROPIC_API_KEY\"\n",
+        )
+        .unwrap();
+        assert_eq!(local_gateway_url(&config, "anthropic"), None);
     }
 
     #[test]

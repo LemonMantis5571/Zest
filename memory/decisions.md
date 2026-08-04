@@ -768,8 +768,9 @@ config keeps winning so existing setups do not change behaviour. A generated key
 already provide one. `auth-dir` stays `~/.cli-proxy-api` so existing sign-ins are not orphaned.
 Login and serving now resolve through the same `gateway::runtime()`, so credentials cannot land
 in an `auth-dir` the serving process does not read. Sidecars are fetched by
-`scripts/fetch-gateway.ps1` with SHA256 verification against the release `checksums.txt`, and
-CLIProxyAPI's MIT text ships in `crates/desktop/licenses/`.
+`scripts/fetch-gateway.ps1` with SHA256 verification against the committed release pin, and
+CLIProxyAPI's MIT text ships in `crates/desktop/licenses/`. The pin and provenance hardening are
+recorded in the 2026-08-04 changelog entry; release builds never resolve `latest`.
 
 ### 2026-08-03 — Retry annotation wraps the error instead of reformatting it
 
