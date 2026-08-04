@@ -49,6 +49,7 @@ import { ZestPulse } from "@/components/ZestPulse";
 import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import { groupToolRuns } from "@/lib/toolRuns";
+import { useKeybindings } from "@/lib/useKeybindings";
 import type {
   ApprovalChoice,
   ApprovalMode,
@@ -182,6 +183,8 @@ export function ChatScreen({
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [focusUser, setFocusUser] = useState(false);
+  /** Bumped to open Settings with the Keyboard shortcuts section expanded. */
+  const [shortcutsRequest, setShortcutsRequest] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
@@ -217,79 +220,58 @@ export function ChatScreen({
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
+  // Escape stays hand-written and is not rebindable: it means "dismiss what is
+  // on top", so it has to read the stack of open surfaces in order.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target;
-      const inField =
-        target instanceof HTMLElement &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
-
-      if (e.key === "Escape") {
-        if (diffTarget) {
-          e.preventDefault();
-          setDiffTarget(null);
-          return;
-        }
-        if (providerSwitchOpen) {
-          e.preventDefault();
-          if (!providerSwitchBusy) setProviderSwitchOpen(false);
-          return;
-        }
-        if (settingsOpen) {
-          e.preventDefault();
-          closeSettings();
-          return;
-        }
-        if (sending && onStop) {
-          e.preventDefault();
-          onStop();
-        }
+      if (e.key !== "Escape") return;
+      if (diffTarget) {
+        e.preventDefault();
+        setDiffTarget(null);
         return;
       }
-
-      if (e.key === "/" && !inField && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (providerSwitchOpen) {
         e.preventDefault();
-        focusComposer();
+        if (!providerSwitchBusy) setProviderSwitchOpen(false);
         return;
       }
-
-      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-
-      if (e.key === "n" || e.key === "N") {
+      if (settingsOpen) {
         e.preventDefault();
-        if (!sending) onNewChat();
+        closeSettings();
         return;
       }
-      if (e.key === "b" || e.key === "B") {
+      if (sending && onStop) {
         e.preventDefault();
-        setSidebar(!sidebarOpen);
-        return;
-      }
-      if (e.key === ",") {
-        e.preventDefault();
-        setFocusUser(false);
-        setSettingsOpen(true);
-        return;
-      }
-      if (e.key === ".") {
-        e.preventDefault();
-        if (sending) onStop?.();
+        onStop();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [
-    diffTarget,
-    onNewChat,
-    onStop,
-    providerSwitchBusy,
-    providerSwitchOpen,
-    sending,
-    settingsOpen,
-    sidebarOpen,
-  ]);
+  }, [diffTarget, onStop, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
+
+  // Everything else comes from the registry, so the shortcuts editor is the one
+  // place that decides which key runs which command.
+  useKeybindings({
+    "chat.new": () => {
+      if (!sending) onNewChat();
+    },
+    "chat.stop": () => {
+      if (sending) onStop?.();
+    },
+    "focus.composer": focusComposer,
+    "view.sidebar": () => setSidebar(!sidebarOpen),
+    "view.settings": () => {
+      setFocusUser(false);
+      setSettingsOpen(true);
+    },
+    "view.shortcuts": () => {
+      setFocusUser(false);
+      setShortcutsRequest((n) => n + 1);
+      setSettingsOpen(true);
+    },
+    "view.profile": () => onOpenProfile?.(),
+    "view.provider": () => setProviderSwitchOpen(true),
+  });
 
   return (
     <section className="relative flex h-full min-h-0 overflow-hidden bg-[var(--chat-canvas)]">
@@ -686,6 +668,7 @@ export function ChatScreen({
         sending={sending}
         profile={profile}
         focusUser={focusUser}
+        focusShortcuts={shortcutsRequest}
         onClose={closeSettings}
         onChangeProvider={() => {
           closeSettings();
