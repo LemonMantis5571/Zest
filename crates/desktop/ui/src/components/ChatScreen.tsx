@@ -6,6 +6,8 @@ import {
   ImageIcon,
   SettingsIcon,
   SquarePenIcon,
+  TriangleAlertIcon,
+  XIcon,
 } from "lucide-react";
 
 import { ApprovalStrip } from "@/components/ApprovalStrip";
@@ -57,10 +59,11 @@ import type {
   PreparedAttachment,
   ProviderRow,
   SessionInfo,
+  SessionWarning,
   ToolPart,
   UserProfile,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, scrollBehavior } from "@/lib/utils";
 
 function shortRoot(root: string): string {
   const cleaned = root.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
@@ -95,6 +98,9 @@ type Props = {
   /** Re-run sign-in for a provider whose credentials the gateway rejected. */
   onReconnectProvider?: (providerId: string) => void;
   onReconnect: () => void;
+  /** A background verification that failed after this chat opened. */
+  sessionWarning?: SessionWarning | null;
+  onDismissWarning?: () => void;
   onLoadThread: (id: string) => void;
   onModelChange: (model: string) => void;
   onEffortChange: (effort: EffortId) => void;
@@ -165,6 +171,8 @@ export function ChatScreen({
   onReloadSession,
   onReconnectProvider,
   onReconnect,
+  sessionWarning = null,
+  onDismissWarning,
   onLoadThread,
   onModelChange,
   onEffortChange,
@@ -217,7 +225,7 @@ export function ChatScreen({
 
   function scrollToTool(toolId: string) {
     const el = document.querySelector(`[data-tool-id="${toolId}"]`);
-    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    el?.scrollIntoView({ behavior: scrollBehavior(), block: "center" });
   }
 
   // Escape stays hand-written and is not rebindable: it means "dismiss what is
@@ -343,6 +351,33 @@ export function ChatScreen({
             </Button>
           </div>
         </header>
+
+        {sessionWarning ? (
+          <div
+            role="status"
+            className="flex items-start gap-2.5 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2.5 animate-in fade-in slide-in-from-top-1 duration-200"
+          >
+            <TriangleAlertIcon className="mt-px size-3.5 shrink-0 text-amber-400" aria-hidden />
+            <p className="m-0 min-w-0 flex-1 whitespace-pre-wrap text-[11px] leading-relaxed text-amber-200/90">
+              {sessionWarning.message}
+            </p>
+            {sessionWarning.offerReconnect ? (
+              <Button type="button" size="sm" variant="outline" onClick={onReconnect}>
+                Reconnect
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Dismiss"
+              aria-label="Dismiss this warning"
+              onClick={onDismissWarning}
+            >
+              <XIcon />
+            </Button>
+          </div>
+        ) : null}
 
         <div className="relative min-h-0 flex-1">
           <MessageScrollerProvider autoScroll scrollEdgeThreshold={24}>

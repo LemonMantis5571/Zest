@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AuthSuccess } from "@/components/AuthSuccess";
 import { ChatScreen } from "@/components/ChatScreen";
+import { ChatSkeleton } from "@/components/ChatSkeleton";
 import { ProfileScreen } from "@/components/ProfileScreen";
 import { ProviderPicker } from "@/components/ProviderPicker";
 import { WaitingScreen } from "@/components/WaitingScreen";
 import { toast, Toaster } from "@/components/ui/toast";
-import { BrandMark } from "@/components/BrandMark";
 import { getBackend } from "@/lib/backend";
 import {
   findApprovalTool,
@@ -27,6 +27,7 @@ import {
   markProviderVerified,
   markProviderVerifyFailed,
   recentVerifyFailed,
+  recentVerifySucceeded,
 } from "@/lib/providerVerify";
 import {
   effortFromSession,
@@ -41,6 +42,7 @@ import type {
   PreparedAttachment,
   ProviderRow,
   SessionInfo,
+  SessionWarning,
   ToolPart,
   UserAttachmentChip,
   UserProfile,
@@ -191,6 +193,14 @@ export default function App() {
   const [settingsRequest, setSettingsRequest] = useState(0);
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /**
+   * A background verification that failed after the chat had already opened.
+   *
+   * Shown in the chat rather than bouncing back to the picker: the session is
+   * real and the transcript is readable, so throwing the user out would lose
+   * more than the warning gains.
+   */
+  const [sessionWarning, setSessionWarning] = useState<SessionWarning | null>(null);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [continuing, setContinuing] = useState(false);
 
@@ -558,13 +568,45 @@ export default function App() {
     setScreen("chat");
   }, []);
 
+  /**
+   * Prove the account can serve, without making anyone wait for it.
+   *
+   * `startSession` no longer probes, so this is where a cooled-down session is
+   * discovered. It runs behind an already-usable chat and reports itself in a
+   * banner, because a live turn against the provider is a network round trip and
+   * gating the first paint on one is what made launch feel slow.
+   */
+  const verifyInBackground = useCallback((providerId: string) => {
+    // A recent success is worth trusting; re-learning it costs a real turn.
+    if (recentVerifySucceeded(providerId)) {
+      setSessionWarning(null);
+      return;
+    }
+    void backend
+      .verifyProvider(providerId)
+      .then(() => {
+        markProviderVerified(providerId);
+        setSessionWarning(null);
+      })
+      .catch((err: unknown) => {
+        const offerReconnect = shouldOfferProviderReconnect(err);
+        if (offerReconnect) markProviderVerifyFailed(providerId);
+        setSessionWarning({
+          providerId,
+          message: formatInvokeError(err),
+          offerReconnect,
+        });
+      });
+  }, []);
+
   const enterChat = useCallback(
     async (providerId: string) => {
       try {
         const info = await backend.startSession(providerId);
-        markProviderVerified(providerId);
         stopPolling();
         applySession(info);
+        // After the chat is on screen, never before it.
+        verifyInBackground(providerId);
         return info;
       } catch (err) {
         // Setup failures (for example, a new folder without a provider config)
@@ -576,7 +618,7 @@ export default function App() {
         throw err;
       }
     },
-    [applySession, stopPolling]
+    [applySession, stopPolling, verifyInBackground]
   );
   enterChatRef.current = enterChat;
 
@@ -838,7 +880,7 @@ export default function App() {
         type: "success",
         title: "Chat deleted",
         description: deletedActive
-          ? "Started a fresh chat in this project"
+          ? "No new chat saved — type to start one"
           : undefined,
       });
     } catch (err) {
@@ -1238,12 +1280,8 @@ export default function App() {
           !authMode && "flex min-h-0 flex-col"
         )}
       >
-        {screen === "boot" ? (
-          <section className="flex w-full max-w-[400px] animate-in fade-in duration-200 flex-col items-center text-center ease-out">
-            <BrandMark />
-            <p className="mt-4 text-sm text-muted-foreground">Opening your session…</p>
-          </section>
-        ) : null}
+        {/* Boot is short now that session start no longer waits on the network. */}
+        {screen === "boot" ? <ChatSkeleton /> : null}
 
         {screen === "picker" ? (
           <ProviderPicker
@@ -1327,6 +1365,8 @@ export default function App() {
             onBuildPlan={() => void onBuildPlan()}
             onOpenProfile={() => setScreen("profile")}
             settingsRequest={settingsRequest}
+            sessionWarning={sessionWarning}
+            onDismissWarning={() => setSessionWarning(null)}
           />
         ) : null}
 
