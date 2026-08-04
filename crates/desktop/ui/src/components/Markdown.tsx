@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { CodeBlock } from "@/components/CodeBlock";
+import { MermaidBlock } from "@/components/MermaidBlock";
 import { linkClassName } from "@/lib/linkify";
 import { splitBlocks } from "@/lib/markdownBlocks";
 import { cn } from "@/lib/utils";
@@ -20,7 +21,8 @@ function codeText(children: ReactNode): string {
   return String(children);
 }
 
-const components: Components = {
+function componentsFor(streaming: boolean): Components {
+  return {
   p: ({ children }) => (
     <p className="mb-3 last:mb-0 leading-[1.65]">{children}</p>
   ),
@@ -82,7 +84,11 @@ const components: Components = {
     const langMatch = /language-([\w+#.-]+)/.exec(className);
     const language = langMatch?.[1] ?? "plaintext";
     const code = codeText(props?.children ?? children).replace(/\n$/, "");
-    return <CodeBlock code={code} language={language} />;
+    return language.toLowerCase() === "mermaid" ? (
+      <MermaidBlock code={code} streaming={streaming} />
+    ) : (
+      <CodeBlock code={code} language={language} />
+    );
   },
   hr: () => <hr className="my-4 border-border/70" />,
   table: ({ children }) => (
@@ -102,11 +108,13 @@ const components: Components = {
       {children}
     </td>
   ),
-};
+  };
+}
 
 type Props = {
   children: string;
   className?: string;
+  streaming?: boolean;
 };
 
 /**
@@ -116,7 +124,9 @@ type Props = {
  * trailing block changes, so every settled block above skips re-parsing
  * entirely. That is the difference between O(n²) and O(n) over a long answer.
  */
-const Block = memo(function Block({ text }: { text: string }) {
+const Block = memo(function Block({ text, streaming }: { text: string; streaming: boolean }) {
+  const components = useMemo(() => componentsFor(streaming), [streaming]);
+
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
       {text}
@@ -137,7 +147,11 @@ const Block = memo(function Block({ text }: { text: string }) {
  *   single growing string means re-parsing the whole document per frame; blocks
  *   mean re-parsing only the tail.
  */
-export const Markdown = memo(function Markdown({ children, className }: Props) {
+export const Markdown = memo(function Markdown({
+  children,
+  className,
+  streaming = false,
+}: Props) {
   const blocks = useMemo(() => splitBlocks(children), [children]);
 
   return (
@@ -148,7 +162,7 @@ export const Markdown = memo(function Markdown({ children, className }: Props) {
       )}
     >
       {blocks.map((block) => (
-        <Block key={block.key} text={block.text} />
+        <Block key={block.key} text={block.text} streaming={streaming} />
       ))}
     </div>
   );

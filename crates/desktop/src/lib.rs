@@ -21,16 +21,15 @@ use tokio::sync::oneshot;
 use ts_rs::TS;
 use zest_core::routing_edit::{routing_document, validate_rules, RuleInput};
 use zest_core::{
-    can_start_login, compose_system_with_docs, descriptor_for_picker_id, descriptor_from_config,
-    detect_all, display_path, ensure_gateway_running, env_context, load_custom_system,
-    load_project_docs, new_id, probe, save_custom_system, start_login as core_start_login,
-    derive_profile_stats, truncate_chars, uses_gateway_auth, ApprovalDecision, ApprovalMode,
-    ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts, Config, GatewayState,
-    HarnessError, Ledger, PersistPriority, PersistWorker, ProfileStats, ProjectSessionState,
-    ProviderConfig, ProviderRegistry,
-    ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
-    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
-    DEFAULT_SYSTEM,
+    can_start_login, compose_system_with_docs, derive_profile_stats, descriptor_for_picker_id,
+    descriptor_from_config, detect_all, display_path, ensure_gateway_running, env_context,
+    load_custom_system, load_project_docs, new_id, probe, save_custom_system,
+    start_login as core_start_login, truncate_chars, uses_gateway_auth, ApprovalDecision,
+    ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts, Config,
+    GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority, PersistWorker, ProfileStats,
+    ProjectSessionState, ProviderConfig, ProviderRegistry, ProviderSlot, RuntimeBuilder, SkillSet,
+    SkillSummary, StoredMessage, StreamEvent, Thread, ThreadLoadError, ThreadStore, ThreadSummary,
+    ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
 };
 
 use attachments::{
@@ -157,9 +156,14 @@ const PLAN_SKILL: &str = "plan";
 struct AppState {
     sessions: SessionController,
     approvals: Arc<ApprovalHub>,
+    login: Mutex<Option<LoginProcess>>,
     persist: Mutex<Option<PersistWorker>>,
     /// Preferred project root (folder picker / last-workspace). Falls back to cwd.
     workspace_root: Mutex<Option<PathBuf>>,
+    /// The last working provider configuration. A folder switch ends the old
+    /// runtime before the new one is built; keep its provider entry available
+    /// when the destination is an ordinary folder with no zest.toml yet.
+    workspace_config: Mutex<Option<Config>>,
     /// Mode + session grants. Outlives any one project so switching folders
     /// does not silently reset the user's chosen permission level.
     policy: Arc<Mutex<ApprovalPolicy>>,
@@ -366,6 +370,13 @@ struct LoginStarted {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LoginStatus {
+    state: String,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
 #[cfg_attr(
     feature = "export-bindings",
@@ -523,8 +534,62 @@ fn map_session_err(e: SessionError) -> String {
 
 fn load_workspace_config(state: &AppState) -> Config {
     match resolve_workspace_root(state) {
-        Ok(root) => Config::find(&root).unwrap_or_else(|_| Config::env_fallback()),
+        Ok(root) => {
+            let mut config = Config::find(&root).unwrap_or_else(|_| Config::env_fallback());
+            if can_inherit_workspace_config(&root) {
+                merge_cached_providers(state, &mut config, None);
+            }
+            config
+        }
         Err(_) => Config::env_fallback(),
+    }
+}
+
+/// A project config is an explicit boundary: it replaces the user config and
+/// must not silently borrow another project's provider table. A folder with no
+/// config is different — it is the common case for an existing Zest install
+/// opening a new codebase, so the active provider should follow the session.
+fn can_inherit_workspace_config(root: &Path) -> bool {
+    if root.join(zest_core::config::CONFIG_FILE).is_file() {
+        return false;
+    }
+    !zest_core::user_config_path().is_some_and(|path| path.is_file())
+}
+
+fn merge_cached_providers(state: &AppState, config: &mut Config, only_provider: Option<&str>) {
+    let cached = state
+        .workspace_config
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    let Some(cached) = cached else { return };
+
+    merge_provider_tables(config, &cached, only_provider);
+}
+
+fn merge_provider_tables(config: &mut Config, cached: &Config, only_provider: Option<&str>) {
+    for (id, provider) in &cached.providers {
+        if only_provider.is_some_and(|wanted| wanted != id) {
+            continue;
+        }
+        config
+            .providers
+            .entry(id.clone())
+            .or_insert_with(|| provider.clone());
+    }
+}
+
+fn config_for_session(state: &AppState, root: &Path) -> Result<Config, String> {
+    let mut config = Config::find(root).map_err(|e| e.to_string())?;
+    if can_inherit_workspace_config(root) {
+        merge_cached_providers(state, &mut config, None);
+    }
+    Ok(config)
+}
+
+fn remember_workspace_config(state: &AppState, config: &Config) {
+    if let Ok(mut cached) = state.workspace_config.lock() {
+        *cached = Some(config.clone());
     }
 }
 
@@ -617,7 +682,9 @@ fn now_secs() -> u64 {
 /// after a sign-in and again before opening a gateway chat.
 #[tauri::command]
 async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    prove_provider_serves(&state, &id)
+    let root = resolve_workspace_root(&state)?;
+    let config = config_for_session(&state, &root)?;
+    prove_provider_serves(&config, &id)
         .await
         .map_err(|e| e.user_message())
 }
@@ -649,14 +716,9 @@ impl ProbeFailure {
     }
 }
 
-async fn prove_provider_serves(
-    state: &State<'_, AppState>,
-    id: &str,
-) -> Result<(), ProbeFailure> {
+async fn prove_provider_serves(config: &Config, id: &str) -> Result<(), ProbeFailure> {
     zest_core::load_env();
-    let root = resolve_workspace_root(state).map_err(ProbeFailure::Setup)?;
-    let config = Config::find(&root).map_err(|e| ProbeFailure::Setup(e.to_string()))?;
-    let (registry, skipped) = ProviderRegistry::from_config(&config);
+    let (registry, skipped) = ProviderRegistry::from_config(config);
 
     let provider = registry.get(id).ok_or_else(|| {
         ProbeFailure::Setup(
@@ -671,7 +733,7 @@ async fn prove_provider_serves(
     // Start the local gateway rather than probing a port nothing is listening on.
     // Its being down is the ordinary state after a reboot, not a user error, and
     // Zest launches this same binary to sign in — so it can launch it to serve.
-    if let Some(base_url) = local_gateway_url(&config, id) {
+    if let Some(base_url) = local_gateway_url(config, id) {
         if let GatewayState::Unavailable(reason) = ensure_gateway_running(&base_url).await {
             return Err(ProbeFailure::Setup(format!(
                 "The model gateway is installed but did not come up.\n\n{reason}"
@@ -697,12 +759,80 @@ fn local_gateway_url(config: &Config, id: &str) -> Option<String> {
 }
 
 #[tauri::command]
-fn start_login(id: String) -> Result<LoginStarted, String> {
-    let spawn = core_start_login(&id)?;
-    Ok(LoginStarted {
+fn start_login(state: State<'_, AppState>, id: String) -> Result<LoginStarted, String> {
+    let mut active = state
+        .login
+        .lock()
+        .map_err(|_| "login state lock poisoned".to_string())?;
+    if let Some(process) = active.as_mut() {
+        if process
+            .try_wait()
+            .map_err(|e| format!("could not inspect the existing sign-in: {e}"))?
+            .is_none()
+        {
+            return Err("A sign-in is already in progress. Finish it or cancel it first.".into());
+        }
+        *active = None;
+    }
+
+    let process = core_start_login(&id)?;
+    let spawn = &process.spawn;
+    let started = LoginStarted {
         browser_title: spawn.browser_title.to_string(),
         browser_body: spawn.browser_body.to_string(),
+    };
+    *active = Some(process);
+    Ok(started)
+}
+
+#[tauri::command]
+fn login_status(state: State<'_, AppState>) -> Result<LoginStatus, String> {
+    let mut active = state
+        .login
+        .lock()
+        .map_err(|_| "login state lock poisoned".to_string())?;
+    let Some(process) = active.as_mut() else {
+        return Ok(LoginStatus {
+            state: "idle".into(),
+            detail: None,
+        });
+    };
+
+    let Some(status) = process
+        .try_wait()
+        .map_err(|e| format!("could not inspect the sign-in process: {e}"))?
+    else {
+        return Ok(LoginStatus {
+            state: "running".into(),
+            detail: None,
+        });
+    };
+
+    let detail = if let Some(code) = status.code() {
+        format!("The sign-in helper exited with code {code} before credentials were detected.")
+    } else {
+        "The sign-in helper was terminated before credentials were detected.".into()
+    };
+    *active = None;
+    Ok(LoginStatus {
+        state: "exited".into(),
+        detail: Some(detail),
     })
+}
+
+#[tauri::command]
+fn cancel_login(state: State<'_, AppState>) -> Result<(), String> {
+    let mut active = state
+        .login
+        .lock()
+        .map_err(|_| "login state lock poisoned".to_string())?;
+    if let Some(process) = active.as_mut() {
+        process
+            .kill()
+            .map_err(|e| format!("could not stop the sign-in process: {e}"))?;
+    }
+    *active = None;
+    Ok(())
 }
 
 fn canonicalize_dir(path: PathBuf) -> Result<PathBuf, String> {
@@ -1029,6 +1159,9 @@ async fn start_session(
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
 
+    let root = resolve_workspace_root(&state)?;
+    let config = config_for_session(&state, &root)?;
+
     let slot = detect_all()
         .into_iter()
         .find(|s| s.id == id)
@@ -1046,24 +1179,23 @@ async fn start_session(
     // to every failure told people to re-run OAuth when the real problem was a
     // gateway that was not running, which signing in again cannot fix.
     if uses_gateway_auth(&id) {
-        prove_provider_serves(&state, &id).await.map_err(|failure| {
-            let detail = failure.user_message();
-            if failure.needs_reconnect() {
-                format!(
-                    "{label} needs Connect again before chat — the gateway has a \
+        prove_provider_serves(&config, &id)
+            .await
+            .map_err(|failure| {
+                let detail = failure.user_message();
+                if failure.needs_reconnect() {
+                    format!(
+                        "{label} needs Connect again before chat — the gateway has a \
 session file but cannot use it yet.\n\n{detail}",
-                    label = slot.label
-                )
-            } else {
-                detail
-            }
-        })?;
+                        label = slot.label
+                    )
+                } else {
+                    detail
+                }
+            })?;
     }
 
     persist_choice(&id)?;
-
-    let root = resolve_workspace_root(&state)?;
-    let config = Config::find(&root).map_err(|e| e.to_string())?;
 
     let prefs = ProjectSessionState::load(&root, &id).get(&id);
 
@@ -1084,6 +1216,7 @@ session file but cannot use it yet.\n\n{detail}",
     let approver: Arc<dyn Approver> = Arc::new(HubApprover {
         hub: state.approvals.clone(),
     });
+    let session_config = config.clone();
 
     let mut builder = RuntimeBuilder::new(&root)
         .with_config(config)
@@ -1129,6 +1262,7 @@ session file but cannot use it yet.\n\n{detail}",
         .sessions
         .set_session(session)
         .map_err(map_session_err)?;
+    remember_workspace_config(&state, &session_config);
 
     // A dropped preference is worth saying out loud — otherwise the picker just
     // shows a different model than last time with no explanation.
@@ -2099,6 +2233,163 @@ fn zest_config_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
+const MARKDOWN_SAVE_DIRECTORY_FILE: &str = "last-markdown-save-directory";
+
+fn markdown_save_directory_path() -> Result<PathBuf, String> {
+    Ok(zest_config_dir()?.join(MARKDOWN_SAVE_DIRECTORY_FILE))
+}
+
+fn load_markdown_save_directory() -> Option<PathBuf> {
+    let path = markdown_save_directory_path().ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let directory = PathBuf::from(raw.trim());
+    directory.is_dir().then_some(directory)
+}
+
+fn persist_markdown_save_directory(directory: &Path) -> Result<(), String> {
+    let path = markdown_save_directory_path()?;
+    std::fs::write(path, display_path(directory)).map_err(|e| e.to_string())
+}
+
+fn choose_markdown_save_directory(workspace: PathBuf, remembered: Option<PathBuf>) -> PathBuf {
+    remembered
+        .filter(|directory| directory.is_dir())
+        .unwrap_or(workspace)
+}
+
+fn sanitize_markdown_filename(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_extension = trimmed
+        .strip_suffix(".md")
+        .or_else(|| trimmed.strip_suffix(".MD"))
+        .unwrap_or(trimmed);
+    let mut safe = without_extension
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '-'
+            } else if character.is_whitespace() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    safe = safe.trim().trim_end_matches(['.', ' ']).to_string();
+    if safe.is_empty() {
+        safe = "response".into();
+    }
+    let uppercase = safe.to_ascii_uppercase();
+    let device_name = matches!(uppercase.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (uppercase.len() == 4
+            && (uppercase.starts_with("COM") || uppercase.starts_with("LPT"))
+            && uppercase
+                .chars()
+                .nth(3)
+                .is_some_and(|character| character.is_ascii_digit()));
+    if device_name {
+        safe.insert(0, '_');
+    }
+    safe.chars().take(120).collect::<String>() + ".md"
+}
+
+fn enforce_markdown_extension(mut path: PathBuf) -> PathBuf {
+    let is_markdown = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+    if !is_markdown {
+        path.set_extension("md");
+    }
+    path
+}
+
+fn write_markdown_file(path: &Path, markdown: &str) -> Result<(), String> {
+    zest_core::atomic_write(path, markdown.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_markdown(
+    state: State<'_, AppState>,
+    suggested_name: String,
+    markdown: String,
+) -> Result<Option<String>, String> {
+    let workspace = resolve_workspace_root(&state)?;
+    let directory = choose_markdown_save_directory(workspace, load_markdown_save_directory());
+    let filename = sanitize_markdown_filename(&suggested_name);
+    let dialog = rfd::FileDialog::new()
+        .set_title("Save Markdown")
+        .add_filter("Markdown", &["md"])
+        .set_file_name(&filename)
+        .set_directory(directory);
+    let Some(selected_path) = dialog.save_file() else {
+        return Ok(None);
+    };
+    let path = enforce_markdown_extension(selected_path);
+    write_markdown_file(&path, &markdown)?;
+    if let Some(parent) = path.parent() {
+        persist_markdown_save_directory(parent)?;
+    }
+    Ok(Some(display_path(&path)))
+}
+
+#[cfg(test)]
+mod markdown_export_tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_names_and_enforces_markdown_extension() {
+        assert_eq!(
+            sanitize_markdown_filename("Roadmap: <draft>?.md"),
+            "Roadmap- -draft--.md"
+        );
+        assert_eq!(sanitize_markdown_filename("CON"), "_CON.md");
+        assert_eq!(
+            enforce_markdown_extension(PathBuf::from("answer.txt")),
+            PathBuf::from("answer.md")
+        );
+        assert_eq!(
+            enforce_markdown_extension(PathBuf::from("answer.MD")),
+            PathBuf::from("answer.MD")
+        );
+    }
+
+    #[test]
+    fn remembers_a_valid_directory_and_falls_back_for_missing_one() {
+        let base = std::env::temp_dir().join(format!("zest-markdown-dir-{}", new_id("test")));
+        let workspace = base.join("workspace");
+        let remembered = base.join("remembered");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&remembered).unwrap();
+
+        assert_eq!(
+            choose_markdown_save_directory(workspace.clone(), Some(remembered.clone())),
+            remembered
+        );
+        assert_eq!(
+            choose_markdown_save_directory(workspace.clone(), Some(base.join("gone"))),
+            workspace
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn reports_atomic_write_failures() {
+        let base = std::env::temp_dir().join(format!("zest-markdown-write-{}", new_id("test")));
+        std::fs::create_dir_all(&base).unwrap();
+        let parent_file = base.join("not-a-directory");
+        std::fs::write(&parent_file, "occupied").unwrap();
+        let result = write_markdown_file(&parent_file.join("answer.md"), "# answer");
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+}
+
 fn persist_choice(id: &str) -> Result<(), String> {
     let path = zest_config_dir()?.join("last-provider");
     std::fs::write(&path, id).map_err(|e| e.to_string())?;
@@ -2429,8 +2720,9 @@ mod tests {
         // Three failed attempts must not hide the auth envelope underneath.
         let failure = ProbeFailure::Turn(exhausted(HarnessError::Api {
             status: 503,
-            body: r#"{"error":{"message":"auth_unavailable: no auth available (providers=claude)"}}"#
-                .into(),
+            body:
+                r#"{"error":{"message":"auth_unavailable: no auth available (providers=claude)"}}"#
+                    .into(),
         }));
         assert!(failure.needs_reconnect());
         let message = failure.user_message();
@@ -2475,46 +2767,26 @@ api_key_env = "ANTHROPIC_API_KEY"
     }
 }
 
-/// Point core at the gateway binary shipped beside the app.
-///
-/// Tauri places an `externalBin` sidecar next to the main executable and strips
-/// the target-triple suffix, so the bundled path is predictable. Setting the
-/// same variable a developer would set by hand keeps core with one way to find
-/// the binary, and leaves an explicit override in charge when there is one.
-fn adopt_bundled_gateway() {
-    if std::env::var_os("ZEST_CLIPROXY_PATH").is_some() {
-        return;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let Some(dir) = exe.parent() else {
-        return;
-    };
-    let name = if cfg!(windows) {
-        "cli-proxy-api.exe"
-    } else {
-        "cli-proxy-api"
-    };
-    let candidate = dir.join(name);
-    if candidate.is_file() {
-        std::env::set_var("ZEST_CLIPROXY_PATH", candidate);
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Before load_env: a bundled install has no `.env`, and provisioning needs
-    // to know whether a binary exists before it decides to write a config.
-    adopt_bundled_gateway();
+    // Discover the sidecar before bootstrapping anything that depends on it.
+    zest_core::adopt_bundled_gateway();
+    if let Err(err) = zest_core::ensure_user_config() {
+        eprintln!("warning: could not create the user config: {err}");
+    }
     zest_core::load_env();
+    if let Err(err) = zest_core::gateway_runtime() {
+        eprintln!("warning: could not initialize the bundled gateway: {err}");
+    }
 
     tauri::Builder::default()
         .manage(AppState {
             sessions: SessionController::new(),
             approvals: Arc::new(ApprovalHub::new()),
+            login: Mutex::new(None),
             persist: Mutex::new(None),
             workspace_root: Mutex::new(load_persisted_workspace()),
+            workspace_config: Mutex::new(None),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
         })
         .invoke_handler(tauri::generate_handler![
@@ -2525,6 +2797,8 @@ pub fn run() {
             set_local_offset,
             last_provider,
             start_login,
+            login_status,
+            cancel_login,
             verify_provider,
             start_session,
             update_session_options,
@@ -2536,6 +2810,7 @@ pub fn run() {
             new_thread,
             delete_thread,
             send_message,
+            save_markdown,
             cancel_turn,
             resolve_approval,
             set_approval_mode,
@@ -2684,6 +2959,17 @@ mod characterization {
             ));
         }
         Config::parse(&toml).expect("valid test config")
+    }
+
+    #[test]
+    fn a_bare_workspace_inherits_the_active_provider_without_overwriting_it() {
+        let mut destination = config_with(&["local"]);
+        let cached = config_with(&["codex", "claude"]);
+        merge_provider_tables(&mut destination, &cached, Some("codex"));
+
+        assert!(destination.providers.contains_key("local"));
+        assert!(destination.providers.contains_key("codex"));
+        assert!(!destination.providers.contains_key("claude"));
     }
 
     /// The reported failure: the picker offered Claude as ready because a CLI
