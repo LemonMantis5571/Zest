@@ -20,7 +20,7 @@ is already built.
   it.
 - Keep provider access behind one trait so a backend can move from gateway to native without the
   router changing.
-- Ship a single binary. No sidecars, no runtime interpreter.
+- Ship one installer with no manual runtime dependencies; Zest manages its pinned gateway sidecar.
 - Gate anything irreversible behind an approval the user actually sees.
 
 ## Current Priorities
@@ -43,12 +43,13 @@ is already built.
   will be wrong at the worst moment. Labelling matters as much as the arithmetic.
 - **Provider auth is fragile and not ours.** OAuth flows for Codex and Antigravity can change
   without notice. This is the single largest source of future breakage, and it is entirely upstream.
-- **Terms of service.** Routing subscription credentials (Codex, Claude, Antigravity) through a
-  third-party proxy is against the providers' terms; the realistic downside is account loss. Fine
-  for local development, not for anything distributed.
-- **Gateway dependency drifting into permanence.** CLIProxyAPI is the fast path to providers two and
-  three. If it is still load-bearing at release, the single-binary goal is gone. Revisit it as a
-  decision, not by default.
+- **Terms of service.** CLIProxyAPI's MIT licence permits redistributing its code, not using vendor
+  subscriptions. Review current vendor terms separately before any public or commercial release;
+  the local personal alpha does not establish that release permission.
+- **Bundled gateway supply chain.** CLIProxyAPI is an intentional runtime dependency, not an open
+  architecture question. Pin every release and archive hash, ship its licence, and revisit the
+  sidecar only for a documented native OAuth/API path, API-key billing, or a demonstrated security
+  or reliability failure.
 - **Scope.** Router, ledger, permissions, sessions and compaction are each substantial. The agent
   loop being done makes the project feel further along than it is.
 - **Unverified code.** Everything currently builds and passes its unit tests; almost none of it has

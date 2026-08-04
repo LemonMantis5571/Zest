@@ -16,7 +16,7 @@ import {
   type CommandId,
 } from "@/lib/keybindings";
 import { useBindings } from "@/lib/useKeybindings";
-import { cn } from "@/lib/utils";
+import { cn, scrollBehavior } from "@/lib/utils";
 
 /**
  * Rebind commands, and show which keys are already spoken for.
@@ -247,12 +247,15 @@ const ROWS: string[][] = [
   ["Z", "X", "C", "V", "B", "N", "M", ",", ".", "/"],
 ];
 
+/** Widest row drives the column count so shorter rows stay centered and scale. */
+const KEYBOARD_COLS = ROWS[0].length;
+
 function KeyboardLayout({ boundKeys }: { boundKeys: Set<string> }) {
   const bound = [...boundKeys].filter((k) => k.length === 1).sort();
 
   return (
     <div
-      className="flex flex-col items-center gap-[3px] rounded-lg border border-border/60 bg-card/40 p-3"
+      className="@container w-full min-w-0 rounded-lg border border-border/60 bg-card/40 p-2.5"
       role="img"
       aria-label={
         bound.length
@@ -260,28 +263,48 @@ function KeyboardLayout({ boundKeys }: { boundKeys: Set<string> }) {
           : "Keyboard layout. No single-character keys are in use."
       }
     >
-      {ROWS.map((row, index) => (
-        <div key={index} className="flex gap-[3px]">
-          {row.map((key) => {
-            const used = boundKeys.has(key.toUpperCase());
-            return (
-              <span
-                key={key}
-                title={used ? `${key} is used by a shortcut` : undefined}
-                className={cn(
-                  "flex size-[22px] items-center justify-center rounded-[3px] border font-mono text-[10px] transition-colors",
-                  used
-                    ? "border-primary/50 bg-primary/20 text-foreground"
-                    : "border-border/50 bg-background/40 text-muted-foreground/50"
-                )}
-              >
-                {key}
-              </span>
-            );
-          })}
-        </div>
-      ))}
-      <p className="m-0 mt-1 text-[10px] text-muted-foreground">
+      <div className="flex w-full min-w-0 flex-col gap-0.5">
+        {ROWS.map((row, index) => {
+          const offset = Math.floor((KEYBOARD_COLS - row.length) / 2);
+          return (
+            <div
+              key={index}
+              className="grid w-full min-w-0 gap-0.5"
+              style={{
+                gridTemplateColumns: `repeat(${KEYBOARD_COLS}, minmax(0, 1fr))`,
+              }}
+            >
+              {Array.from({ length: offset }, (_, i) => (
+                <span key={`pad-l-${i}`} aria-hidden className="min-w-0" />
+              ))}
+              {row.map((key) => {
+                const used = boundKeys.has(key.toUpperCase());
+                return (
+                  <span
+                    key={key}
+                    title={used ? `${key} is used by a shortcut` : undefined}
+                    className={cn(
+                      "flex aspect-square min-w-0 items-center justify-center rounded-[3px] border font-mono text-[clamp(8px,2.6cqw,10px)] transition-colors",
+                      used
+                        ? "border-primary/50 bg-primary/20 text-foreground"
+                        : "border-border/50 bg-background/40 text-muted-foreground/50"
+                    )}
+                  >
+                    {key}
+                  </span>
+                );
+              })}
+              {Array.from(
+                { length: KEYBOARD_COLS - row.length - offset },
+                (_, i) => (
+                  <span key={`pad-r-${i}`} aria-hidden className="min-w-0" />
+                )
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <p className="m-0 mt-1.5 text-[10px] text-muted-foreground">
         Highlighted keys are used by a shortcut, with or without modifiers.
       </p>
     </div>
@@ -295,7 +318,7 @@ export function useScrollIntoViewOnBump(bump: number) {
     if (bump <= 0) return;
     // After the Collapsible has opened, or the target is still zero-height.
     const id = requestAnimationFrame(() =>
-      ref.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+      ref.current?.scrollIntoView({ behavior: scrollBehavior(), block: "start" })
     );
     return () => cancelAnimationFrame(id);
   }, [bump]);
