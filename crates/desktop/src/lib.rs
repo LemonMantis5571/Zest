@@ -694,17 +694,19 @@ async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), S
     // opening a chat no longer probes. It stays tied to `needs_reconnect` so an
     // unreachable gateway is never reported as a credential problem — telling
     // someone to re-run OAuth cannot start a process that is not running.
-    prove_provider_serves(&config, &id).await.map_err(|failure| {
-        let detail = failure.user_message();
-        if failure.needs_reconnect() {
-            format!(
-                "{label} needs Connect again — the gateway has a session file but \
+    prove_provider_serves(&config, &id)
+        .await
+        .map_err(|failure| {
+            let detail = failure.user_message();
+            if failure.needs_reconnect() {
+                format!(
+                    "{label} needs Connect again — the gateway has a session file but \
 cannot use it yet.\n\n{detail}"
-            )
-        } else {
-            detail
-        }
-    })
+                )
+            } else {
+                detail
+            }
+        })
 }
 
 /// Why a provider could not be proven able to serve.

@@ -556,7 +556,10 @@ pub fn adopt_bundled_gateway() -> bool {
         return true;
     }
 
-    let Some(candidate) = bundled_gateway_candidates().into_iter().find(|p| p.is_file()) else {
+    let Some(candidate) = bundled_gateway_candidates()
+        .into_iter()
+        .find(|p| p.is_file())
+    else {
         return false;
     };
     std::env::set_var("ZEST_CLIPROXY_PATH", candidate);
@@ -652,11 +655,17 @@ mod bundled_gateway_tests {
             eprintln!("not a development checkout - nothing to assert");
             return;
         };
-        assert!(dir.ends_with(std::path::Path::new("crates/desktop/binaries")), "{dir:?}");
+        assert!(
+            dir.ends_with(std::path::Path::new("crates/desktop/binaries")),
+            "{dir:?}"
+        );
 
         let candidates = bundled_gateway_candidates();
         let first = candidates.first().expect("a dev candidate");
-        assert!(first.starts_with(&dir), "dev candidate should be the source: {first:?}");
+        assert!(
+            first.starts_with(&dir),
+            "dev candidate should be the source: {first:?}"
+        );
 
         // And it must not be whatever sits next to the test binary.
         let beside_exe = std::env::current_exe()
