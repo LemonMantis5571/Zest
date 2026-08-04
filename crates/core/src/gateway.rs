@@ -121,13 +121,84 @@ pub fn runtime() -> Result<Option<(PathBuf, PathBuf)>, String> {
     // A hand-installed gateway keeps its own config: it may be tuned, its
     // `api-keys` are already agreed with the user's `zest.toml`, and replacing
     // it with a generated one would break a setup that works.
-    if let Some(pair) = cliproxy_install() {
-        return Ok(Some(pair));
-    }
-    let Some(exe) = cliproxy_exe() else {
-        return Ok(None);
+    let resolved = match cliproxy_install() {
+        Some(pair) => Some(pair),
+        None => cliproxy_exe().map(|exe| provision().map(|p| (exe, p.config))).transpose()?,
     };
-    Ok(Some((exe, provision()?.config)))
+
+    if let Some((_, config)) = resolved.as_ref() {
+        reconcile_key(config);
+    }
+    Ok(resolved)
+}
+
+/// Make sure the key Zest sends is one the gateway it is about to start accepts.
+///
+/// The config file wins over the environment, because the config is what the
+/// serving process reads. Letting a stale `ZEST_GATEWAY_KEY` win produced a
+/// gateway rejecting its own client with `401 Invalid API key` — two sources of
+/// truth for one secret, which is one too many.
+///
+/// An environment key that *is* in the config is left alone: a hand-tuned config
+/// may list several, and switching to a different valid one would be churn.
+fn reconcile_key(config: &std::path::Path) {
+    let keys = keys_in_config(config);
+    if keys.is_empty() {
+        return;
+    }
+    if let Ok(current) = std::env::var(GATEWAY_KEY_ENV) {
+        if keys.iter().any(|k| k == current.trim()) {
+            return;
+        }
+    }
+    std::env::set_var(GATEWAY_KEY_ENV, &keys[0]);
+}
+
+/// The `api-keys` entries of a CLIProxyAPI config.
+///
+/// A deliberate line scan rather than a YAML dependency: this reads one flat
+/// list of scalars from a file Zest usually wrote itself, and a parser would be
+/// a lot of surface area for that.
+fn keys_in_config(path: &std::path::Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    let mut in_block = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if in_block {
+            match trimmed.strip_prefix('-') {
+                Some(entry) => {
+                    let key = entry.trim().trim_matches(['"', '\''].as_slice()).trim();
+                    if !key.is_empty() {
+                        keys.push(key.to_string());
+                    }
+                }
+                // Any other non-blank content ends the list.
+                None if !trimmed.is_empty() => break,
+                None => {}
+            }
+            continue;
+        }
+        if trimmed.starts_with("api-keys:") {
+            in_block = true;
+            // Inline form: `api-keys: ["k"]` is valid YAML too.
+            if let Some(rest) = trimmed.strip_prefix("api-keys:") {
+                let rest = rest.trim().trim_start_matches('[').trim_end_matches(']');
+                for part in rest.split(',') {
+                    let key = part.trim().trim_matches(['"', '\''].as_slice()).trim();
+                    if !key.is_empty() {
+                        keys.push(key.to_string());
+                    }
+                }
+            }
+        }
+    }
+    keys
 }
 
 /// Config Zest generated (or adopted) for the local gateway.
@@ -146,19 +217,28 @@ pub fn provision() -> Result<Provisioned, String> {
     let dir = gateway_dir().ok_or("no config directory for this user")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
-    let api_key = resolve_key(&dir)?;
     let config = dir.join("config.yaml");
-    if !config.is_file() {
-        atomic_write(&config, config_yaml(&api_key).as_bytes())
-            .map_err(|e| format!("write {}: {e}", config.display()))?;
-    }
 
-    // The provider config names this variable rather than holding a key. Set it
-    // for this process when the environment did not already supply one, so a
-    // generated key reaches the request that spends it.
-    if std::env::var(GATEWAY_KEY_ENV).is_err() {
-        std::env::set_var(GATEWAY_KEY_ENV, &api_key);
-    }
+    // An existing config is the authority on its own key: it is what the serving
+    // process reads. Only a config that does not exist yet gets to take a key
+    // from the environment or generate one.
+    let api_key = match keys_in_config(&config).into_iter().next() {
+        Some(existing) => existing,
+        None => {
+            let key = resolve_key(&dir)?;
+            // A config that exists but lists no keys was hand-edited; leave it.
+            // Rewriting a file the user changed is worse than an odd config.
+            if !config.is_file() {
+                atomic_write(&config, config_yaml(&key).as_bytes())
+                    .map_err(|e| format!("write {}: {e}", config.display()))?;
+            }
+            key
+        }
+    };
+
+    // The provider config names this variable rather than holding a key, so the
+    // key that reaches the request has to be the one the gateway will accept.
+    std::env::set_var(GATEWAY_KEY_ENV, &api_key);
 
     Ok(Provisioned { config, api_key })
 }
@@ -385,6 +465,77 @@ mod tests {
         std::env::remove_var(GATEWAY_DIR_ENV);
         std::env::remove_var(GATEWAY_KEY_ENV);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The regression that produced `401 Invalid API key`: the environment held
+    /// a key from an older setup, the running gateway had been started from a
+    /// generated config, and Zest sent the environment's. The config the gateway
+    /// reads is the only authority.
+    #[test]
+    fn the_config_wins_over_a_stale_key_in_the_environment() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("stale-key");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), config_yaml("zest-real")).unwrap();
+        std::env::set_var(GATEWAY_DIR_ENV, &dir);
+        std::env::set_var(GATEWAY_KEY_ENV, "zest-stale-from-dotenv");
+
+        let provisioned = provision().unwrap();
+
+        let resolved = std::env::var(GATEWAY_KEY_ENV).unwrap();
+        std::env::remove_var(GATEWAY_DIR_ENV);
+        std::env::remove_var(GATEWAY_KEY_ENV);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(provisioned.api_key, "zest-real");
+        assert_eq!(resolved, "zest-real", "the request must carry the config's key");
+    }
+
+    #[test]
+    fn api_keys_are_read_from_both_yaml_list_shapes() {
+        let dir = scratch("parse");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let block = dir.join("block.yaml");
+        std::fs::write(&block, "port: 8317\napi-keys:\n  - \"one\"\n  - 'two'\ndebug: false\n").unwrap();
+        assert_eq!(keys_in_config(&block), vec!["one", "two"]);
+
+        let inline = dir.join("inline.yaml");
+        std::fs::write(&inline, "api-keys: [\"solo\"]\n").unwrap();
+        assert_eq!(keys_in_config(&inline), vec!["solo"]);
+
+        // A config with no list at all must not invent one.
+        let none = dir.join("none.yaml");
+        std::fs::write(&none, "port: 9999\n").unwrap();
+        assert!(keys_in_config(&none).is_empty());
+        assert!(keys_in_config(&dir.join("missing.yaml")).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hand-installed gateway may list several keys; if the environment
+    /// already names a valid one, switching to another is pointless churn.
+    #[test]
+    fn an_environment_key_that_the_config_accepts_is_left_alone() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("accepted");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.yaml");
+        std::fs::write(&config, "api-keys:\n  - \"first\"\n  - \"second\"\n").unwrap();
+        std::env::set_var(GATEWAY_KEY_ENV, "second");
+
+        reconcile_key(&config);
+        let kept = std::env::var(GATEWAY_KEY_ENV).unwrap();
+
+        std::env::set_var(GATEWAY_KEY_ENV, "not-in-the-config");
+        reconcile_key(&config);
+        let replaced = std::env::var(GATEWAY_KEY_ENV).unwrap();
+
+        std::env::remove_var(GATEWAY_KEY_ENV);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(kept, "second");
+        assert_eq!(replaced, "first");
     }
 
     #[test]
