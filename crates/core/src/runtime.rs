@@ -1,8 +1,8 @@
 //! Shared assembly for CLI and desktop front-ends.
 //!
 //! One place for config → registry → tools → agent so both entrypoints stay
-//! aligned. Multi-provider routing is only exposed via [`Delegate`] workers;
-//! the parent conversation stays pinned to a single provider.
+//! aligned. Delegated work uses explicitly configured external ACP/CLI
+//! workers; the parent conversation stays pinned to a single provider.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -15,10 +15,8 @@ use crate::prompt::{
 };
 use crate::provider::normalize_effort;
 use crate::provider::registry::{ProviderRegistry, Skipped};
-use crate::routing::Router;
 use crate::skills::SkillSet;
 use crate::tools::approval::{ApprovalPolicy, Approver, DenyApprover};
-use crate::tools::delegate::Delegate;
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::{
@@ -64,7 +62,7 @@ pub struct RuntimeBuilder {
     approver: Option<Arc<dyn Approver>>,
     questioner: Option<Arc<dyn Questioner>>,
     policy: Option<Arc<Mutex<ApprovalPolicy>>>,
-    enable_delegate: bool,
+    enable_external_agents: bool,
     register_write: bool,
     register_exec: bool,
 }
@@ -83,7 +81,7 @@ impl RuntimeBuilder {
             approver: None,
             questioner: None,
             policy: None,
-            enable_delegate: true,
+            enable_external_agents: true,
             register_write: true,
             register_exec: true,
         }
@@ -154,8 +152,8 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn enable_delegate(mut self, on: bool) -> Self {
-        self.enable_delegate = on;
+    pub fn enable_external_agents(mut self, on: bool) -> Self {
+        self.enable_external_agents = on;
         self
     }
 
@@ -185,7 +183,7 @@ impl RuntimeBuilder {
             .or_else(|| config.default_target().map(|t| t.provider.clone()))
             .ok_or_else(|| {
                 HarnessError::Other(
-                    "no provider selected and zest.toml has no [routing].default".into(),
+                    "no provider selected and zest.toml has no [default].provider".into(),
                 )
             })?;
 
@@ -278,19 +276,13 @@ impl RuntimeBuilder {
             .ledger
             .unwrap_or_else(|| Arc::new(Mutex::new(Ledger::load())));
 
-        // One condition, read twice: whether `delegate` gets registered, and
+        // One condition, read twice: whether the ACP tool gets registered, and
         // whether the prompt is allowed to talk about it. Computing it in two
         // places would eventually let them disagree, and the failure mode is a
         // prompt describing a tool the model cannot see.
-        let delegate_enabled =
-            self.enable_delegate && config.routing.delegation && registry.len() > 1;
-        let external_delegate_enabled = self.enable_delegate && !config.agents.is_empty();
+        let external_delegate_enabled = self.enable_external_agents && !config.agents.is_empty();
 
         let mut base_system = self.system.unwrap_or_else(|| DEFAULT_SYSTEM.to_string());
-        if delegate_enabled {
-            base_system.push_str("\n\n");
-            base_system.push_str(crate::prompt::DELEGATION_SYSTEM);
-        }
         if external_delegate_enabled {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::EXTERNAL_DELEGATION_SYSTEM);
@@ -333,22 +325,6 @@ impl RuntimeBuilder {
 
         let registry = Arc::new(registry);
 
-        // Multi-provider routing is delegated workers only — parent stays pinned.
-        // `delegate_enabled` above is the user's opt-in and defaults to false:
-        // handing work to a second provider spends a second subscription, so it
-        // does not switch itself on just because a second account is configured.
-        if delegate_enabled {
-            let kinds = config.routing.kinds();
-            tools.register(Arc::new(
-                Delegate::new(
-                    registry.clone(),
-                    Arc::new(Router::from_config(&config)),
-                    worker_tools,
-                )
-                .with_ledger(ledger.clone())
-                .with_kinds(kinds),
-            ));
-        }
         if external_delegate_enabled {
             tools.register(Arc::new(ExternalAgent::new(&root, config.agents.clone())));
         }
@@ -445,87 +421,6 @@ mod tests {
         dir
     }
 
-    /// Two loaded providers is not consent to spend both.
-    #[test]
-    fn delegate_stays_unregistered_until_delegation_is_turned_on() {
-        let dir = two_provider_dir("delegate-off");
-        let base = std::fs::read_to_string(dir.join("zest.toml")).unwrap();
-
-        let tools_for = |extra: &str| {
-            let config = Config::parse(&format!("{base}{extra}")).unwrap();
-            RuntimeBuilder::new(&dir)
-                .with_config(config)
-                .with_provider("codex")
-                .register_write_tools(false)
-                .register_exec_tools(false)
-                .build()
-                .unwrap()
-                .agent
-                .tool_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        };
-
-        let rule = "\n[[routing.rules]]\nkind = \"frontend\"\nprovider = \"claude\"\n";
-
-        let off = tools_for("");
-        assert!(
-            !off.iter().any(|t| t == "delegate"),
-            "a second account is not consent to spend it: {off:?}"
-        );
-
-        let rules_only = tools_for(rule);
-        assert!(
-            !rules_only.iter().any(|t| t == "delegate"),
-            "rules alone are not the switch: {rules_only:?}"
-        );
-
-        // `delegation` sits under the existing [routing] table, so it has to be
-        // written before the [[routing.rules]] array-of-tables stanza.
-        let on = tools_for(&format!("delegation = true\n{rule}"));
-        assert!(
-            on.iter().any(|t| t == "delegate"),
-            "opting in should register it: {on:?}"
-        );
-    }
-
-    /// The prompt must not describe a tool the model cannot see, and must
-    /// describe one it can. These are two reads of one condition; a test keeps
-    /// them from drifting apart.
-    #[test]
-    fn delegation_guidance_tracks_whether_the_tool_exists() {
-        let dir = two_provider_dir("delegate-prompt");
-        let base = std::fs::read_to_string(dir.join("zest.toml")).unwrap();
-        let rule = "\n[[routing.rules]]\nkind = \"frontend\"\nprovider = \"claude\"\n";
-
-        let session_for = |extra: &str| {
-            let config = Config::parse(&format!("{base}{extra}")).unwrap();
-            RuntimeBuilder::new(&dir)
-                .with_config(config)
-                .with_provider("codex")
-                .register_write_tools(false)
-                .register_exec_tools(false)
-                .build()
-                .unwrap()
-        };
-
-        let off = session_for(rule);
-        let off_system = off.agent.system.clone().unwrap_or_default();
-        assert!(
-            !off_system.contains("# Delegating"),
-            "dead instructions in the cached prefix"
-        );
-
-        let on = session_for(&format!("delegation = true\n{rule}"));
-        let on_system = on.agent.system.clone().unwrap_or_default();
-        assert!(on_system.contains("# Delegating"), "guidance is missing");
-        assert!(
-            on_system.contains("same turn"),
-            "the concurrency hint is the point of the paragraph"
-        );
-    }
-
     #[test]
     fn interactive_question_guidance_requires_an_interactive_front_end() {
         let dir = two_provider_dir("question-runtime");
@@ -564,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn external_agents_are_explicit_tools_and_follow_the_delegate_switch() {
+    fn external_agents_are_explicit_tools_and_follow_the_external_worker_switch() {
         std::env::set_var("ZEST_EXTERNAL_RUNTIME_KEY", "present");
         let dir = scratch("external-agent");
         let config = Config::parse(
@@ -581,8 +476,8 @@ command = "review-agent"
 args = ["--output-format", "stream-json", "{prompt}"]
 workspace = "isolated"
 
-[routing]
-default = { provider = "codex" }
+[default]
+provider = "codex"
 "#,
         )
         .unwrap();
@@ -609,7 +504,7 @@ default = { provider = "codex" }
         let disabled = RuntimeBuilder::new(&dir)
             .with_config(config)
             .with_provider("codex")
-            .enable_delegate(false)
+            .enable_external_agents(false)
             .register_write_tools(false)
             .register_exec_tools(false)
             .build()
@@ -753,8 +648,9 @@ api_key_env = "ZEST_TEST_TWO_KEY"
 model = "claude-opus-5"
 models = ["claude-opus-5", "claude-sonnet-5"]
 
-[routing]
-default = {{ provider = "codex", model = "gpt-5.6-sol" }}
+[default]
+provider = "codex"
+model = "gpt-5.6-sol"
 "#
         )
         .unwrap();
@@ -771,7 +667,7 @@ default = {{ provider = "codex", model = "gpt-5.6-sol" }}
             .with_config(Config::find(&dir).unwrap())
             .with_provider("claude")
             .with_remembered_options(Some("gpt-5.6-luna".into()), Some("medium".into()))
-            .enable_delegate(false)
+            .enable_external_agents(false)
             .register_write_tools(false)
             .register_exec_tools(false)
             .build()
@@ -802,8 +698,9 @@ api_key_env = "ZEST_TEST_EFFORT_KEY"
 model = "gpt-a"
 efforts = ["low", "high"]
 
-[routing]
-default = {{ provider = "codex", model = "gpt-a" }}
+[default]
+provider = "codex"
+model = "gpt-a"
 "#
         )
         .unwrap();
@@ -812,7 +709,7 @@ default = {{ provider = "codex", model = "gpt-a" }}
         let session = RuntimeBuilder::new(&dir)
             .with_config(Config::find(&dir).unwrap())
             .with_remembered_options(None, Some("max".into()))
-            .enable_delegate(false)
+            .enable_external_agents(false)
             .register_exec_tools(false)
             .build()
             .expect("a stale effort must not strand the provider");
@@ -823,7 +720,7 @@ default = {{ provider = "codex", model = "gpt-a" }}
         let explicit = RuntimeBuilder::new(&dir)
             .with_config(Config::find(&dir).unwrap())
             .with_effort("max")
-            .enable_delegate(false)
+            .enable_external_agents(false)
             .register_exec_tools(false)
             .build();
         assert!(explicit.is_err(), "explicit effort must not be swallowed");
@@ -836,7 +733,7 @@ default = {{ provider = "codex", model = "gpt-a" }}
             .with_config(Config::find(&dir).unwrap())
             .with_provider("claude")
             .with_remembered_options(Some("claude-sonnet-5".into()), None)
-            .enable_delegate(false)
+            .enable_external_agents(false)
             .register_write_tools(false)
             .register_exec_tools(false)
             .build()
@@ -854,7 +751,7 @@ default = {{ provider = "codex", model = "gpt-a" }}
             .with_config(Config::find(&dir).unwrap())
             .with_provider("claude")
             .with_model("gpt-5.6-luna")
-            .enable_delegate(false)
+            .enable_external_agents(false)
             .register_write_tools(false)
             .register_exec_tools(false)
             .build();
@@ -875,7 +772,7 @@ default = {{ provider = "codex", model = "gpt-a" }}
         let built = RuntimeBuilder::new(&dir)
             .with_config(Config::find(&dir).unwrap())
             .with_provider("claude")
-            .enable_delegate(false)
+            .enable_external_agents(false)
             .register_write_tools(false)
             .register_exec_tools(false)
             .build();
@@ -896,8 +793,9 @@ base_url = "http://127.0.0.1:8317"
 api_key_env = "ZEST_TEST_RUNTIME_ABSENT_KEY"
 model = "gpt-5.6-sol"
 
-[routing]
-default = {{ provider = "codex", model = "gpt-5.6-sol" }}
+[default]
+provider = "codex"
+model = "gpt-5.6-sol"
 "#
         )
         .unwrap();

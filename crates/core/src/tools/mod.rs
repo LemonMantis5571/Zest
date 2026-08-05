@@ -1,6 +1,5 @@
 pub mod approval;
 pub mod bash;
-pub mod delegate;
 pub mod edit_file;
 pub mod external_agent;
 pub mod glob_files;
@@ -38,7 +37,7 @@ use self::read_skill::ReadSkill;
 use self::web_search::WebSearch;
 use self::write_file::WriteFile;
 
-pub use self::outcome::{SkippedProvider, ToolMetadata, ToolOutcome, UsageDelta};
+pub use self::outcome::{ToolMetadata, ToolOutcome};
 pub use self::question::{
     parse_question_input, AskUser, DenyQuestioner, QuestionRequest, Questioner, ASK_USER_TOOL,
 };

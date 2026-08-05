@@ -23,8 +23,6 @@ pub mod profile;
 pub mod prompt;
 pub mod provider;
 pub mod reading_diff;
-pub mod routing;
-pub mod routing_edit;
 pub mod runtime;
 pub mod skills;
 pub mod thread;
@@ -49,7 +47,7 @@ pub use commands::{
 };
 pub use config::{
     ensure_user_config, load_env, user_config_path, Config, ExternalAgentConfig, ExternalAgentMode,
-    ExternalWorkspace, ProviderConfig, Routing, Rule, Target, DEFAULT_USER_CONFIG,
+    ExternalWorkspace, ProviderConfig, Target, DEFAULT_USER_CONFIG,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
@@ -65,7 +63,7 @@ pub use profile::{derive as derive_profile_stats, ChatFacts, DayPoint, ProfileSt
 pub use prompt::{
     compose_for_project, compose_system, compose_system_with_docs, custom_system_path, env_context,
     load_custom_system, load_project_docs, save_custom_system, truncate_chars, DEFAULT_SYSTEM,
-    DELEGATION_SYSTEM, MAX_CUSTOM_PROMPT_BYTES, MAX_PROJECT_DOCS_BYTES, PROJECT_DOC_FILES,
+    EXTERNAL_DELEGATION_SYSTEM, MAX_CUSTOM_PROMPT_BYTES, MAX_PROJECT_DOCS_BYTES, PROJECT_DOC_FILES,
 };
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::registry::{ProviderRegistry, Skipped};
@@ -78,7 +76,6 @@ pub use provider::{
 pub use reading_diff::{
     abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,
 };
-pub use routing::{Resolution, Router};
 pub use runtime::{RuntimeBuilder, RuntimeSession};
 pub use skills::{
     Skill, SkillSet, SkillSource, SkillSummary, INLINE_BUDGET_BYTES, INLINE_MAX_BYTES, MAX_SKILLS,
@@ -93,7 +90,6 @@ pub use tools::approval::{
     AllowApprover, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalPreview,
     ApprovalRequest, Approver, DenyApprover, PolicyOutcome, ToolRisk,
 };
-pub use tools::delegate::{Delegate, DELEGATE_TOOL};
 pub use tools::external_agent::{ExternalAgent, EXTERNAL_AGENT_TOOL};
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
@@ -106,8 +102,8 @@ pub use tools::read_file::ReadFile;
 pub use tools::sensitive::is_sensitive_path;
 pub use tools::write_file::WriteFile;
 pub use tools::{
-    register_question_tool, register_read_tools, register_skill_tools, register_write_tools,
-    SkippedProvider, Tool, ToolMetadata, ToolOutcome, ToolRegistry, UsageDelta,
+    register_question_tool, register_read_tools, register_skill_tools, register_write_tools, Tool,
+    ToolMetadata, ToolOutcome, ToolRegistry,
 };
 pub use usage::{
     HeadroomView, Ledger, MeasuredUsage, ProviderUsage, ProviderUsageView, UsageSnapshot,

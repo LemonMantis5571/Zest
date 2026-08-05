@@ -276,11 +276,7 @@ mod tests {
     fn preset_agent_preserves_comments_and_can_be_removed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("zest.toml");
-        std::fs::write(
-            &path,
-            "# keep me\n[routing]\ndefault = { provider = \"codex\" }\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "# keep me\n[default]\nprovider = \"codex\"\n").unwrap();
 
         upsert_external_agent(&path, &external_agent_preset("claude").unwrap()).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
