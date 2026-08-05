@@ -25,7 +25,6 @@ colors:
   inverse-surface-2: "#f6f7f7"
   inverse-ink: "#000000"
   brand-secure: "#7a7fad"
-  semantic-success: "#27a644"
   semantic-overlay: "#000000"
 
 typography:
@@ -259,7 +258,7 @@ components:
 
 Linear's marketing canvas is the deepest dark surface in this collection — `{colors.canvas}` is #010102, essentially pure black with a faint blue tint. On top sits a four-step surface ladder (`{colors.surface-1}` through `{colors.surface-4}`) for cards, panels, and lifted tiles, with hairline borders running from `{colors.hairline}` (#23252a) up through `{colors.hairline-strong}` and `{colors.hairline-tertiary}`. Light gray text (`{colors.ink}` #f7f8f8) carries the body and headlines.
 
-The single chromatic accent is **Linear lavender-blue** `{colors.primary}` (#5e6ad2) — used on the brand mark, focus rings, and the primary CTA button. A lighter hover state (`{colors.primary-hover}` #828fff) and a focus-tinted variant (`{colors.primary-focus}` #5e69d1) extend the same hue. Linear avoids saturated greens, oranges, reds, etc. on the marketing canvas — the only semantic color is `{colors.semantic-success}` (#27a644) for status pills and the rare success indicator.
+The single chromatic accent is **Linear lavender-blue** `{colors.primary}` (#5e6ad2) — used on the brand mark, focus rings, primary CTA buttons, and positive status indicators. A lighter hover state (`{colors.primary-hover}` #828fff) and a focus-tinted variant (`{colors.primary-focus}` #5e69d1) extend the same hue. Linear avoids saturated greens, oranges, reds, and other competing accents on the product canvas; status treatments should use lavender or neutral surfaces, reserving destructive red and approval amber for those specific states.
 
 Display type runs Linear's custom sans (with `SF Pro Display` fallback) at weight 500–700 with negative letter-spacing scaling from -3.0px at 80px down to 0 at body. The body family is Linear's text cut, and a Linear Mono is reserved for code snippets in product screenshots.
 
@@ -304,7 +303,7 @@ The page rhythm is **dense product screenshots** — Linear's marketing leads wi
 - **Ink Tertiary** ({colors.ink-tertiary}): Quaternary at #62666d — disabled, footnotes.
 
 ### Semantic
-- **Success Green** ({colors.semantic-success}): Status pills, success indicators. The only semantic color on marketing.
+- **Positive status** ({colors.primary}): Status pills and success indicators use the lavender accent without adding a second chromatic color.
 - **Overlay** ({colors.semantic-overlay}): Pure black overlay scrim for modals.
 
 ## Typography

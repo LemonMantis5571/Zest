@@ -167,7 +167,7 @@ export function ChatHistorySidebar({
     return () => {
       cancelled = true;
     };
-  }, [open, activeProjectPath, activeProviderId, tick]);
+  }, [open, activeThreadId, activeProjectPath, activeProviderId, tick]);
 
   const wasSending = useRef(false);
   useEffect(() => {

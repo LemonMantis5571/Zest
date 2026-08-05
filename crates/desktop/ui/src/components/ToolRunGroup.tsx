@@ -82,7 +82,7 @@ export function ToolRunGroup({
       {hasChanges ? (
         <span className="shrink-0 font-mono text-[11px]">
           {summary.added > 0 ? (
-            <span className="text-[var(--success,#27a644)]">+{summary.added}</span>
+            <span className="text-primary">+{summary.added}</span>
           ) : null}
           {summary.added > 0 && summary.removed > 0 ? " " : null}
           {summary.removed > 0 ? (

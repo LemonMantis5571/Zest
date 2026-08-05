@@ -84,7 +84,7 @@ export function MarkdownActions({ text, suggestedName, className }: Props) {
           className="size-3.5"
           active={copied}
           initial={<CopyIcon className="size-3.5" />}
-          swapped={<CheckIcon className="size-3.5 text-[var(--success,#27a644)]" />}
+          swapped={<CheckIcon className="size-3.5 text-primary" />}
         />
       </Button>
       <Button

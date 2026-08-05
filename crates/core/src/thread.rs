@@ -877,7 +877,7 @@ impl ThreadStore {
         fork.updated_at = fork.created_at;
         fork.title = title
             .map(str::to_string)
-            .or_else(|| source.title.as_ref().map(|t| format!("Fork: {t}")));
+            .or_else(|| source.title.as_ref().map(|t| format!("Copy of {t}")));
         fork.checkpoints.clear();
         self.save(&fork)?;
         Ok(fork)
@@ -1044,7 +1044,7 @@ mod characterization {
         let fork = store.fork(&thread, None).unwrap();
         assert_ne!(fork.id, thread.id);
         assert_eq!(fork.provider_id.as_deref(), Some("codex"));
-        assert!(fork.title.as_deref().unwrap().starts_with("Fork:"));
+        assert!(fork.title.as_deref().unwrap().starts_with("Copy of "));
         assert!(fork.checkpoints.is_empty());
         assert!(store.load(&fork.id).is_ok());
 

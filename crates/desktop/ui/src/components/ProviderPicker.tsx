@@ -134,7 +134,7 @@ export function ProviderPicker({
                 <span
                   className={cn(
                     "justify-self-center size-2 rounded-full transition-colors duration-150",
-                    !verifyFailed && p.statusKind === "ready" && "bg-[var(--success)]",
+                    !verifyFailed && p.statusKind === "ready" && "bg-primary",
                     verifyFailed && "bg-amber-400",
                     !verifyFailed && p.statusKind === "unknown" && "bg-[#c4c4c4]",
                     !verifyFailed &&
@@ -160,7 +160,7 @@ export function ProviderPicker({
                 <span
                   className={cn(
                     "whitespace-nowrap text-[11px] font-medium text-muted-foreground",
-                    !verifyFailed && p.statusKind === "ready" && "text-[var(--success)]",
+                    !verifyFailed && p.statusKind === "ready" && "text-primary",
                     verifyFailed && "text-amber-400"
                   )}
                 >
