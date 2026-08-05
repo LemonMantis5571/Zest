@@ -14,6 +14,24 @@ Impact:
 
 ---
 
+### 2026-08-05 — Claude and Gemini CLI auth belongs to the worker
+
+Decision: the desktop provider picker launches only the Zest-managed Codex sign-in. Claude Code
+and Gemini CLI are configured as external workers and must already be authenticated by their own
+CLIs; Zest does not show their provider Connect actions or offer a Reconnect OAuth path for them.
+
+Reason: external delegation invokes the vendors' supported CLIs directly, so a second Zest auth
+surface duplicates credentials, adds setup friction, and can imply that a provider session is
+available to the parent chat when it is only available to a worker. The core auth/provider code
+stays available for explicit configurations and compatibility, but the desktop's user-facing path
+matches the actual execution boundary.
+
+Impact: the picker and reconnect affordances are allowlisted to Codex. Settings → External workers
+remains the setup surface for Claude Code and Gemini CLI, and their sessions never enter Zest's
+credential handling.
+
+---
+
 ### 2026-08-02 — A mode may apply a skill
 
 Decision: `ApprovalMode::Plan` no longer only blocks tools — it runs the `plan`

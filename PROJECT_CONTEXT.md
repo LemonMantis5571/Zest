@@ -9,8 +9,8 @@
 Zest is a **multi-provider orchestration harness** for coding agents.
 
 The defining capability is routing: send each task to the model that suits it, across providers
-that are authenticated separately — Gemini 3.5 Flash via an Antigravity login, Claude Opus 5 via a
-Claude login, GPT-5.6 Luna via a Codex login — and keep a running account of what each provider has
+that are authenticated separately — Gemini and Claude work can run through already-authenticated
+external CLIs, while GPT-5.6 Luna uses a Codex login — and keep a running account of what each provider has
 left. Cheap, fast models take mechanical work; expensive models take the hard reasoning; the
 harness decides which is which and never silently burns the wrong budget.
 
@@ -44,7 +44,7 @@ component, no accounts.
 - **`zest-core`** — headless library: model client, agent loop, tool registry. No terminal or UI
   assumptions.
 - **`zest`** — terminal front-end. One consumer of the core.
-- **`zest-desktop`** — Tauri shell: provider picker, Connect (vendor OAuth spawn), and chat session
+- **`zest-desktop`** — Tauri shell: provider picker, Codex Connect (vendor OAuth spawn), and chat session
   UI (projects sidebar, attachments, approvals/diffs, context meter). Webview is a Vite + React +
   shadcn build under `crates/desktop/ui/` (Node is build/dev only).
 - **Anthropic Messages API** — the wire protocol implemented natively today, over raw HTTP + SSE.
@@ -61,7 +61,9 @@ Planned, and the actual point of the project:
   [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Tauri sidecar. It holds OAuth
   logins for Codex, Claude, Gemini/Antigravity, Grok and Kimi and re-exposes them through compatible
   APIs. Zest owns provisioning, loopback security, supervision, diagnostics and UX; CLIProxyAPI
-  owns vendor OAuth and protocol translation. A hand-installed gateway remains an override.
+  owns vendor OAuth and protocol translation. The desktop only launches the Codex sign-in; Claude
+  Code and Gemini CLI workers authenticate in their own CLIs. A hand-installed gateway remains an
+  override.
 
 ## Important Constraints
 
