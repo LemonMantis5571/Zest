@@ -28,6 +28,7 @@ use crate::tools::approval::{
     ToolRisk,
 };
 use crate::tools::prepared::PreparedToolCall;
+use crate::tools::question::{parse_question_input, DenyQuestioner, Questioner, ASK_USER_TOOL};
 use crate::tools::ToolRegistry;
 use crate::usage::Ledger;
 
@@ -44,6 +45,8 @@ pub struct Agent {
     /// Mode + session grants, consulted before the approver is ever called.
     /// Shared so a front-end can flip the mode mid-session.
     policy: Arc<Mutex<ApprovalPolicy>>,
+    /// Front-end hook for the provider-independent `ask_user` tool.
+    questioner: Arc<dyn Questioner>,
     pub model: String,
     /// Budgets reasoning *and* text together on providers that think. Streaming
     /// means there is no HTTP timeout pressure, so this is a ceiling rather than
@@ -68,6 +71,7 @@ impl Agent {
             ledger: None,
             approver: Arc::new(DenyApprover),
             policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
+            questioner: Arc::new(DenyQuestioner),
             model,
             max_tokens: 32_000,
             effort: "high".to_string(),
@@ -103,6 +107,13 @@ impl Agent {
     /// Share the permission policy so a front-end can change mode mid-session.
     pub fn with_policy(mut self, policy: Arc<Mutex<ApprovalPolicy>>) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Hook for desktop or another interactive front-end to answer
+    /// provider-neutral `ask_user` calls.
+    pub fn with_questioner(mut self, questioner: Arc<dyn Questioner>) -> Self {
+        self.questioner = questioner;
         self
     }
 
@@ -496,8 +507,19 @@ impl Agent {
         // whole batch is also what tells us which calls need a human.
         let mut auto: Vec<(usize, PreparedToolCall)> = Vec::new();
         let mut gated: Vec<(usize, PreparedToolCall)> = Vec::new();
+        let mut question: Option<(usize, PreparedToolCall)> = None;
         for (index, call) in calls.iter().enumerate() {
             match self.tools.prepare(&call.name, call.input.clone()) {
+                Ok(prepared) if call.name == ASK_USER_TOOL => {
+                    if question.is_some() {
+                        slots[index] = Some(ToolCallOutcome::failed(
+                            "ask_user accepts one question at a time",
+                            ToolRisk::Read,
+                        ));
+                    } else {
+                        question = Some((index, prepared));
+                    }
+                }
                 Ok(prepared) if prepared.risk.requires_approval() => gated.push((index, prepared)),
                 Ok(prepared) => auto.push((index, prepared)),
                 Err(message) => {
@@ -507,6 +529,16 @@ impl Agent {
                     ));
                 }
             }
+        }
+
+        // A question controls what the next tool batch should do. Resolve it
+        // before ordinary reads or approvals rather than letting a concurrent
+        // call run against a decision the user has not made yet.
+        if let Some((index, prepared)) = question {
+            slots[index] = Some(
+                self.run_question_call(&calls[index], prepared, on_event, cancel)
+                    .await,
+            );
         }
 
         if !auto.is_empty() {
@@ -585,6 +617,67 @@ impl Agent {
                 })
             })
             .collect()
+    }
+
+    /// One interactive question: reserve the waiter, notify the front-end,
+    /// then turn the answer into the ordinary model-visible tool result.
+    async fn run_question_call(
+        &self,
+        call: &crate::anthropic::types::ToolUse,
+        prepared: PreparedToolCall,
+        on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        cancel: Option<&CancelToken>,
+    ) -> ToolCallOutcome {
+        if cancel.map(|token| token.is_cancelled()).unwrap_or(false) {
+            return ToolCallOutcome::failed(
+                "turn cancelled before waiting for an answer",
+                ToolRisk::Read,
+            );
+        }
+
+        let input = match prepared.plain_input() {
+            Some(input) => input,
+            None => {
+                return ToolCallOutcome::failed(
+                    "internal error: ask_user prepared kind mismatch",
+                    ToolRisk::Read,
+                )
+            }
+        };
+        let question_id = new_id("question");
+        let request = match parse_question_input(input, &question_id, &call.id) {
+            Ok(request) => request,
+            Err(message) => return ToolCallOutcome::failed(message, ToolRisk::Read),
+        };
+
+        self.questioner.prepare(&question_id).await;
+        on_event(StreamEvent::QuestionNeeded {
+            question_id: request.question_id.clone(),
+            tool_call_id: request.tool_call_id.clone(),
+            prompt: request.prompt.clone(),
+            choices: request.choices.clone(),
+            multiple: request.multiple,
+            placeholder: request.placeholder.clone(),
+        });
+
+        let answer = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel) => Err("turn cancelled while waiting for an answer".into()),
+            result = self.questioner.answer(&request) => result,
+        };
+
+        match answer {
+            Ok(answer) if !answer.trim().is_empty() => ToolCallOutcome {
+                body: answer,
+                is_error: false,
+                risk: ToolRisk::Read,
+                path: None,
+                diff: None,
+                metadata: None,
+            },
+            Ok(_) => ToolCallOutcome::failed("the user submitted an empty answer", ToolRisk::Read),
+            Err(message) => ToolCallOutcome::failed(message, ToolRisk::Read),
+        }
     }
 
     /// One approval-gated call: prompt, wait, then execute if allowed.
@@ -1081,6 +1174,117 @@ mod tests {
                 served_model: None,
             })
         }
+    }
+
+    struct AskingProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for AskingProvider {
+        fn id(&self) -> &str {
+            "fake"
+        }
+
+        fn default_model(&self) -> &str {
+            "fake-model"
+        }
+
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+
+        async fn stream_turn(
+            &self,
+            _req: &TurnRequest,
+            _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            if call == 0 {
+                Ok(Completion {
+                    content: vec![json!({
+                        "type": "tool_use",
+                        "id": "ask-1",
+                        "name": "ask_user",
+                        "input": {
+                            "question": "Which layout should I use?",
+                            "choices": ["Compact", "Spacious"]
+                        }
+                    })],
+                    stop_reason: Some("tool_use".into()),
+                    usage: Usage::default(),
+                    usage_available: true,
+                    limits: None,
+                    served_model: None,
+                })
+            } else {
+                Ok(Completion {
+                    content: vec![json!({ "type": "text", "text": "continued" })],
+                    stop_reason: Some("end_turn".into()),
+                    usage: Usage::default(),
+                    usage_available: true,
+                    limits: None,
+                    served_model: None,
+                })
+            }
+        }
+    }
+
+    struct RecordingQuestioner {
+        seen: Arc<Mutex<Vec<crate::tools::QuestionRequest>>>,
+    }
+
+    #[async_trait]
+    impl Questioner for RecordingQuestioner {
+        async fn answer(
+            &self,
+            request: &crate::tools::QuestionRequest,
+        ) -> std::result::Result<String, String> {
+            self.seen.lock().unwrap().push(request.clone());
+            Ok("Compact".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_user_emits_a_question_and_resumes_the_same_turn() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(AskingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        crate::tools::register_question_tool(&mut tools);
+        let mut agent = Agent::new(provider, tools)
+            .with_questioner(Arc::new(RecordingQuestioner { seen: seen.clone() }));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let events_for_sink = events.clone();
+        let mut sink = move |event: StreamEvent<'_>| {
+            if let Ok(mut events) = events_for_sink.lock() {
+                match event {
+                    StreamEvent::QuestionNeeded { prompt, .. } => {
+                        events.push(format!("question:{prompt}"));
+                    }
+                    StreamEvent::ToolCallResult { summary, .. } => {
+                        events.push(format!("result:{summary}"));
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        agent.send("choose a layout", &mut sink).await.unwrap();
+
+        let questions = seen.lock().unwrap();
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].prompt, "Which layout should I use?");
+        assert_eq!(questions[0].choices, ["Compact", "Spacious"]);
+        drop(questions);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["question:Which layout should I use?", "result:Compact",]
+        );
+        assert_eq!(agent.messages.len(), 4);
+        assert_eq!(agent.messages[2].role, "user");
+        assert_eq!(agent.messages[2].content[0]["content"], "Compact");
     }
 
     struct ContextCaptureTool {

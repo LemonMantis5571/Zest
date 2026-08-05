@@ -258,6 +258,7 @@ async fn selected_model_tool_roundtrip_and_ledger() {
             assert!(!is_error, "{summary}");
             saw_tool_ok = true;
         }
+        StreamEvent::QuestionNeeded { .. } => {}
         _ => {}
     };
 

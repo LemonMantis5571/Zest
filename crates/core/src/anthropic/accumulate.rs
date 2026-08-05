@@ -225,6 +225,7 @@ mod tests {
                 StreamEvent::ToolCallResult { name, .. } => {
                     seen.push(format!("tool_result:{name}"))
                 }
+                StreamEvent::QuestionNeeded { .. } => seen.push("question".into()),
                 StreamEvent::ModelSubstituted { served, .. } => {
                     seen.push(format!("substituted:{served}"))
                 }
