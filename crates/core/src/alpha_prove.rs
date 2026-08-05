@@ -1,7 +1,8 @@
-//! Deterministic fake-provider proofs for Stable Windows Alpha §5.
+//! Deterministic fake-provider proofs for the stable Windows alpha.
 //!
-//! Covers route selection, selected model, tool round-trip, ledger attribution,
-//! fallback reasons, and thread restoration — without spending quota.
+//! These tests cover the provider-pinned agent loop, selected model, tool
+//! round-trip, ledger attribution, and thread restoration without spending
+//! quota or depending on external ACP binaries.
 
 #![cfg(test)]
 
@@ -16,16 +17,12 @@ use crate::agent::Agent;
 use crate::anthropic::types::{Message, Usage};
 use crate::auth::AuthStatus;
 use crate::config::Config;
-use crate::provider::registry::ProviderRegistry;
 use crate::provider::{
-    catalogue_from_lists, Completion, ModelSpec, Provider, RateLimitSnapshot, StreamEvent,
-    TurnRequest,
+    catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest,
 };
-use crate::routing::Router;
 use crate::runtime::RuntimeBuilder;
 use crate::thread::{Thread, ThreadStore, WIRE_FORMAT_ANTHROPIC_MESSAGES};
-use crate::tools::delegate::{Delegate, DELEGATE_TOOL};
-use crate::tools::{register_read_tools, Tool, ToolRegistry};
+use crate::tools::{register_read_tools, ToolRegistry};
 use crate::usage::Ledger;
 
 struct ScriptedProvider {
@@ -57,12 +54,6 @@ impl ScriptedProvider {
 
     fn with_tool_roundtrip(mut self) -> Self {
         self.tool_roundtrip = true;
-        self
-    }
-
-    fn with_models(mut self, models: &[&str]) -> Self {
-        let listed: Vec<String> = models.iter().map(|s| (*s).to_string()).collect();
-        self.models = catalogue_from_lists(&self.default_model, &listed, &[]);
         self
     }
 }
@@ -135,94 +126,11 @@ impl Provider for ScriptedProvider {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zest-alpha-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("zest-alpha-{}-{}", name, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("README.md"), "# Zest alpha\n").unwrap();
     dir
-}
-
-fn multi_provider_config() -> Config {
-    Config::parse(
-        r#"
-[providers.primary]
-kind = "gateway"
-base_url = "http://127.0.0.1:1"
-api_key_env = "ZEST_ALPHA_KEY"
-model = "model-primary"
-
-[providers.worker]
-kind = "gateway"
-base_url = "http://127.0.0.1:1"
-api_key_env = "ZEST_ALPHA_KEY"
-model = "model-worker"
-models = ["model-worker", "model-worker-fast"]
-efforts = ["low", "high"]
-
-[routing]
-default = { provider = "primary", model = "model-primary" }
-
-[[routing.rules]]
-kind = "mechanical"
-provider = "worker"
-model = "model-worker-fast"
-"#,
-    )
-    .expect("valid")
-}
-
-#[test]
-fn route_selection_picks_rule_model() {
-    std::env::set_var("ZEST_ALPHA_KEY", "present");
-    let config = multi_provider_config();
-    let mut registry = ProviderRegistry::default();
-    registry.insert(Arc::new(ScriptedProvider::new("primary", "model-primary")));
-    registry.insert(Arc::new(
-        ScriptedProvider::new("worker", "model-worker")
-            .with_models(&["model-worker", "model-worker-fast"]),
-    ));
-    let router = Router::from_config(&config);
-
-    let hit = router
-        .resolve(Some("mechanical"), &registry, &Ledger::default())
-        .expect("resolved");
-    assert_eq!(hit.target.provider, "worker");
-    assert_eq!(hit.target.model.as_deref(), Some("model-worker-fast"));
-    assert!(hit.skipped.is_empty());
-}
-
-#[test]
-fn fallback_reasons_surface_exhausted_provider() {
-    std::env::set_var("ZEST_ALPHA_KEY", "present");
-    let config = multi_provider_config();
-    let mut registry = ProviderRegistry::default();
-    registry.insert(Arc::new(ScriptedProvider::new("primary", "model-primary")));
-    registry.insert(Arc::new(ScriptedProvider::new("worker", "model-worker")));
-    let router = Router::from_config(&config);
-
-    let mut ledger = Ledger::default();
-    ledger.record(
-        "worker",
-        &Completion {
-            content: vec![],
-            stop_reason: None,
-            usage: Usage::default(),
-            usage_available: true,
-            limits: Some(RateLimitSnapshot {
-                requests_remaining: Some(0),
-                ..Default::default()
-            }),
-            served_model: None,
-        },
-    );
-
-    let hit = router
-        .resolve(Some("mechanical"), &registry, &ledger)
-        .expect("falls back");
-    assert_eq!(hit.target.provider, "primary");
-    assert_eq!(hit.skipped.len(), 1);
-    assert_eq!(hit.skipped[0].0, "worker");
-    assert!(hit.skipped[0].1.contains("no requests remaining"));
 }
 
 #[tokio::test]
@@ -278,67 +186,6 @@ async fn selected_model_tool_roundtrip_and_ledger() {
     assert_eq!(usage.output_tokens, 10);
 }
 
-#[tokio::test]
-async fn delegate_uses_routed_model_and_attributes_ledger() {
-    std::env::set_var("ZEST_ALPHA_KEY", "present");
-    let dir = scratch("delegate");
-    let config = multi_provider_config();
-
-    let worker = Arc::new(
-        ScriptedProvider::new("worker", "model-worker")
-            .with_models(&["model-worker", "model-worker-fast"]),
-    );
-    let primary = Arc::new(ScriptedProvider::new("primary", "model-primary"));
-
-    let mut registry = ProviderRegistry::default();
-    registry.insert(primary);
-    registry.insert(worker.clone());
-    let registry = Arc::new(registry);
-
-    let mut worker_tools = ToolRegistry::new();
-    register_read_tools(&mut worker_tools, &dir).unwrap();
-    let ledger = Arc::new(Mutex::new(Ledger::default()));
-
-    let delegate = Delegate::new(
-        registry,
-        Arc::new(Router::from_config(&config)),
-        worker_tools,
-    )
-    .with_ledger(ledger.clone())
-    .with_kinds(vec!["mechanical".into()]);
-
-    let out = delegate
-        .run(json!({
-            "task": "Say alpha-ok",
-            "kind": "mechanical"
-        }))
-        .await
-        .unwrap();
-
-    assert!(
-        out.body.contains("[worker · model-worker-fast]"),
-        "header must name routed provider/model: {}",
-        out.body
-    );
-    assert!(out.body.contains("alpha-ok"));
-    assert!(matches!(
-        out.metadata,
-        Some(crate::tools::ToolMetadata::Delegation { ref provider_id, ref model, .. })
-            if provider_id == "worker" && model == "model-worker-fast"
-    ));
-
-    let seen = worker.seen_models.lock().unwrap().clone();
-    assert_eq!(seen, vec!["model-worker-fast".to_string()]);
-
-    let guard = ledger.lock().unwrap();
-    let usage = guard.get("worker").expect("worker billed");
-    assert_eq!(usage.requests, 1);
-    assert!(
-        guard.get("primary").is_none(),
-        "parent not billed for worker"
-    );
-}
-
 #[test]
 fn thread_restoration_reloads_wire_history() {
     let dir = scratch("thread");
@@ -360,7 +207,6 @@ fn thread_restoration_reloads_wire_history() {
     assert_eq!(loaded.thread.agent_messages[1].role, "assistant");
     assert!(loaded.warning.is_none());
 
-    // Restore into an agent the way desktop does.
     let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new("codex", "m"));
     let agent = Agent::new(provider, ToolRegistry::new())
         .with_messages(loaded.thread.agent_messages.clone());
@@ -383,8 +229,9 @@ base_url = "http://127.0.0.1:1"
 api_key_env = "ZEST_ALPHA_OMIT_KEY"
 model = "gpt-only-default"
 
-[routing]
-default = {{ provider = "codex", model = "gpt-only-default" }}
+[default]
+provider = "codex"
+model = "gpt-only-default"
 "#
     )
     .unwrap();
@@ -393,7 +240,7 @@ default = {{ provider = "codex", model = "gpt-only-default" }}
         .with_config(Config::find(&dir).unwrap())
         .with_model("gpt-not-listed")
         .with_effort("high")
-        .enable_delegate(false)
+        .enable_external_agents(false)
         .build()
     {
         Ok(_) => panic!("expected unknown model to be rejected"),
@@ -421,8 +268,9 @@ api_key_env = "ZEST_ALPHA_EFFORT_KEY"
 model = "gpt-a"
 efforts = ["low", "high"]
 
-[routing]
-default = {{ provider = "codex", model = "gpt-a" }}
+[default]
+provider = "codex"
+model = "gpt-a"
 "#
     )
     .unwrap();
@@ -430,75 +278,11 @@ default = {{ provider = "codex", model = "gpt-a" }}
     let err = match RuntimeBuilder::new(&dir)
         .with_config(Config::find(&dir).unwrap())
         .with_effort("max")
-        .enable_delegate(false)
+        .enable_external_agents(false)
         .build()
     {
         Ok(_) => panic!("expected effort max to be rejected"),
         Err(e) => e,
     };
     assert!(err.to_string().contains("effort"), "unexpected: {err}");
-}
-
-/// Delegation is opt-in: two loaded providers plus routing rules are still not
-/// enough without `[routing] delegation = true`. Spending a second
-/// subscription is a decision, not a consequence of having configured one.
-#[test]
-fn runtime_registers_delegate_only_when_delegation_is_enabled() {
-    std::env::set_var("ZEST_ALPHA_MULTI_KEY", "present");
-    let dir = scratch("multi");
-
-    let write_config = |delegation: bool| {
-        use std::io::Write;
-        let mut f = std::fs::File::create(dir.join("zest.toml")).unwrap();
-        writeln!(
-            f,
-            r#"
-[providers.a]
-kind = "gateway"
-base_url = "http://127.0.0.1:1"
-api_key_env = "ZEST_ALPHA_MULTI_KEY"
-model = "m-a"
-
-[providers.b]
-kind = "gateway"
-base_url = "http://127.0.0.1:1"
-api_key_env = "ZEST_ALPHA_MULTI_KEY"
-model = "m-b"
-
-[routing]
-default = {{ provider = "a", model = "m-a" }}
-delegation = {delegation}
-
-[[routing.rules]]
-kind = "mechanical"
-provider = "b"
-"#
-        )
-        .unwrap();
-
-        RuntimeBuilder::new(&dir)
-            .with_config(Config::find(&dir).unwrap())
-            .with_provider("a")
-            .enable_delegate(true)
-            .register_write_tools(false)
-            .register_exec_tools(false)
-            .build()
-            .unwrap()
-    };
-
-    let off = write_config(false);
-    assert_eq!(off.registry.len(), 2, "both providers loaded");
-    assert!(
-        !off.agent.tool_names().contains(&DELEGATE_TOOL),
-        "delegate must stay hidden while delegation is off: {:?}",
-        off.agent.tool_names()
-    );
-
-    let on = write_config(true);
-    assert_eq!(on.registry.len(), 2);
-    assert!(
-        on.agent.tool_names().contains(&DELEGATE_TOOL),
-        "opting in must expose delegate: {:?}",
-        on.agent.tool_names()
-    );
 }

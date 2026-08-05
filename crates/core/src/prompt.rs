@@ -39,27 +39,6 @@ Keep responses focused. State what you verified and what you did not — \
 /// Max bytes for `.zest/system.md` (checked before allocating the full body).
 pub const MAX_CUSTOM_PROMPT_BYTES: usize = 32 * 1024;
 
-/// Added only when the `delegate` tool is actually registered.
-///
-/// Kept out of [`DEFAULT_SYSTEM`] so single-provider users do not carry
-/// instructions for a tool they do not have — it would be dead weight in the
-/// cached prefix and an invitation to hallucinate the call.
-pub const DELEGATION_SYSTEM: &str = "\
-# Delegating
-
-Another provider is available through `delegate`, and routing maps a task \
-`kind` to the model that should serve it.
-
-- Split the work and delegate the pieces whose kind is configured. Keep the \
-pieces that are cheaper to do yourself.
-- Send independent delegations **in the same turn** — they run concurrently. \
-Waiting for one before asking for the next doubles the wall-clock for nothing.
-- Zest attaches a bounded, sanitized context handoff with the original/current \
-prompts, relevant assistant text, reasoning summaries, and clipped tool evidence. \
-Still give the worker a precise task boundary, file paths, and result shape.
-- Read what comes back before acting on it. A worker can be wrong, and it is \
-your name on the result.";
-
 /// Added only when an explicit CLI/ACP worker is configured. External agents
 /// are workers, not provider identities, and their changes return for review.
 pub const EXTERNAL_DELEGATION_SYSTEM: &str = "\

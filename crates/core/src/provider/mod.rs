@@ -1,14 +1,14 @@
 //! Provider abstraction.
 //!
 //! A provider is one authenticated backend: Anthropic on a Claude login, Codex on
-//! a ChatGPT login, Gemini on an Antigravity login. Routing across them is the
-//! point of this harness, so the loop must not know which one it is talking to.
+//! a ChatGPT login, or an explicitly configured OpenAI-compatible endpoint. The
+//! agent loop must not know which backend it is talking to.
 //!
 //! Crucially, *how* a provider is reached is an implementation detail behind this
 //! trait. Anthropic is reached natively; another backend may be reached through a
-//! gateway that re-exposes it as the Messages API. The router cannot tell the
-//! difference, which is what lets a gateway be swapped for a native client later
-//! without anything above noticing.
+//! gateway that re-exposes it as the Messages API. The agent loop cannot tell the
+//! difference, which lets a gateway be swapped for a native client later without
+//! anything above noticing.
 
 pub mod anthropic;
 pub mod openai_compatible;
@@ -402,7 +402,7 @@ pub async fn probe(provider: &dyn Provider, model: &str) -> Result<()> {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Stable identifier used by config, routing rules, and the usage ledger.
+    /// Stable identifier used by configuration and the usage ledger.
     fn id(&self) -> &str;
 
     fn default_model(&self) -> &str;
@@ -429,7 +429,7 @@ pub trait Provider: Send + Sync {
     }
 
     /// Whether this provider can be used right now. Rendered by the launch
-    /// picker, and consulted before routing a task here.
+    /// picker and checked before starting a parent conversation here.
     fn auth_status(&self) -> AuthStatus;
 
     /// Whether the endpoint honours Anthropic prompt caching (`cache_control`).

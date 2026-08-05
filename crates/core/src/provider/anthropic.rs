@@ -53,7 +53,7 @@ impl AnthropicProvider {
 
     /// A Messages-API-speaking gateway in front of some other backend.
     ///
-    /// `id` is what routing rules and the usage ledger key on, so it should name
+    /// `id` is what configuration and the usage ledger key on, so it should name
     /// the *account* being spent (`"codex"`), not the proxy.
     pub fn gateway(
         id: impl Into<String>,
@@ -75,7 +75,7 @@ impl AnthropicProvider {
     }
 
     /// Name this provider after the account it spends, not the transport.
-    /// Routing rules and the usage ledger key on this.
+    /// Configuration and the usage ledger key on this.
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = id.into();
         self

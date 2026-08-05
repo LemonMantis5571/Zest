@@ -207,7 +207,7 @@ model = "gpt-5.3-codex"
         let (registry, _) = ProviderRegistry::from_config(&config);
         let provider = registry.get("codex").expect("built");
 
-        // The ledger and routing rules key on this, so it must be the config
+        // The ledger and configuration key on this, so it must be the config
         // name — not "gateway", and not the proxy's identity.
         assert_eq!(provider.id(), "codex");
         assert_eq!(provider.default_model(), "gpt-5.3-codex");
