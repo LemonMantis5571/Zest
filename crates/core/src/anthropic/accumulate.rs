@@ -157,6 +157,7 @@ impl TurnAccumulator {
             content: self.blocks.into_values().collect(),
             stop_reason: self.stop_reason,
             usage: self.usage,
+            usage_available: true,
             limits,
         }
     }

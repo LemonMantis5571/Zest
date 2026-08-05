@@ -255,6 +255,7 @@ provider = "codex"
                 content: vec![],
                 stop_reason: None,
                 usage: Default::default(),
+                usage_available: true,
                 limits: Some(RateLimitSnapshot {
                     requests_remaining: Some(0),
                     ..Default::default()
@@ -286,6 +287,7 @@ provider = "codex"
                 content: vec![],
                 stop_reason: None,
                 usage: Default::default(),
+                usage_available: true,
                 limits: None,
             },
         );

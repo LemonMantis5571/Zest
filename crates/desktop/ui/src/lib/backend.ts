@@ -42,6 +42,9 @@ const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
 export type DesktopBackend = {
   readonly mode: "tauri" | "fixture";
   listProviders(): Promise<ProviderRow[]>;
+  setProviderKey(id: string, key: string): Promise<void>;
+  deleteProviderKey(id: string): Promise<void>;
+  providerKeyPresent(id: string): Promise<boolean>;
   usageSnapshot(): Promise<UsageSnapshot>;
   profileStats(): Promise<ProfileStats>;
   /** Hand core this machine's UTC offset so day boundaries match the clock. */
@@ -121,6 +124,9 @@ export function createTauriBackend(): DesktopBackend {
   return {
     mode: "tauri",
     listProviders: () => tauriApi.listProviders(),
+    setProviderKey: (id, key) => tauriApi.setProviderKey(id, key),
+    deleteProviderKey: (id) => tauriApi.deleteProviderKey(id),
+    providerKeyPresent: (id) => tauriApi.providerKeyPresent(id),
     usageSnapshot: () => tauriApi.usageSnapshot(),
     profileStats: () => tauriApi.profileStats(),
     setLocalOffset: () => tauriApi.setLocalOffset(),
@@ -208,6 +214,15 @@ export function createFixtureBackend(): DesktopBackend {
           },
         ],
       };
+    },
+    async setProviderKey() {
+      notAvailable("setProviderKey");
+    },
+    async deleteProviderKey() {
+      notAvailable("deleteProviderKey");
+    },
+    async providerKeyPresent() {
+      return false;
     },
     async profileStats() {
       // Enough shape to exercise the heatmap offline: a long run of days, a

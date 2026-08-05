@@ -16,7 +16,7 @@ import {
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
 import { isLongTurn } from "@/lib/notificationPolicy";
-import { isWindowActive, notifyWhenAway } from "@/lib/notifications";
+import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
 import { revealCount } from "@/lib/reveal";
 import {
   DEFAULT_CODEX_MODEL,
@@ -68,6 +68,18 @@ function pickReadyProvider(rows: ProviderRow[], prefer: string | null) {
 
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
+
+async function showAttention(
+  title: string,
+  description: string,
+  type: "warning" | "success"
+) {
+  if (await isWindowActuallyActive()) {
+    toast.add({ type, title, description });
+  } else {
+    await notifyWhenAway(title, description);
+  }
+}
 
 /**
  * What "Build plan" says on the user's behalf.
@@ -422,30 +434,14 @@ export default function App() {
         const description = event.summary
           ? `${event.tool_name}: ${event.summary}`
           : `${event.tool_name} is waiting for your approval.`;
-        if (isWindowActive()) {
-          toast.add({
-            type: "warning",
-            title: "Approval needed",
-            description,
-          });
-        } else {
-          void notifyWhenAway("Approval needed", description);
-        }
+        void showAttention("Approval needed", description, "warning");
       }
     }
 
     if (event.kind === "done") {
       const startedAt = turnStartedAtRef.current;
       if (startedAt != null && isLongTurn(Date.now() - startedAt)) {
-        if (isWindowActive()) {
-          toast.add({
-            type: "success",
-            title: "Response ready",
-            description: "Zest finished the turn.",
-          });
-        } else {
-          void notifyWhenAway("Zest finished", "Your response is ready.");
-        }
+        void showAttention("Response ready", "Zest finished the turn.", "success");
       }
       turnStartedAtRef.current = null;
       notifiedApprovalIdsRef.current.clear();
@@ -1305,6 +1301,7 @@ export default function App() {
             onContinue={goContinue}
             onConnect={goConnect}
             onOpenFolder={onOpenFolder}
+            onRefresh={() => loadProviders(selectedIdRef.current).then(() => undefined)}
             continuing={continuing}
           />
         ) : null}

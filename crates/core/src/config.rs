@@ -122,6 +122,26 @@ pub enum ProviderConfig {
         #[serde(default)]
         efforts: Vec<String>,
     },
+    OpenaiCompatible {
+        /// API root, for example `https://api.openai.com/v1` or
+        /// `https://api.deepseek.com`. The client appends `/chat/completions`.
+        base_url: String,
+        /// The model used when routing does not choose one explicitly.
+        model: String,
+        /// Optional allow-list. Empty means only `model` is accepted.
+        #[serde(default)]
+        models: Vec<String>,
+        /// Optional effort allow-list. Empty means the standard effort set is
+        /// exposed to the picker, although the wire adapter ignores effort.
+        #[serde(default)]
+        efforts: Vec<String>,
+        /// OS credential-manager account name. Defaults to the provider id.
+        #[serde(default)]
+        credential: Option<String>,
+        /// Headless/CI fallback. Never written by Zest's setup UI.
+        #[serde(default)]
+        api_key_env: Option<String>,
+    },
 }
 
 impl ProviderConfig {
@@ -129,6 +149,7 @@ impl ProviderConfig {
         match self {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
             ProviderConfig::Gateway { api_key_env, .. } => api_key_env.as_deref(),
+            ProviderConfig::OpenaiCompatible { api_key_env, .. } => api_key_env.as_deref(),
         }
     }
 }
@@ -451,6 +472,34 @@ model = "gpt-5.3-codex"
 
         assert_eq!(config.routing.rules.len(), 1);
         assert_eq!(config.routing.rules[0].kind, "mechanical");
+    }
+
+    #[test]
+    fn parses_openai_compatible_provider_without_a_secret() {
+        let config = Config::parse(
+            r#"
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+models = ["deepseek-chat", "deepseek-reasoner"]
+credential = "deepseek"
+"#,
+        )
+        .expect("valid OpenAI-compatible config");
+        match &config.providers["deepseek"] {
+            ProviderConfig::OpenaiCompatible {
+                base_url,
+                model,
+                credential,
+                ..
+            } => {
+                assert_eq!(base_url, "https://api.deepseek.com");
+                assert_eq!(model, "deepseek-chat");
+                assert_eq!(credential.as_deref(), Some("deepseek"));
+            }
+            other => panic!("expected OpenAI-compatible provider, got {other:?}"),
+        }
     }
 
     #[test]

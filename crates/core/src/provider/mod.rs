@@ -11,6 +11,7 @@
 //! without anything above noticing.
 
 pub mod anthropic;
+pub mod openai_compatible;
 pub mod registry;
 
 use async_trait::async_trait;
@@ -42,6 +43,16 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
             id: provider_id.to_string(),
             default_model: model.clone(),
             models: catalogue_for_provider(provider_id, model, models, efforts),
+        },
+        ProviderConfig::OpenaiCompatible {
+            model,
+            models,
+            efforts,
+            ..
+        } => ProviderDescriptor {
+            id: provider_id.to_string(),
+            default_model: model.clone(),
+            models: catalogue_from_lists(model, models, efforts),
         },
     }
 }
@@ -209,6 +220,8 @@ pub enum StreamEvent<'a> {
         id: &'a str,
         summary: &'a str,
         is_error: bool,
+        path: Option<&'a str>,
+        diff: Option<&'a str>,
         metadata: Option<crate::tools::ToolMetadata>,
     },
     /// A gated tool is waiting on the user (write/exec). Owned strings so the
@@ -265,6 +278,8 @@ pub struct Completion {
     pub content: Vec<Value>,
     pub stop_reason: Option<String>,
     pub usage: Usage,
+    /// Whether the endpoint actually reported token usage for this turn.
+    pub usage_available: bool,
     pub limits: Option<RateLimitSnapshot>,
 }
 

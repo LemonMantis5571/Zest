@@ -168,7 +168,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
   return (
     <div
       className={cn(
-        "group/tool w-full max-w-full rounded-md",
+        "group/tool w-full max-w-full rounded-lg",
         tool.status === "error" && "bg-destructive/5"
       )}
     >
@@ -183,15 +183,17 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
           if (hasBody) setOpen((v) => !v);
         }}
         className={cn(
-          "flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left outline-none transition-colors",
-          "hover:bg-white/[0.03] focus-visible:ring-2 focus-visible:ring-ring/40",
+          "flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left outline-none transition-colors",
+          "hover:bg-white/[0.035] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
           hasBody ? "cursor-pointer" : "cursor-default"
         )}
       >
-        <span className="grid size-4 shrink-0 place-items-center">{statusIcon}</span>
+        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-muted/50">
+          {statusIcon}
+        </span>
         <span
           className={cn(
-            "shrink-0 font-mono text-[12px] text-muted-foreground",
+            "shrink-0 font-mono text-[12.5px] font-medium text-foreground/85",
             tool.status === "running" && "shimmer-text text-foreground/80"
           )}
         >
@@ -200,10 +202,10 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
         {!delegation && (tool.path || tool.summary) ? (
           <TruncateWithHover
             text={tool.path || tool.summary || ""}
-            className="min-w-0 flex-1 font-mono text-[11px] text-muted-foreground/70"
+            className="min-w-0 flex-1 font-mono text-[11.5px] text-muted-foreground/75"
           />
         ) : (
-          <span className="min-w-0 flex-1 text-[11px] text-muted-foreground/70">
+          <span className="min-w-0 flex-1 text-[11.5px] text-muted-foreground/75">
             {hasSkipped ? `${skipped.length} fallback` : hasDiff ? "View diff" : null}
           </span>
         )}
@@ -219,7 +221,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
         ) : null}
       </button>
       {open && !hasDiff ? (
-        <div className="mt-0.5 mb-1 space-y-1.5 px-1.5 pl-6">
+        <div className="mt-0.5 mb-1 space-y-1.5 px-2 pl-9">
           {hasSkipped ? (
             <div className="space-y-1">
               <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">

@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { CheckIcon, FolderOpenIcon } from "lucide-react";
 
 import { AuthShell } from "@/components/AuthShell";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
 import { recentVerifyFailed } from "@/lib/providerVerify";
+import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import type { ProviderRow } from "@/lib/types";
 
@@ -16,6 +18,7 @@ type Props = {
   onContinue: () => void;
   onConnect: () => void;
   onOpenFolder: () => void;
+  onRefresh: () => Promise<void>;
   continuing: boolean;
 };
 
@@ -36,8 +39,12 @@ export function ProviderPicker({
   onContinue,
   onConnect,
   onOpenFolder,
+  onRefresh,
   continuing,
 }: Props) {
+  const [apiKey, setApiKey] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
   const selected = providers.find((p) => p.id === selectedId) ?? null;
   const selectedNeedsConnect =
     selected != null && recentVerifyFailed(selected.id);
@@ -164,6 +171,45 @@ export function ProviderPicker({
       </ul>
 
       {error ? <p className="mt-3 text-xs text-destructive">{error}</p> : null}
+
+      {selected?.method === "API key" ? (
+        <div className="mt-4 rounded-lg border border-border/70 bg-card/40 p-3">
+          <div className="text-xs font-medium">{selected.label} API key</div>
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+            Stored securely in the operating system credential manager.
+          </p>
+          <div className="mt-2 flex gap-1.5">
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder={selected.statusKind === "ready" ? "Replace key" : "Paste API key"}
+              autoComplete="off"
+              className="min-w-0 flex-1 rounded-md border border-border/80 bg-background px-2.5 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            />
+            <Button
+              type="button"
+              size="sm"
+              disabled={!apiKey.trim() || savingKey}
+              onClick={() => {
+                setSavingKey(true);
+                setKeyError(null);
+                void getBackend()
+                  .setProviderKey(selected.id, apiKey)
+                  .then(() => {
+                    setApiKey("");
+                    return onRefresh();
+                  })
+                  .catch((err) => setKeyError(String(err)))
+                  .finally(() => setSavingKey(false));
+              }}
+            >
+              {savingKey ? "Saving…" : "Save"}
+            </Button>
+          </div>
+          {keyError ? <p className="mt-2 text-xs text-destructive">{keyError}</p> : null}
+        </div>
+      ) : null}
 
       <footer className="mt-6 flex justify-end gap-2">
         {selected?.canConnect ? (

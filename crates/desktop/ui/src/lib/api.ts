@@ -27,6 +27,18 @@ export function listProviders() {
   return invoke<ProviderRow[]>("list_providers");
 }
 
+export function setProviderKey(id: string, key: string) {
+  return invoke<void>("set_provider_key", { id, key });
+}
+
+export function deleteProviderKey(id: string) {
+  return invoke<void>("delete_provider_key", { id });
+}
+
+export function providerKeyPresent(id: string) {
+  return invoke<boolean>("provider_key_present", { id });
+}
+
 export function usageSnapshot() {
   return invoke<UsageSnapshot>("usage_snapshot");
 }
@@ -178,6 +190,17 @@ export function cancelTurn() {
 
 export function resolveApproval(approvalId: string, decision: ApprovalChoice) {
   return invoke<void>("resolve_approval", { approvalId, decision });
+}
+
+export type ReadingDiffView = {
+  diff: string;
+  summary: string;
+  removedLines: number;
+  foldedLines: number;
+};
+
+export function generateReadingDiff(diff: string) {
+  return invoke<ReadingDiffView>("generate_reading_diff", { diff });
 }
 
 export function setApprovalMode(mode: ApprovalMode) {
