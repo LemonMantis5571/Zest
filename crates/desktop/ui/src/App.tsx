@@ -193,6 +193,23 @@ function formatInvokeError(err: unknown): string {
   return raw;
 }
 
+/**
+ * The account signed in fine, but cannot use the model that was asked for.
+ *
+ * Worth telling apart from every other verification failure: the credentials
+ * are good, so "connect again" is useless advice and marking the provider as
+ * unverified only disables Continue. A ChatGPT-account sign-in is refused
+ * `gpt-5.6-sol` outright, which used to leave first-run users with no way past
+ * the picker at all.
+ */
+function isModelUnsupported(err: unknown): boolean {
+  const message = formatInvokeError(err).toLowerCase();
+  return (
+    message.includes("is not supported when using") ||
+    (message.includes("model") && message.includes("not supported"))
+  );
+}
+
 function shouldOfferProviderReconnect(err: unknown): boolean {
   const message = formatInvokeError(err).toLowerCase();
   return message.includes("needs connect again") || message.includes("auth_unavailable");
@@ -306,6 +323,29 @@ export default function App() {
     try {
       await backend.verifyProvider(row.id);
     } catch (err) {
+      // A refused *model* is not a refused sign-in. Signing in again cannot
+      // change which models the plan includes, so send them into chat — where
+      // the model picker is — instead of back to a Reconnect button that
+      // cannot help.
+      if (isModelUnsupported(err)) {
+        markProviderVerified(row.id);
+        setSessionWarning({
+          providerId: row.id,
+          message:
+            `Your ${row.label} sign-in worked, but this account cannot use the ` +
+            `model Zest asked for. Pick another one from the model menu below.` +
+            `\n\n${formatInvokeError(err)}`,
+          offerReconnect: false,
+        });
+        setWaitingHint("Opening chat…");
+        try {
+          await enterChatRef.current(row.id);
+        } catch (chatErr) {
+          setPickerError(formatInvokeError(chatErr));
+          setScreen("picker");
+        }
+        return;
+      }
       markProviderVerifyFailed(row.id);
       setWaitingHint("Signed in, but the provider still refused");
       setWaitingError(
