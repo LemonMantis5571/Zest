@@ -19,7 +19,8 @@ export type CommandId =
   | "view.profile"
   | "view.settings"
   | "view.shortcuts"
-  | "view.provider";
+  | "view.provider"
+  | "view.palette";
 
 /** Groups in the shortcuts editor, in display order. */
 export const SECTIONS = ["Navigation", "Chat", "Focus"] as const;
@@ -45,10 +46,17 @@ export const COMMANDS: CommandDef[] = [
   { id: "view.profile", label: "Open profile", section: "Navigation", defaultChord: "Mod+Shift+P" },
   { id: "view.settings", label: "Open settings", section: "Navigation", defaultChord: "Mod+," },
   {
+    id: "view.palette",
+    label: "Command palette",
+    section: "Navigation",
+    defaultChord: "Mod+K",
+    hint: "Search actions and backend commands",
+  },
+  {
     id: "view.shortcuts",
     label: "Keyboard shortcuts",
     section: "Navigation",
-    defaultChord: "Mod+K",
+    defaultChord: "Mod+Shift+K",
     hint: "Opens settings at this section",
   },
   {

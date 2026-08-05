@@ -80,6 +80,45 @@ pub struct ModelSpec {
     pub id: String,
     /// When non-empty, only these efforts are valid for this model.
     pub efforts: Vec<String>,
+    /// Conservative context window used by the desktop meter. Providers can
+    /// still report a measured input count; this is only the model catalogue's
+    /// capacity hint.
+    #[serde(default)]
+    pub context_window: u64,
+    /// Whether the model catalogue expects standard function/tool definitions.
+    #[serde(default = "default_true")]
+    pub supports_tools: bool,
+    /// Whether the catalogue explicitly opts into image input.
+    #[serde(default)]
+    pub supports_vision: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Conservative built-in capacities for the models Zest knows without model
+/// discovery. Explicit provider catalogues remain authoritative for model ids;
+/// these values only keep the UI honest when no capacity was configured.
+pub fn context_window_for_model(model: &str) -> u64 {
+    let model = model.to_ascii_lowercase();
+    if model.contains("gpt-5.6") || model.contains("luna") || model.contains("codex") {
+        256_000
+    } else if model.contains("claude") {
+        200_000
+    } else {
+        128_000
+    }
+}
+
+fn model_spec(id: String, efforts: Vec<String>) -> ModelSpec {
+    ModelSpec {
+        context_window: context_window_for_model(&id),
+        id,
+        efforts,
+        supports_tools: true,
+        supports_vision: false,
+    }
 }
 
 /// Static catalogue a provider exposes for pickers and session validation.
@@ -137,8 +176,7 @@ pub fn catalogue_from_lists(
     }
     ids.into_iter()
         .map(|id| ModelSpec {
-            id,
-            efforts: efforts.clone(),
+            ..model_spec(id, efforts.clone())
         })
         .collect()
 }
@@ -157,8 +195,7 @@ pub fn catalogue_without_efforts(default_model: &str, models: &[String]) -> Vec<
     }
     ids.into_iter()
         .map(|id| ModelSpec {
-            id,
-            efforts: Vec::new(),
+            ..model_spec(id, Vec::new())
         })
         .collect()
 }

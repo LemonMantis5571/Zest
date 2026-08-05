@@ -18,9 +18,22 @@ const base: SessionInfo = {
   threadId: "t1",
   defaultModel: "gpt-5.6-sol",
   models: [
-    { id: "gpt-5.6-sol", efforts: ["low", "medium", "high", "xhigh", "max"] },
-    { id: "gpt-5.4", efforts: ["low", "medium", "high", "xhigh", "max"] },
+    {
+      id: "gpt-5.6-sol",
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      contextWindow: 256000,
+      supportsTools: true,
+      supportsVision: false,
+    },
+    {
+      id: "gpt-5.4",
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      contextWindow: 256000,
+      supportsTools: true,
+      supportsVision: false,
+    },
   ],
+  checkpoints: [],
   messages: [{ id: "u1", role: "user", text: "hi" }],
 };
 

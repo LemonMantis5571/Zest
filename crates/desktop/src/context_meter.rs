@@ -15,17 +15,15 @@ pub struct ContextUsageView {
     pub percent_full: f64,
     /// `last_turn` | `estimate`
     pub source: String,
+    pub system_tokens: u64,
+    pub conversation_tokens: u64,
+    pub message_count: usize,
+    pub checkpoint_count: usize,
+    pub can_compact: bool,
 }
 
 pub fn context_window_for_model(model: &str) -> u64 {
-    let m = model.to_ascii_lowercase();
-    if m.contains("gpt-5.6") || m.contains("luna") || m.contains("codex") {
-        256_000
-    } else {
-        // Claude models and anything unrecognized. 200k is the conservative
-        // floor — overstating the window would understate how full it is.
-        200_000
-    }
+    zest_core::context_window_for_model(model)
 }
 
 fn chars_to_tok(chars: u64) -> u64 {
@@ -36,28 +34,34 @@ fn chars_to_tok(chars: u64) -> u64 {
     }
 }
 
-pub fn estimate_context(agent: &Agent) -> ContextUsageView {
-    let window = context_window_for_model(&agent.model);
+pub fn estimate_context(agent: &Agent, checkpoint_count: usize) -> ContextUsageView {
+    let window = agent
+        .descriptor()
+        .models
+        .into_iter()
+        .find(|model| model.id == agent.model)
+        .map(|model| model.context_window)
+        .filter(|window| *window > 0)
+        .unwrap_or_else(|| context_window_for_model(&agent.model));
+
+    let system_tokens = chars_to_tok(agent.system.as_deref().unwrap_or("").chars().count() as u64);
+    let conversation_tokens: u64 = agent
+        .messages
+        .iter()
+        .map(|message| {
+            chars_to_tok(
+                message
+                    .content
+                    .iter()
+                    .map(|block| block.to_string().len() as u64)
+                    .sum(),
+            )
+        })
+        .sum();
 
     let (used, source) = match &agent.last_usage {
         Some(u) if u.input_tokens > 0 => (u.input_tokens as u64, "last_turn"),
-        _ => {
-            let system_chars = agent.system.as_deref().unwrap_or("").chars().count() as u64;
-            let conv_chars: u64 = agent
-                .messages
-                .iter()
-                .map(|m| {
-                    m.content
-                        .iter()
-                        .map(|b| b.to_string().len() as u64)
-                        .sum::<u64>()
-                })
-                .sum();
-            (
-                chars_to_tok(system_chars) + chars_to_tok(conv_chars),
-                "estimate",
-            )
-        }
+        _ => (system_tokens + conversation_tokens, "estimate"),
     };
 
     let remaining = window.saturating_sub(used);
@@ -73,5 +77,10 @@ pub fn estimate_context(agent: &Agent) -> ContextUsageView {
         remaining_tokens: remaining,
         percent_full,
         source: source.into(),
+        system_tokens,
+        conversation_tokens,
+        message_count: agent.messages.len(),
+        checkpoint_count,
+        can_compact: conversation_tokens > 4_000 && agent.messages.len() >= 4,
     }
 }

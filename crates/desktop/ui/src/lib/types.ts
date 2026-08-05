@@ -6,6 +6,7 @@ import type { ProviderView as GeneratedProviderView } from "./generated/Provider
 import type { RoutingRuleView } from "./generated/RoutingRuleView.ts";
 import type { RoutingView } from "./generated/RoutingView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
+import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 
 export type StatusKind = "ready" | "unknown" | "not_logged_in" | "unconfigured";
@@ -132,6 +133,8 @@ export type SessionInfo = Omit<GeneratedSessionInfo, "messages"> & {
   messages: ChatMessage[];
 };
 
+export type ThreadCheckpoint = ThreadCheckpointView;
+
 export type ThreadSummary = {
   id: string;
   createdAt: number;
@@ -177,6 +180,11 @@ export type ContextUsage = {
   remainingTokens: number;
   percentFull: number;
   source: string;
+  systemTokens: number;
+  conversationTokens: number;
+  messageCount: number;
+  checkpointCount: number;
+  canCompact: boolean;
 };
 
 export type UserProfile = {

@@ -61,6 +61,8 @@ type Props = {
   onOpenFolder: () => void;
   onRemoveAttachment: (id: string) => void;
   onPasteImages: (files: File[]) => void;
+  onCompactContext?: () => Promise<void>;
+  compacting?: boolean;
   /** Sticky chrome above the input (e.g. pending approvals). */
   aboveComposer?: ReactNode;
 };
@@ -94,6 +96,8 @@ export function Composer({
   onOpenFolder,
   onRemoveAttachment,
   onPasteImages,
+  onCompactContext,
+  compacting = false,
   aboveComposer,
 }: Props) {
   const supportsEffort = effortsForModel(models, model).length > 0;
@@ -422,7 +426,11 @@ export function Composer({
               disabled={optionsDisabled}
               onModeChange={onApprovalModeChange}
             />
-            <ContextUsageButton refreshKey={contextRefreshKey} />
+            <ContextUsageButton
+              refreshKey={contextRefreshKey}
+              onCompact={onCompactContext}
+              compacting={compacting}
+            />
           </div>
         </div>
       </div>

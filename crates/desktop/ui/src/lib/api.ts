@@ -134,6 +134,22 @@ export function newThread() {
   return invoke<SessionInfo>("new_thread");
 }
 
+export function sessionInfo() {
+  return invoke<SessionInfo | null>("session_info");
+}
+
+export function forkThread() {
+  return invoke<SessionInfo>("fork_thread");
+}
+
+export function rewindThread(checkpointId: string) {
+  return invoke<SessionInfo>("rewind_thread", { checkpointId });
+}
+
+export function compactContext() {
+  return invoke<ContextUsage>("compact_context");
+}
+
 export function deleteThread(id: string, projectPath?: string | null) {
   return invoke<SessionInfo>("delete_thread", {
     id,

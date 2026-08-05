@@ -147,6 +147,78 @@ impl Agent {
         redact_sensitive_staged(self.messages.clone(), &self.sensitive_tool_ids)
     }
 
+    /// Replace a long wire history with a provider-generated checkpoint.
+    ///
+    /// The summarization request receives the persistence-safe history, so a
+    /// sensitive tool result cannot be copied into the durable checkpoint. It
+    /// uses no tools and no thinking controls: compaction is maintenance, not a
+    /// second agent turn, and it must remain cheap across providers.
+    pub async fn compact_context(&mut self) -> Result<String> {
+        if self.messages.len() < 4 {
+            return Err(HarnessError::Other(
+                "there is not enough conversation to compact yet".into(),
+            ));
+        }
+
+        let mut messages = self.messages_for_persist();
+        messages.push(Message::user_text(
+            "Create a concise context checkpoint for the next coding turn. ".to_string()
+                + "Preserve the user’s goals, decisions, constraints, files changed, "
+                + "unfinished work, and important tool findings. Do not invent facts. "
+                + "Return only the checkpoint, with compact headings.",
+        ));
+        let request = TurnRequest {
+            model: self.model.clone(),
+            system: self.system.clone(),
+            messages,
+            tools: Vec::new(),
+            max_tokens: 4_096,
+            effort: None,
+            thinking: false,
+            cancel: None,
+        };
+        let mut sink = |_event: StreamEvent<'_>| {};
+        let completion = self.provider.stream_turn(&request, &mut sink).await?;
+        if let Some(ledger) = &self.ledger {
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.record(self.provider.id(), &completion);
+            }
+        }
+
+        let summary = completion
+            .content
+            .iter()
+            .filter_map(|block| {
+                (block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
+                    .then(|| block.get("text").and_then(|text| text.as_str()))
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        if summary.is_empty() {
+            return Err(HarnessError::Other(
+                "provider returned an empty context checkpoint".into(),
+            ));
+        }
+
+        self.messages = vec![
+            Message::user_text(
+                "[Zest context checkpoint] The earlier conversation is represented by the "
+                    .to_string()
+                    + "assistant checkpoint that follows. Use it as working context.",
+            ),
+            Message::assistant(vec![serde_json::json!({
+                "type": "text",
+                "text": summary,
+            })]),
+        ];
+        self.sensitive_tool_ids.clear();
+        self.last_usage = Some(completion.usage);
+        Ok(summary)
+    }
+
     /// Send one user message and run to completion, executing tools as asked.
     ///
     /// Wire history is committed only after a complete terminal turn. Pass
