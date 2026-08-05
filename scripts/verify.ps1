@@ -65,6 +65,8 @@ Step "binding drift (ts-rs)" {
     "crates/desktop/ui/src/lib/generated/ChatEvent.ts" `
     "crates/desktop/ui/src/lib/generated/SessionInfo.ts" `
     "crates/desktop/ui/src/lib/generated/ProviderView.ts" `
+    "crates/desktop/ui/src/lib/generated/ExternalAgentView.ts" `
+    "crates/desktop/ui/src/lib/generated/ExternalAgentCheckView.ts" `
     "crates/desktop/ui/src/lib/generated/ModelCapability.ts" `
     "crates/desktop/ui/src/lib/generated/ToolMetaView.ts"
 }

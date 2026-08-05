@@ -219,6 +219,10 @@ to `zest.toml` with `mode = "headless"` for JSONL CLI output or `mode = "acp"`
 for ACP JSON-RPC over stdio. Claude Code can use `--print
 --output-format stream-json --strict-mcp-config` with its normal CLI login;
 Gemini CLI can use `--acp` or `-p` with `--output-format stream-json`.
+In the desktop app, Settings → External workers enables the Claude Code and
+Gemini CLI presets and writes these entries for you. Sign in through each CLI
+first; Zest checks only that the executable is available and never stores its
+session.
 
 External delegation is explicit and approval-gated. Workers run in a temporary
 Git worktree by default, and Zest returns the answer plus a diff for review;
