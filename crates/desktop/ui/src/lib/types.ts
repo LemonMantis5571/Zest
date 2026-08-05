@@ -185,6 +185,8 @@ export type ContextUsage = {
   messageCount: number;
   checkpointCount: number;
   canCompact: boolean;
+  autoCompactThresholdPercent: number;
+  shouldAutoCompact: boolean;
 };
 
 export type UserProfile = {

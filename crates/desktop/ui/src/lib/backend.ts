@@ -542,6 +542,8 @@ export function createFixtureBackend(): DesktopBackend {
         messageCount: session.messages.length,
         checkpointCount: session.checkpoints.length,
         canCompact: session.messages.length >= 4,
+        autoCompactThresholdPercent: 80,
+        shouldAutoCompact: false,
       };
     },
     async getUserProfile() {
