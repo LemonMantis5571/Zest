@@ -39,6 +39,8 @@ pub fn external_agent_preset(id: &str) -> Option<ExternalAgentInput> {
             args: vec![
                 "--print".into(),
                 "--verbose".into(),
+                "--permission-mode".into(),
+                "acceptEdits".into(),
                 "--output-format".into(),
                 "stream-json".into(),
                 "--strict-mcp-config".into(),
@@ -284,6 +286,7 @@ mod tests {
         assert!(raw.contains("# keep me"));
         assert!(raw.contains("[agents.claude]"));
         assert!(raw.contains("--verbose"));
+        assert!(raw.contains("acceptEdits"));
         assert!(raw.contains("--strict-mcp-config"));
         let config = Config::parse(&raw).unwrap();
         assert_eq!(config.agents["claude"].mode, ExternalAgentMode::Headless);
