@@ -11,7 +11,7 @@ import {
   WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -70,6 +70,24 @@ export function WorkbenchPanel({
 }: Props) {
   const [tab, setTab] = useState<Tab>("activity");
   const [busyAction, setBusyAction] = useState<"fork" | string | null>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    panelRef.current?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
 
   const tasks = useMemo(
     () =>
@@ -109,23 +127,51 @@ export function WorkbenchPanel({
   if (!open) return null;
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-30 flex w-[min(360px,calc(100%-24px))] min-w-0 flex-col border-l border-border bg-background text-foreground">
+    <div className="absolute inset-0 z-30 flex justify-end">
+      <button
+        type="button"
+        aria-label="Close Workbench"
+        className="absolute inset-0 cursor-default"
+        tabIndex={-1}
+        onClick={onClose}
+      />
+      <aside
+        ref={panelRef}
+        id="workbench-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+        className="relative z-10 flex h-full w-[min(360px,calc(100%-24px))] min-w-0 flex-col border-l border-border bg-background text-foreground outline-none"
+      >
       <header className="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3">
         <div>
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <WrenchIcon className="size-4 text-primary" />
+          <h2 id={titleId} className="flex items-center gap-2 text-sm font-semibold">
+            <WrenchIcon className="size-4 text-primary" aria-hidden="true" />
             Workbench
-          </div>
-          <div className="mt-0.5 text-[11px] text-muted-foreground">
+          </h2>
+          <p id={descriptionId} className="mt-0.5 text-[11px] text-muted-foreground">
             Review your work and return to earlier points.
-          </div>
+          </p>
         </div>
-        <Button type="button" variant="ghost" size="icon-sm" title="Close workbench" onClick={onClose}>
-          <PanelRightCloseIcon />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          title="Close Workbench"
+          aria-label="Close Workbench"
+          onClick={onClose}
+        >
+          <PanelRightCloseIcon aria-hidden="true" />
         </Button>
       </header>
 
-      <div className="grid grid-cols-2 gap-1 border-b border-border/60 p-1.5">
+      <div
+        role="tablist"
+        aria-label="Workbench views"
+        className="grid grid-cols-2 gap-1 border-b border-border/60 p-1.5"
+      >
         {([
           ["activity", "Activity", Clock3Icon],
           ["outline", "Outline", ListTreeIcon],
@@ -133,6 +179,11 @@ export function WorkbenchPanel({
           <button
             key={id}
             type="button"
+            id={`workbench-tab-${id}`}
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls="workbench-content"
+            tabIndex={tab === id ? 0 : -1}
             className={cn(
               "flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors",
               tab === id
@@ -140,14 +191,38 @@ export function WorkbenchPanel({
                 : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
             )}
             onClick={() => setTab(id)}
+            onKeyDown={(event) => {
+              if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                return;
+              }
+              event.preventDefault();
+              const next: Tab =
+                event.key === "Home"
+                  ? "activity"
+                  : event.key === "End"
+                    ? "outline"
+                    : id === "activity"
+                      ? "outline"
+                      : "activity";
+              setTab(next);
+              requestAnimationFrame(() => {
+                document.getElementById(`workbench-tab-${next}`)?.focus();
+              });
+            }}
           >
-            <Icon className="size-3.5" />
+            <Icon className="size-3.5" aria-hidden="true" />
             {label}
           </button>
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div
+        id="workbench-content"
+        role="tabpanel"
+        aria-labelledby={`workbench-tab-${tab}`}
+        tabIndex={0}
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-3 outline-none"
+      >
         {tab === "activity" ? (
           <div className="flex flex-col gap-3">
             <section className="rounded-xl border border-border/70 bg-background/30 p-3">
@@ -202,11 +277,11 @@ export function WorkbenchPanel({
                       className="flex w-full items-start gap-2 rounded-lg border border-border/60 bg-background/25 px-2.5 py-2 text-left transition-colors hover:bg-secondary/60"
                       onClick={() => onJump(task.messageId)}
                     >
-                      <span className="mt-0.5 shrink-0">{statusIcon(task.status)}</span>
+                      <span className="mt-0.5 shrink-0" aria-hidden="true">{statusIcon(task.status)}</span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-1.5">
                           <span className="truncate font-mono text-[11px]">{task.name}</span>
-                          <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
+                          <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
                         </span>
                         <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
                           {task.summary || task.path || task.status.replaceAll("_", " ")}
@@ -230,7 +305,7 @@ export function WorkbenchPanel({
               <div className="flex flex-col gap-1.5">
                 <Button type="button" variant="outline" size="sm" disabled={sending || busyAction !== null} onClick={() => void runFork()}>
                   <GitForkIcon data-icon="inline-start" />
-                  Create separate conversation
+                  Fork Conversation
                 </Button>
               </div>
               {session.checkpoints.length ? (
@@ -241,7 +316,7 @@ export function WorkbenchPanel({
                     .slice(0, 6)
                     .map((checkpoint) => (
                       <div key={checkpoint.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-secondary/50">
-                        <HistoryIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                        <HistoryIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-[11px]">{checkpoint.label}</span>
                           <span className="block text-[10px] text-muted-foreground">
@@ -253,10 +328,11 @@ export function WorkbenchPanel({
                           variant="ghost"
                           size="icon-xs"
                           title={`Rewind to ${checkpoint.label}`}
+                          aria-label={`Rewind to ${checkpoint.label}`}
                           disabled={sending || busyAction !== null}
                           onClick={() => void runRewind(checkpoint.id)}
                         >
-                          <RefreshCwIcon />
+                          <RefreshCwIcon aria-hidden="true" />
                         </Button>
                       </div>
                     ))}
@@ -293,7 +369,7 @@ export function WorkbenchPanel({
                         {messagePreview(message)}
                       </span>
                     </span>
-                    <ChevronRightIcon className="mt-1 size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                    <ChevronRightIcon className="mt-1 size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
                   </button>
                 ))}
               </div>
@@ -301,6 +377,7 @@ export function WorkbenchPanel({
           </section>
         )}
       </div>
-    </aside>
+      </aside>
+    </div>
   );
 }

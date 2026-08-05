@@ -330,10 +330,10 @@ than by a depth counter.
 
 The desktop header's Workbench opens a compact task dashboard with live tool
 activity, a transcript outline, and conversation recovery. Each completed turn
-keeps a bounded checkpoint. Creating a separate conversation starts a new
-thread from the current wire history; **rewind** restores conversation state
-only and never rolls back workspace files. Automatic compaction keeps the
-transcript usable for longer tasks while preserving a rewind checkpoint.
+keeps a bounded checkpoint. **Fork Conversation** starts a new thread from the
+current wire history; **rewind** restores conversation state only and never
+rolls back workspace files. Automatic compaction keeps the transcript usable
+for longer tasks while preserving a rewind checkpoint.
 
 `Ctrl+K` opens the command palette. It searches built-in actions and registered
 slash commands; `Ctrl+Shift+K` opens the shortcut editor.
