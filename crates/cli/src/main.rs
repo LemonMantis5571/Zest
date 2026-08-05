@@ -138,7 +138,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--json" => json = true,
+            "--json" | "--jsonl" => json = true,
             "--model" => {
                 index += 1;
                 model = Some(
@@ -168,7 +168,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
                 break;
             }
             value if value.starts_with('-') => {
-                anyhow::bail!("unknown run option `{value}` (try: zest run --json -- PROMPT)");
+                anyhow::bail!("unknown run option `{value}` (try: zest run --jsonl -- PROMPT)");
             }
             value => prompt_parts.push(value.to_string()),
         }
@@ -176,7 +176,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
     }
 
     if !json {
-        anyhow::bail!("headless mode requires --json");
+        anyhow::bail!("headless mode requires --jsonl (legacy --json is also accepted)");
     }
 
     let prompt = if prompt_parts.is_empty() {
@@ -221,6 +221,7 @@ async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
     let runtime = builder.build()?;
     emit_json(serde_json::json!({
         "kind": "session",
+        "protocol": "zest-jsonl-v1",
         "provider": runtime.provider_id,
         "model": runtime.model,
         "effort": runtime.effort,
