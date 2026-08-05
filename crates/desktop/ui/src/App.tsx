@@ -91,8 +91,8 @@ async function showAttention(
  * should not contain instructions they never gave.
  */
 const BUILD_PLAN_PROMPT =
-  "Build the plan. Delegate the steps you marked as suiting another model; " +
-  "where routing has no match, build it here instead.";
+  "Build the plan. Delegate the steps that suit a configured external worker; " +
+  "build the rest here.";
 
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -1381,9 +1381,8 @@ export default function App() {
    *
    * Delegation happens here rather than during planning: there is nothing to
    * hand a worker until the plan exists, and a worker sees none of this
-   * conversation. The plan already names which steps suit another model, so the
-   * prompt only has to say "use it where you marked it" — and if routing offers
-   * no match, `delegate` reports that and the model builds it inline.
+   * conversation. The plan already names which steps suit another worker, so
+   * the prompt only has to say "use it where you marked it".
    */
   async function onBuildPlan() {
     if (sendingRef.current) return;
@@ -1642,7 +1641,7 @@ export default function App() {
               void reconnectProvider(providerId);
             }}
             onReloadSession={async () => {
-              // Rebuilds the runtime so a routing change takes effect. The
+              // Rebuilds the runtime so an ACP worker change takes effect. The
               // sticky thread is reloaded, so the open chat survives.
               const id = session?.provider ?? selectedIdRef.current;
               if (!id) return;

@@ -3,10 +3,7 @@ import type { ModelCapability } from "./generated/ModelCapability.ts";
 import type { CommandView } from "./generated/CommandView.ts";
 import type { ExternalAgentCheckView } from "./generated/ExternalAgentCheckView.ts";
 import type { ExternalAgentView } from "./generated/ExternalAgentView.ts";
-import type { ProviderModelsView } from "./generated/ProviderModelsView.ts";
 import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
-import type { RoutingRuleView } from "./generated/RoutingRuleView.ts";
-import type { RoutingView } from "./generated/RoutingView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
@@ -23,14 +20,7 @@ export type ApprovalMode =
   | "auto"
   | "bypass";
 
-/**
- * Routing wire types come from Rust via ts-rs — hand-writing them here would be
- * a second source of truth that drifts silently.
- */
-export type RoutingRule = RoutingRuleView;
 export type { CommandView };
-export type RoutingProviderModels = ProviderModelsView;
-export type { RoutingView };
 
 /** What the user clicked on an approval card. */
 export type ApprovalChoice = "once" | "session" | "deny";

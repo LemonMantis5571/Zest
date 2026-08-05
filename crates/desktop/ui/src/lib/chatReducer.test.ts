@@ -230,38 +230,35 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(state.sending, false);
   });
 
-  it("keeps delegation provenance metadata on tool cards", () => {
+  it("keeps ACP worker provenance metadata on tool cards", () => {
     const state = reduceAll([
       {
         kind: "tool_call_start",
         ...ID,
         message_id: "a1",
-        name: "delegate",
+        name: "delegate_external",
         id: "t-del",
       },
       {
         kind: "tool_call_result",
         ...ID,
         message_id: "a1",
-        name: "delegate",
+        name: "delegate_external",
         id: "t-del",
         summary: "Delegated to codex · gpt-5.6-sol",
         isError: false,
         metadata: {
           kind: "delegation",
-          provider_id: "codex",
-          model: "gpt-5.6-sol",
-          routing_kind: "mechanical",
-          skipped: [{ providerId: "claude", reason: "not loaded" }],
-          usage_delta: { requests: 1n, inputTokens: 10n, outputTokens: 5n },
+          provider_id: "claude",
+          model: "acp",
         },
       },
     ]);
     const tool = assistant(state).tools[0];
     assert.equal(tool.metadata?.kind, "delegation");
     if (tool.metadata?.kind === "delegation") {
-      assert.equal(tool.metadata.provider_id, "codex");
-      assert.equal(tool.metadata.skipped?.[0]?.reason, "not loaded");
+      assert.equal(tool.metadata.provider_id, "claude");
+      assert.equal(tool.metadata.model, "acp");
     }
   });
 
