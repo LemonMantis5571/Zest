@@ -38,6 +38,7 @@ pub fn external_agent_preset(id: &str) -> Option<ExternalAgentInput> {
             command: "claude".into(),
             args: vec![
                 "--print".into(),
+                "--verbose".into(),
                 "--output-format".into(),
                 "stream-json".into(),
                 "--strict-mcp-config".into(),
@@ -282,6 +283,7 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("# keep me"));
         assert!(raw.contains("[agents.claude]"));
+        assert!(raw.contains("--verbose"));
         assert!(raw.contains("--strict-mcp-config"));
         let config = Config::parse(&raw).unwrap();
         assert_eq!(config.agents["claude"].mode, ExternalAgentMode::Headless);
