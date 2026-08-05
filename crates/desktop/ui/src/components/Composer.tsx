@@ -61,7 +61,6 @@ type Props = {
   onOpenFolder: () => void;
   onRemoveAttachment: (id: string) => void;
   onPasteImages: (files: File[]) => void;
-  onCompactContext?: () => Promise<void>;
   compacting?: boolean;
   /** Sticky chrome above the input (e.g. pending approvals). */
   aboveComposer?: ReactNode;
@@ -96,7 +95,6 @@ export function Composer({
   onOpenFolder,
   onRemoveAttachment,
   onPasteImages,
-  onCompactContext,
   compacting = false,
   aboveComposer,
 }: Props) {
@@ -429,8 +427,6 @@ export function Composer({
             />
             <ContextUsageButton
               refreshKey={contextRefreshKey}
-              onCompact={onCompactContext}
-              compacting={compacting}
             />
           </div>
         </div>

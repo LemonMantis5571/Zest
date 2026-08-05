@@ -54,7 +54,7 @@ function userFacingError(error) {
     return "This provider needs to be connected before continuing.";
   }
   if (raw.includes("context") || raw.includes("token limit") || raw.includes("too long")) {
-    return "This conversation is too long for the selected model. Compact it and try again.";
+    return "This conversation is too long for the selected model. Start a new conversation or shorten the request.";
   }
   return "Something went wrong. Try again.";
 }
