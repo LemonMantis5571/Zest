@@ -177,7 +177,7 @@ export function ContextUsageButton({
                 )}
               </Button>
               <div className="mt-1.5 flex items-center gap-1 text-[10px] text-muted-foreground">
-                <CheckCircle2Icon className="size-3 shrink-0 text-emerald-400" />
+                <CheckCircle2Icon className="size-3 shrink-0 text-primary" />
                 You can restore this conversation from before compaction.
               </div>
             </div>

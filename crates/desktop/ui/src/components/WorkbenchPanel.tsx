@@ -42,7 +42,7 @@ function formatAge(epochSecs: number) {
 }
 
 function statusIcon(status: string) {
-  if (status === "done") return <CheckCircle2Icon className="text-emerald-400" />;
+  if (status === "done") return <CheckCircle2Icon className="text-primary" />;
   if (status === "error") return <XCircleIcon className="text-destructive" />;
   if (status === "awaiting_approval") {
     return <TriangleAlertIcon className="text-amber-400" />;
@@ -112,7 +112,7 @@ export function WorkbenchPanel({
   if (!open) return null;
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-30 flex w-[min(360px,calc(100%-24px))] min-w-0 flex-col border-l border-border/70 bg-[color-mix(in_srgb,var(--chat-header)_96%,transparent)] text-foreground shadow-[-18px_0_42px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+    <aside className="absolute inset-y-0 right-0 z-30 flex w-[min(360px,calc(100%-24px))] min-w-0 flex-col border-l border-border bg-background text-foreground">
       <header className="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -166,10 +166,10 @@ export function WorkbenchPanel({
                     "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-medium",
                     sending
                       ? "bg-primary/12 text-primary"
-                      : "bg-emerald-500/10 text-emerald-400"
+                      : "bg-secondary text-muted-foreground"
                   )}
                 >
-                  <span className={cn("size-1.5 rounded-full", sending ? "bg-primary" : "bg-emerald-400")} />
+                  <span className={cn("size-1.5 rounded-full", sending ? "bg-primary" : "bg-muted-foreground")} />
                   {sending ? "Working" : "Ready"}
                 </span>
               </div>
@@ -233,7 +233,7 @@ export function WorkbenchPanel({
               <div className="flex flex-col gap-1.5">
                 <Button type="button" variant="outline" size="sm" disabled={sending || busyAction !== null} onClick={() => void runFork()}>
                   <GitForkIcon data-icon="inline-start" />
-                  Fork conversation
+                  Create separate conversation
                 </Button>
                 <Button type="button" variant="outline" size="sm" disabled={compacting || sending || messages.length < 4} onClick={() => void onCompact()}>
                   <SparklesIcon data-icon="inline-start" />

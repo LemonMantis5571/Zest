@@ -12,7 +12,7 @@ export function AuthSuccess({ onContinue, continuing }: Props) {
   return (
     <AuthShell>
       <header className="mb-6">
-        <div className="mb-4 flex size-10 items-center justify-center rounded-full bg-[var(--success)]/15 text-[var(--success)]">
+        <div className="mb-4 flex size-10 items-center justify-center rounded-full bg-primary/15 text-primary">
           <CheckIcon className="size-5" strokeWidth={2.5} />
         </div>
         <h1 className="m-0 mb-1.5 text-[22px] font-semibold leading-tight tracking-[-0.4px]">

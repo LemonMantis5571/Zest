@@ -655,7 +655,7 @@ export function SettingsPanel({
                 {overSoftLimit ? " · long prompts may use more context" : ""}
               </span>
               {promptSavedFlash ? (
-                <span className="text-[var(--success,#27a644)]">Saved — next message uses it</span>
+                <span className="text-primary">Saved — next message uses it</span>
               ) : null}
             </div>
             {promptError ? (
