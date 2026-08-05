@@ -102,7 +102,10 @@ npm run ui:build
 ### 5. Run
 
 ```powershell
-# Desktop (picker → Connect → chat)
+# Desktop development (Tauri + Vite HMR; recommended for UI work)
+npm run desktop:dev
+
+# Desktop with the built static webview
 cargo run -p zest-desktop
 
 # Or CLI harness from a project directory
@@ -128,18 +131,25 @@ Offline UI smoke (no gateway): open the webview with `?fixture=1` during UI-only
 ## Daily commands
 
 ```powershell
-cargo run -p zest-desktop          # desktop app
+npm run desktop:dev                # desktop app with Vite HMR (recommended)
+cargo run -p zest-desktop          # desktop app with the built static webview
 cargo run -p zest                  # CLI chat
-cargo run -p zest -- run --json -- "Summarize the current project"
+cargo run -p zest -- run --jsonl -- "Summarize the current project"
 cargo run -p zest -- auth          # provider detection
 cargo run -p zest -- usage         # local usage ledger
 cargo run -p zest -- doctor --live # opt-in live acceptance (spends quota)
-cargo run -p zest -- run --json -- "Inspect the repo and report the next step"
+cargo run -p zest -- run --jsonl -- "Inspect the repo and report the next step"
 
-npm run ui:build                   # rebuild webview after UI changes
-npm run desktop:dev                # Tauri + Vite HMR (dev)
+npm run ui:build                   # rebuild webview for the static cargo path
 .\scripts\verify.ps1               # fmt, clippy -D warnings, tests, UI lint/build
 ```
+
+`cargo run -p zest-desktop` includes the Rust compile and links the desktop shell, so its
+first run can take tens of seconds on a new or invalidated build. Use `npm run desktop:dev`
+for interface work: Rust is compiled once, then Vite updates the webview without rebuilding
+the desktop crate after each UI edit during that dev session. Rust or Tauri configuration
+changes can still trigger a rebuild. An unchanged Cargo build is incremental and should be
+much faster than the first compile.
 
 Set `CARGO_TARGET_DIR` if you want a fixed target dir (CI/scripts use `D:\…\target` or repo `target/`).
 
@@ -354,6 +364,10 @@ than one provider, each row is tagged so this is visible rather than surprising.
 - Trash → confirm, then delete (the open chat becomes an unsaved draft until the first message)
 - Composer footer shows folder, git branch, and context usage estimate
 
+Model controls are capability-aware. Zest only sends function definitions and
+reasoning-effort requests when the selected model catalogue says they are
+supported; models without an effort setting use their own reasoning defaults.
+
 ### Attachments & images
 
 Composer **+** → Upload files / Open folder. Paste images into the composer.
@@ -390,16 +404,18 @@ suggests starting a new conversation or shortening the request.
 For editor integrations and CI, run one turn without the interactive prompt:
 
 ```powershell
-zest run --json -- "Review the changed files and list any risks"
-"Fix the failing test" | zest run --json
+zest run --jsonl -- "Review the changed files and list any risks"
+"Fix the failing test" | zest run --jsonl
 ```
 
-Every stdout line is a JSON object. The stream starts with a `session` object,
-then emits `text`, `thinking`, `tool_call_start`, `tool_call_result`,
-`approval_needed`, `approval_decision`, `model_substituted`, and finally `done` or `error`. Headless
-approval is intentionally deny-only: gated writes/commands emit their preview
-and are denied instead of hanging on an interactive prompt. Diagnostics go to
-stderr, so stdout remains machine-readable.
+Every stdout line is a JSON object. The stream starts with a `session` object
+whose `protocol` is `zest-jsonl-v1`, then emits `text`, `thinking`,
+`tool_call_start`, `tool_call_result`, `approval_needed`, `approval_decision`,
+`model_substituted`, and finally `done` or `error`. Headless approval is
+intentionally deny-only: gated writes/commands emit their preview and are
+denied instead of hanging on an interactive prompt. Diagnostics go to stderr,
+so stdout remains machine-readable. `--json` remains accepted as a
+backward-compatible alias.
 
 ---
 
