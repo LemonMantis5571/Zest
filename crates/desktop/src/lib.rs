@@ -461,6 +461,9 @@ enum ToolMetaView {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skipped: Vec<SkippedProviderView>,
         usage_delta: UsageDeltaView,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        diff: Option<String>,
     },
 }
 
@@ -473,6 +476,7 @@ impl From<ToolMetadata> for ToolMetaView {
                 routing_kind,
                 skipped,
                 usage_delta,
+                diff,
             } => Self::Delegation {
                 provider_id,
                 model,
@@ -489,6 +493,7 @@ impl From<ToolMetadata> for ToolMetaView {
                     input_tokens: usage_delta.input_tokens,
                     output_tokens: usage_delta.output_tokens,
                 },
+                diff,
             },
         }
     }
@@ -774,7 +779,7 @@ fn set_provider_key(state: State<'_, AppState>, id: String, key: String) -> Resu
         ..
     }) = config.providers.get(&id)
     else {
-        return Err(format!("This provider does not accept an API key."));
+        return Err("This provider does not accept an API key.".to_string());
     };
     if credential.is_none() && api_key_env.is_some() {
         return Err("This provider gets its API key from an environment variable.".into());
@@ -787,7 +792,7 @@ fn delete_provider_key(state: State<'_, AppState>, id: String) -> Result<(), Str
     let config = load_workspace_config(&state);
     let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
     else {
-        return Err(format!("This provider does not accept an API key."));
+        return Err("This provider does not accept an API key.".to_string());
     };
     zest_core::credentials::delete(credential.as_deref().unwrap_or(&id))
 }
@@ -797,7 +802,7 @@ fn provider_key_present(state: State<'_, AppState>, id: String) -> Result<bool, 
     let config = load_workspace_config(&state);
     let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
     else {
-        return Err(format!("This provider does not accept an API key."));
+        return Err("This provider does not accept an API key.".to_string());
     };
     zest_core::credentials::present(credential.as_deref().unwrap_or(&id))
 }
@@ -1226,12 +1231,18 @@ fn ensure_persist(state: &AppState, root: &std::path::Path) -> Result<PersistWor
     Ok(worker)
 }
 
+struct ResolvedThread {
+    thread: Thread,
+    warning: Option<String>,
+    created: bool,
+}
+
 fn resolve_thread(
     root: &std::path::Path,
     store: &ThreadStore,
     provider_id: &str,
-) -> Result<(Thread, Option<String>), String> {
-    let mut state = ProjectSessionState::load(root, provider_id);
+) -> Result<ResolvedThread, String> {
+    let state = ProjectSessionState::load(root, provider_id);
     if let Some(id) = state.get(provider_id).thread_id {
         match store.load_for_provider(&id, provider_id) {
             Ok(loaded) => {
@@ -1240,21 +1251,24 @@ fn resolve_thread(
                 thread
                     .ensure_provider(provider_id)
                     .map_err(|e| e.to_string())?;
-                return Ok((thread, loaded.warning));
+                return Ok(ResolvedThread {
+                    thread,
+                    warning: loaded.warning,
+                    created: false,
+                });
             }
             Err(ThreadLoadError::Corrupt { .. }) => {
                 let thread = store
                     .create_for_provider(provider_id)
                     .map_err(|e| e.to_string())?;
-                state.set_thread(provider_id, &thread.id);
-                let _ = state.save(root);
-                return Ok((
+                return Ok(ResolvedThread {
                     thread,
-                    Some(
+                    warning: Some(
                         "Chat history could not be restored, so a new conversation was started."
                             .into(),
                     ),
-                ));
+                    created: true,
+                });
             }
             Err(ThreadLoadError::ProviderMismatch { .. })
             | Err(ThreadLoadError::Missing(_))
@@ -1267,9 +1281,11 @@ fn resolve_thread(
     let thread = store
         .create_for_provider(provider_id)
         .map_err(|e| e.to_string())?;
-    state.set_thread(provider_id, &thread.id);
-    let _ = state.save(root);
-    Ok((thread, None))
+    Ok(ResolvedThread {
+        thread,
+        warning: None,
+        created: true,
+    })
 }
 
 fn persist_provider_thread(
@@ -1377,6 +1393,7 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
                     routing_kind,
                     skipped,
                     usage_delta,
+                    diff,
                 } => ToolMetadata::Delegation {
                     provider_id,
                     model,
@@ -1393,6 +1410,7 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
                         input_tokens: usage_delta.input_tokens,
                         output_tokens: usage_delta.output_tokens,
                     },
+                    diff,
                 },
             });
             thread.apply_tool_result(
@@ -1451,6 +1469,16 @@ async fn start_session(
     model: Option<String>,
     effort: Option<String>,
 ) -> Result<SessionInfo, String> {
+    start_session_inner(state, id, model, effort, None).await
+}
+
+async fn start_session_inner(
+    state: State<'_, AppState>,
+    id: String,
+    model: Option<String>,
+    effort: Option<String>,
+    thread_override: Option<(Thread, Option<String>)>,
+) -> Result<SessionInfo, String> {
     zest_core::load_env();
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
@@ -1494,8 +1522,6 @@ async fn start_session(
             .map_err(|failure| failure.user_message())?;
     }
 
-    persist_choice(&id)?;
-
     let prefs = ProjectSessionState::load(&root, &id).get(&id);
 
     // Only what the caller explicitly asked for is `explicit`. The sticky
@@ -1508,9 +1534,14 @@ async fn start_session(
         .map(|e| normalize_effort(&e));
 
     let store = open_store(&root)?;
-    let (mut thread, load_warning) = resolve_thread(&root, &store, &id)?;
+    let (mut thread, load_warning, thread_created) = match thread_override {
+        Some((thread, warning)) => (thread, warning, false),
+        None => {
+            let resolved = resolve_thread(&root, &store, &id)?;
+            (resolved.thread, resolved.warning, resolved.created)
+        }
+    };
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
-    persist_provider_thread(&root, &id, &thread.id)?;
 
     let approver: Arc<dyn Approver> = Arc::new(HubApprover {
         hub: state.approvals.clone(),
@@ -1536,13 +1567,42 @@ async fn start_session(
         builder = builder.with_effort(effort);
     }
 
-    let runtime = builder.build().map_err(|e| e.to_string())?;
+    let runtime = match builder.build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if thread_created {
+                let _ = store.delete(&thread.id);
+            }
+            return Err(error.to_string());
+        }
+    };
     let runtime_warnings = runtime.warnings.clone();
     let mut agent = runtime.agent;
     agent.messages = thread.agent_messages.clone();
 
-    persist_provider_model_effort(&root, &id, &runtime.model, &runtime.effort)?;
+    if let Err(error) = persist_provider_model_effort(&root, &id, &runtime.model, &runtime.effort) {
+        if thread_created {
+            let _ = store.delete(&thread.id);
+        }
+        return Err(error);
+    }
+    if let Err(error) = persist_provider_thread(&root, &id, &thread.id) {
+        if thread_created {
+            let _ = store.delete(&thread.id);
+        }
+        return Err(error);
+    }
+    // Only remember a provider after its runtime and thread have been built.
+    // A failed provider switch must not poison the next launch with a provider
+    // that never became a live session.
+    if let Err(error) = persist_choice(&id) {
+        if thread_created {
+            let _ = store.delete(&thread.id);
+        }
+        return Err(error);
+    }
 
+    let thread_id = thread.id.clone();
     let session = Session {
         session_id: String::new(),
         agent,
@@ -1551,16 +1611,18 @@ async fn start_session(
         provider_id: id,
         provider_label,
         root,
-        thread_id: thread.id.clone(),
+        thread_id: thread_id.clone(),
         thread,
         base_system: runtime.base_system,
         skills: runtime.skills,
     };
 
-    state
-        .sessions
-        .set_session(session)
-        .map_err(map_session_err)?;
+    if let Err(error) = state.sessions.set_session(session) {
+        if thread_created {
+            let _ = store.delete(&thread_id);
+        }
+        return Err(map_session_err(error));
+    }
     remember_workspace_config(&state, &session_config);
 
     // A dropped preference is worth saying out loud — otherwise the picker just
@@ -2007,28 +2069,52 @@ async fn open_project_chat(
     let provider_id =
         select_project_provider(&config, &requested_provider, thread_provider.as_deref())?;
 
-    let root = set_workspace_root(&state, root)?;
-
-    if new_thread.unwrap_or(false) {
-        let store = open_store(&root)?;
-        let thread = store
+    // Preflight the complete target before changing the active workspace. The
+    // thread override lets start_session build the runtime without writing
+    // target sticky state until the build has succeeded.
+    let target_state_path = ProjectSessionState::path(&root);
+    let previous_target_state = std::fs::read(&target_state_path).ok();
+    let previous_last_provider = snapshot_last_provider();
+    let target_store = open_store(&root)?;
+    let mut created_thread_id: Option<String> = None;
+    let target_thread = if new_thread.unwrap_or(false) {
+        let thread = target_store
             .create_for_provider(&provider_id)
             .map_err(|e| e.to_string())?;
-        persist_provider_thread(&root, &provider_id, &thread.id)?;
+        created_thread_id = Some(thread.id.clone());
+        Some((thread, None))
     } else if let Some(tid) = thread_id {
-        // Pin sticky thread before start_session resolves it.
-        let store = open_store(&root)?;
-        let _ = store
+        let loaded = target_store
             .load_for_provider(tid, &provider_id)
             .map_err(|e| e.to_string())?;
-        persist_provider_thread(&root, &provider_id, tid)?;
-    }
+        Some((loaded.thread, loaded.warning))
+    } else {
+        let resolved = resolve_thread(&root, &target_store, &provider_id)?;
+        if resolved.created {
+            created_thread_id = Some(resolved.thread.id.clone());
+        }
+        Some((resolved.thread, resolved.warning))
+    };
+
+    set_workspace_root(&state, root)?;
 
     // `set_session` replaces an idle session, so keep the old one alive until
     // the new runtime has been built. A failed project switch must not leave
     // the UI pointing at a session that the backend already discarded.
-    let result = start_session(state.clone(), provider_id.clone(), None, None).await;
+    let result = start_session_inner(
+        state.clone(),
+        provider_id.clone(),
+        None,
+        None,
+        target_thread,
+    )
+    .await;
     if result.is_err() {
+        restore_snapshot(&target_state_path, previous_target_state);
+        if let Some(thread_id) = created_thread_id {
+            let _ = target_store.delete(&thread_id);
+        }
+        restore_last_provider(previous_last_provider);
         if let Some(previous_root) = previous_root {
             let _ = set_workspace_root(&state, previous_root);
         }
@@ -3153,6 +3239,29 @@ fn persist_choice(id: &str) -> Result<(), String> {
     let path = zest_config_dir()?.join("last-provider");
     std::fs::write(&path, id).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn snapshot_last_provider() -> Option<(PathBuf, Option<Vec<u8>>)> {
+    let path = dirs::config_dir()?.join("zest").join("last-provider");
+    Some((path.clone(), std::fs::read(path).ok()))
+}
+
+fn restore_last_provider(snapshot: Option<(PathBuf, Option<Vec<u8>>)>) {
+    let Some((path, contents)) = snapshot else {
+        return;
+    };
+    restore_snapshot(&path, contents);
+}
+
+fn restore_snapshot(path: &Path, contents: Option<Vec<u8>>) {
+    match contents {
+        Some(contents) => {
+            let _ = std::fs::write(path, contents);
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[tauri::command]

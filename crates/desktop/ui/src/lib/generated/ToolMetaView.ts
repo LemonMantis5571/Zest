@@ -5,6 +5,6 @@ export type SkippedProviderView = { providerId: string, reason: string, };
 /**
  * Desktop wire view of core `ToolMetadata` (ts-rs exportable).
  */
-export type ToolMetaView = { "kind": "delegation", provider_id: string, model: string, routing_kind?: string, skipped?: Array<SkippedProviderView>, usage_delta: UsageDeltaView, };
+export type ToolMetaView = { "kind": "delegation", provider_id: string, model: string, routing_kind?: string, skipped?: Array<SkippedProviderView>, usage_delta: UsageDeltaView, diff?: string, };
 
 export type UsageDeltaView = { requests: bigint, inputTokens: bigint, outputTokens: bigint, };

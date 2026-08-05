@@ -2,6 +2,7 @@ pub mod approval;
 pub mod bash;
 pub mod delegate;
 pub mod edit_file;
+pub mod external_agent;
 pub mod glob_files;
 pub mod grep;
 pub mod list_dir;

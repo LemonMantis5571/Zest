@@ -19,6 +19,7 @@ use crate::routing::Router;
 use crate::skills::SkillSet;
 use crate::tools::approval::{ApprovalPolicy, Approver, DenyApprover};
 use crate::tools::delegate::Delegate;
+use crate::tools::external_agent::ExternalAgent;
 use crate::tools::{
     register_exec_tools, register_read_tools, register_skill_tools, register_write_tools,
     ToolRegistry,
@@ -273,11 +274,16 @@ impl RuntimeBuilder {
         // prompt describing a tool the model cannot see.
         let delegate_enabled =
             self.enable_delegate && config.routing.delegation && registry.len() > 1;
+        let external_delegate_enabled = self.enable_delegate && !config.agents.is_empty();
 
         let mut base_system = self.system.unwrap_or_else(|| DEFAULT_SYSTEM.to_string());
         if delegate_enabled {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::DELEGATION_SYSTEM);
+        }
+        if external_delegate_enabled {
+            base_system.push_str("\n\n");
+            base_system.push_str(crate::prompt::EXTERNAL_DELEGATION_SYSTEM);
         }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
@@ -328,6 +334,9 @@ impl RuntimeBuilder {
                 .with_ledger(ledger.clone())
                 .with_kinds(kinds),
             ));
+        }
+        if external_delegate_enabled {
+            tools.register(Arc::new(ExternalAgent::new(&root, config.agents.clone())));
         }
 
         let approver = self
@@ -494,6 +503,65 @@ mod tests {
             on_system.contains("same turn"),
             "the concurrency hint is the point of the paragraph"
         );
+    }
+
+    #[test]
+    fn external_agents_are_explicit_tools_and_follow_the_delegate_switch() {
+        std::env::set_var("ZEST_EXTERNAL_RUNTIME_KEY", "present");
+        let dir = scratch("external-agent");
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:1"
+api_key_env = "ZEST_EXTERNAL_RUNTIME_KEY"
+model = "gpt-5.6-sol"
+
+[agents.review]
+mode = "headless"
+command = "review-agent"
+args = ["--output-format", "stream-json", "{prompt}"]
+workspace = "isolated"
+
+[routing]
+default = { provider = "codex" }
+"#,
+        )
+        .unwrap();
+
+        let enabled = RuntimeBuilder::new(&dir)
+            .with_config(config.clone())
+            .with_provider("codex")
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert!(enabled
+            .agent
+            .tool_names()
+            .iter()
+            .any(|name| *name == "delegate_external"));
+        assert!(enabled
+            .agent
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("# External workers"));
+
+        let disabled = RuntimeBuilder::new(&dir)
+            .with_config(config)
+            .with_provider("codex")
+            .enable_delegate(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert!(!disabled
+            .agent
+            .tool_names()
+            .iter()
+            .any(|name| *name == "delegate_external"));
+        std::env::remove_var("ZEST_EXTERNAL_RUNTIME_KEY");
     }
 
     /// Reproduces the reported failure: opening a folder that has no

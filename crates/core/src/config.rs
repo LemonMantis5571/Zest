@@ -29,6 +29,12 @@ pub const DEFAULT_USER_CONFIG: &str = include_str!("../../../zest.toml");
 pub struct Config {
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// Optional external coding agents invoked through a non-interactive CLI
+    /// or Agent Client Protocol (ACP) stdio session. These are deliberately
+    /// separate from providers: they are workers, not the identity of the
+    /// parent conversation.
+    #[serde(default)]
+    pub agents: BTreeMap<String, ExternalAgentConfig>,
     #[serde(default)]
     pub routing: Routing,
     #[serde(default)]
@@ -143,6 +149,59 @@ pub enum ProviderConfig {
         #[serde(default)]
         api_key_env: Option<String>,
     },
+}
+
+/// An external coding agent Zest may invoke as an explicit delegated worker.
+///
+/// `command` and `args` are passed directly to the operating system process
+/// API; Zest never constructs a shell command. Put `{prompt}` in `args` when a
+/// CLI needs the prompt at a particular position. Without it, headless mode
+/// appends the prompt as the final argument. `{model}` is expanded when a model
+/// is configured, and is left alone otherwise so a missing model fails clearly
+/// in the child CLI rather than silently selecting a different one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalAgentConfig {
+    /// `headless` consumes newline-delimited JSON from stdout. `acp` speaks
+    /// JSON-RPC over stdio and lets Zest proxy the worker workspace boundary.
+    #[serde(default)]
+    pub mode: ExternalAgentMode,
+    /// Executable name or absolute path. No shell is involved.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional label/model shown in the delegation result and available as
+    /// the `{model}` argument placeholder.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Isolated Git worktree by default. `current` is an explicit escape hatch
+    /// for read-only/non-Git projects and is never selected implicitly.
+    #[serde(default)]
+    pub workspace: ExternalWorkspace,
+    /// Child process limit. Capped by the runner to avoid a config typo making
+    /// a turn wait indefinitely.
+    #[serde(default = "default_external_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalAgentMode {
+    #[default]
+    Headless,
+    Acp,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalWorkspace {
+    #[default]
+    Isolated,
+    Current,
+}
+
+fn default_external_timeout_secs() -> u64 {
+    900
 }
 
 impl ProviderConfig {
@@ -357,6 +416,7 @@ impl Config {
         );
         Config {
             providers,
+            agents: BTreeMap::new(),
             routing: Routing {
                 default: Some(Target {
                     provider: "anthropic".to_string(),
@@ -406,6 +466,16 @@ impl Config {
                 issues.push(format!(
                     "routing rule `{}` points at unknown provider `{}`",
                     rule.kind, rule.provider
+                ));
+            }
+        }
+        for (id, agent) in &self.agents {
+            if agent.command.trim().is_empty() {
+                issues.push(format!("external agent `{id}` has an empty command"));
+            }
+            if agent.timeout_secs == 0 || agent.timeout_secs > 3_600 {
+                issues.push(format!(
+                    "external agent `{id}` timeout_secs must be between 1 and 3600"
                 ));
             }
         }
@@ -501,6 +571,62 @@ credential = "deepseek"
             }
             other => panic!("expected OpenAI-compatible provider, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_external_headless_and_acp_agents_without_provider_changes() {
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+
+[agents.claude]
+mode = "headless"
+command = "claude"
+args = [
+    "--print",
+    "--output-format", "stream-json",
+    "--strict-mcp-config",
+    "{prompt}",
+]
+workspace = "isolated"
+
+[agents.gemini]
+mode = "acp"
+command = "gemini"
+args = ["--acp"]
+workspace = "current"
+timeout_secs = 120
+"#,
+        )
+        .expect("valid external agent config");
+
+        assert_eq!(config.agents.len(), 2);
+        assert_eq!(config.agents["claude"].mode, ExternalAgentMode::Headless);
+        assert_eq!(
+            config.agents["claude"].workspace,
+            ExternalWorkspace::Isolated
+        );
+        assert_eq!(config.agents["gemini"].mode, ExternalAgentMode::Acp);
+        assert_eq!(config.agents["gemini"].timeout_secs, 120);
+    }
+
+    #[test]
+    fn external_agent_defaults_are_safe() {
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+
+[agents.claude]
+command = "claude"
+"#,
+        )
+        .unwrap();
+        let agent = &config.agents["claude"];
+        assert_eq!(agent.mode, ExternalAgentMode::Headless);
+        assert_eq!(agent.workspace, ExternalWorkspace::Isolated);
+        assert_eq!(agent.timeout_secs, 900);
     }
 
     #[test]

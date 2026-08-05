@@ -686,6 +686,7 @@ async fn run_doctor_dual() -> anyhow::Result<()> {
             routing_kind: Some("mechanical".into()),
             skipped: vec![],
             usage_delta: Default::default(),
+            diff: None,
         }),
     );
     thread.apply_done("a-doctor");
@@ -781,6 +782,7 @@ fn gateway_override() -> Option<Config> {
 
     Some(Config {
         providers,
+        agents: BTreeMap::new(),
         routing: Routing {
             default: Some(Target {
                 provider: "gateway".to_string(),
