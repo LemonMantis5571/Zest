@@ -269,6 +269,13 @@ pub enum StreamEvent<'a> {
         name: &'a str,
         id: &'a str,
     },
+    /// UI-only metadata becomes available after the complete tool input is
+    /// prepared, before approval or execution begins.
+    ToolCallUpdate {
+        name: &'a str,
+        id: &'a str,
+        metadata: crate::tools::ToolMetadata,
+    },
     /// Emitted after a local tool finishes. `summary` is a short preview of the body.
     /// `metadata` is a typed UI/persist side-channel (never model wire content).
     ToolCallResult {

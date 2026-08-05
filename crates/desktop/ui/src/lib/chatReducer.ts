@@ -244,6 +244,18 @@ export function reduceChatEvent(
         effects,
       };
     }
+    case "tool_call_update": {
+      const ensured = ensureAssistant(state, event.message_id, newId);
+      return {
+        state: patchAssistant(ensured.state, ensured.id, (m) => ({
+          ...m,
+          tools: m.tools.map((tool) =>
+            tool.id === event.id ? { ...tool, metadata: event.metadata } : tool
+          ),
+        })),
+        effects,
+      };
+    }
     case "tool_call_result": {
       const ensured = ensureAssistant(state, event.message_id, newId);
       return {

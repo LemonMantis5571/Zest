@@ -276,10 +276,7 @@ impl ExternalAgent {
             ));
         }
 
-        let model = config
-            .model
-            .clone()
-            .unwrap_or_else(|| mode_label(config.mode).to_string());
+        let model = external_model_label(config);
         let mut body = format!("[{agent_id} · {model}]\n{answer}");
         if !run.diff.trim().is_empty() {
             body.push_str("\n\nChanges from the external workspace:\n");
@@ -333,6 +330,16 @@ fn mode_label(mode: ExternalAgentMode) -> &'static str {
     }
 }
 
+fn external_model_label(config: &ExternalAgentConfig) -> String {
+    config
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or("CLI default")
+        .to_string()
+}
+
 #[async_trait]
 impl Tool for ExternalAgent {
     fn name(&self) -> &str {
@@ -382,8 +389,10 @@ impl Tool for ExternalAgent {
 
     fn prepare(&self, input: Value) -> Result<PreparedToolCall, String> {
         let (task, agent_id) = parse_input(&input)?;
-        let config = self.config(agent_id)?;
-        let target = self.target(agent_id, config);
+        let agent_id = agent_id.to_string();
+        let config = self.config(&agent_id)?;
+        let model = external_model_label(config);
+        let target = self.target(&agent_id, config);
         let workspace_note = match config.workspace {
             ExternalWorkspace::Isolated => "isolated worktree",
             ExternalWorkspace::Current => "current project workspace",
@@ -402,7 +411,13 @@ impl Tool for ExternalAgent {
                 summary,
                 diff: String::new(),
             },
-        ))
+        )
+        .with_metadata(ToolMetadata::Delegation {
+            provider_id: agent_id,
+            model,
+            diff: None,
+            usage: None,
+        }))
     }
 
     async fn execute_prepared(
@@ -2387,6 +2402,24 @@ mod tests {
         );
         assert!(tool.prepare(json!({"task":"x"})).is_err());
         assert!(tool.prepare(json!({"agent":"missing","task":"x"})).is_err());
+    }
+
+    #[test]
+    fn external_prepare_exposes_worker_identity_before_execution() {
+        let tool = ExternalAgent::new(
+            std::env::temp_dir(),
+            BTreeMap::from([(String::from("claude"), config(ExternalAgentMode::Headless))]),
+        );
+        let prepared = tool.prepare(json!({"agent":"claude","task":"x"})).unwrap();
+        match prepared.metadata {
+            Some(ToolMetadata::Delegation {
+                provider_id, model, ..
+            }) => {
+                assert_eq!(provider_id, "claude");
+                assert_eq!(model, "test-model");
+            }
+            other => panic!("expected delegation metadata, got {other:?}"),
+        }
     }
 
     #[tokio::test]

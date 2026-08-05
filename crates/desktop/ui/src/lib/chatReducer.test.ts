@@ -240,6 +240,17 @@ describe("reduceChatEvent characterization", () => {
         id: "t-del",
       },
       {
+        kind: "tool_call_update",
+        ...ID,
+        message_id: "a1",
+        id: "t-del",
+        metadata: {
+          kind: "delegation",
+          provider_id: "claude",
+          model: "CLI default",
+        },
+      },
+      {
         kind: "tool_call_result",
         ...ID,
         message_id: "a1",
@@ -250,7 +261,7 @@ describe("reduceChatEvent characterization", () => {
         metadata: {
           kind: "delegation",
           provider_id: "claude",
-          model: "acp",
+          model: "CLI default",
         },
       },
     ]);
@@ -258,7 +269,7 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(tool.metadata?.kind, "delegation");
     if (tool.metadata?.kind === "delegation") {
       assert.equal(tool.metadata.provider_id, "claude");
-      assert.equal(tool.metadata.model, "acp");
+      assert.equal(tool.metadata.model, "CLI default");
     }
   });
 

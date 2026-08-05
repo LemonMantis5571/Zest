@@ -1,5 +1,6 @@
 import {
   CheckCircle2Icon,
+  BotIcon,
   ChevronRightIcon,
   Clock3Icon,
   GitForkIcon,
@@ -48,6 +49,21 @@ function statusIcon(status: string) {
     return <TriangleAlertIcon className="text-amber-400" />;
   }
   return <RefreshCwIcon className="animate-spin text-primary" />;
+}
+
+function subagentLabel(id: string) {
+  if (id === "claude") return "Claude Code";
+  if (id === "gemini") return "Gemini CLI";
+  return id
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function subagentStatus(status: string) {
+  if (status === "running") return "Working";
+  if (status === "awaiting_approval") return "Needs approval";
+  if (status === "error") return "Failed";
+  return "Done";
 }
 
 function messagePreview(message: ChatMessage) {
@@ -104,6 +120,34 @@ export function WorkbenchPanel({
         .reverse(),
     [messages]
   );
+
+  const subagents = useMemo(() => {
+    const latest = new Map<
+      string,
+      {
+        id: string;
+        label: string;
+        model: string;
+        status: string;
+        messageId: string;
+      }
+    >();
+    for (const task of tasks) {
+      if (task.name !== "delegate_external" || task.metadata?.kind !== "delegation") {
+        continue;
+      }
+      const id = task.metadata.provider_id;
+      if (latest.has(id)) continue;
+      latest.set(id, {
+        id,
+        label: subagentLabel(id),
+        model: task.metadata.model,
+        status: task.status,
+        messageId: task.messageId,
+      });
+    }
+    return [...latest.values()];
+  }, [tasks]);
 
   const outline = useMemo(
     () => messages.filter((message) => message.text.trim() || message.role === "assistant"),
@@ -269,6 +313,40 @@ export function WorkbenchPanel({
                 </div>
               </div>
             </section>
+
+            {subagents.length ? (
+              <section>
+                <div className="mb-1.5 flex items-center justify-between px-1">
+                  <h2 className="m-0 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    <BotIcon className="size-3.5" aria-hidden="true" />
+                    Subagents
+                  </h2>
+                  <span className="text-[10px] text-muted-foreground">{subagents.length}</span>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {subagents.map((subagent) => (
+                    <button
+                      type="button"
+                      key={subagent.id}
+                      className="flex w-full items-center gap-2 rounded-lg border border-border/60 bg-background/25 px-2.5 py-2 text-left transition-colors hover:bg-secondary/60"
+                      onClick={() => onJump(subagent.messageId)}
+                      aria-label={`${subagent.label}, ${subagentStatus(subagent.status)}`}
+                    >
+                      <span className="shrink-0" aria-hidden="true">
+                        {statusIcon(subagent.status)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-medium">{subagent.label}</span>
+                        <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+                          {subagent.model} / {subagentStatus(subagent.status)}
+                        </span>
+                      </span>
+                      <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
 
             <section className="rounded-xl border border-border/70 bg-background/30 p-3">
               <div className="flex items-start justify-between gap-3">

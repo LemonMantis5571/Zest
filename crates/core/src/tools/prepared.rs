@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use super::approval::{ApprovalPreview, ToolRisk};
+use super::outcome::ToolMetadata;
 
 /// Fingerprint of the on-disk bytes at prepare time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,9 @@ pub struct PreparedToolCall {
     pub tool_name: String,
     pub risk: ToolRisk,
     pub preview: ApprovalPreview,
+    /// UI-only provenance known once the call's full input has been prepared.
+    /// This is never sent to the provider or persisted as tool input.
+    pub metadata: Option<ToolMetadata>,
     /// The tool vouches for *this* invocation as read-only.
     ///
     /// Only `bash` sets it, for a command that matches the allowlist and holds
@@ -82,6 +86,7 @@ impl PreparedToolCall {
                 summary: format!("{tool_name} requires approval"),
                 diff: String::new(),
             },
+            metadata: None,
             auto_eligible: false,
             kind: PreparedKind::Plain { input },
         }
@@ -97,6 +102,7 @@ impl PreparedToolCall {
             tool_name: tool_name.into(),
             risk,
             preview,
+            metadata: None,
             auto_eligible: false,
             kind: PreparedKind::Plain { input },
         }
@@ -105,6 +111,11 @@ impl PreparedToolCall {
     /// Mark this specific invocation as read-only, for the mode policy to use.
     pub fn auto_eligible(mut self, eligible: bool) -> Self {
         self.auto_eligible = eligible;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: ToolMetadata) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 
@@ -123,6 +134,7 @@ impl PreparedToolCall {
             tool_name: tool_name.into(),
             risk: ToolRisk::Write,
             preview,
+            metadata: None,
             auto_eligible: false,
             kind: PreparedKind::WriteFile {
                 absolute_path,
