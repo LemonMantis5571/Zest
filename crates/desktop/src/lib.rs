@@ -750,6 +750,45 @@ fn provider_key_present(state: State<'_, AppState>, id: String) -> Result<bool, 
 }
 
 #[tauri::command]
+fn configure_api_provider(
+    state: State<'_, AppState>,
+    id: String,
+    base_url: String,
+    model: String,
+    models: Vec<String>,
+    credential: String,
+    key: String,
+) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("API key is required".into());
+    }
+    let root = resolve_workspace_root(&state)?;
+    let path = if root.join(zest_core::config::CONFIG_FILE).is_file() {
+        root.join(zest_core::config::CONFIG_FILE)
+    } else {
+        zest_core::ensure_user_config()
+            .map_err(|e| e.to_string())?
+            .or_else(zest_core::user_config_path)
+            .ok_or_else(|| "could not locate the user config directory".to_string())?
+    };
+    zest_core::config_edit::add_openai_provider(
+        &path,
+        &zest_core::config_edit::OpenAiProviderInput {
+            id: id.clone(),
+            base_url,
+            model,
+            models,
+            credential: credential.clone(),
+        },
+    )?;
+    zest_core::credentials::set(credential.trim(), key.trim())?;
+    if let Ok(mut cached) = state.workspace_config.lock() {
+        *cached = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn usage_snapshot() -> UsageSnapshot {
     Ledger::load().snapshot()
 }
@@ -3193,6 +3232,7 @@ pub fn run() {
             set_provider_key,
             delete_provider_key,
             provider_key_present,
+            configure_api_provider,
             usage_snapshot,
             profile_stats,
             set_local_offset,

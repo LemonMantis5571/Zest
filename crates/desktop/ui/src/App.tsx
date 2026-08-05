@@ -1340,6 +1340,9 @@ export default function App() {
             onOpenProjectChat={onOpenProjectChat}
             providers={providers}
             onSwitchProvider={switchProvider}
+            onRefreshProviders={() =>
+              loadProviders(session?.provider ?? selectedIdRef.current).then(() => undefined)
+            }
             onReconnect={reconnectProvider}
             onLoadThread={onLoadThread}
             onAttachFiles={onAttachFiles}
