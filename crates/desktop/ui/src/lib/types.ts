@@ -1,6 +1,8 @@
 import type { ChatEvent as GeneratedChatEvent } from "./generated/ChatEvent.ts";
 import type { ModelCapability } from "./generated/ModelCapability.ts";
 import type { CommandView } from "./generated/CommandView.ts";
+import type { ExternalAgentCheckView } from "./generated/ExternalAgentCheckView.ts";
+import type { ExternalAgentView } from "./generated/ExternalAgentView.ts";
 import type { ProviderModelsView } from "./generated/ProviderModelsView.ts";
 import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
 import type { RoutingRuleView } from "./generated/RoutingRuleView.ts";
@@ -67,6 +69,9 @@ export const APPROVAL_MODES: {
 export type ProviderRow = Omit<GeneratedProviderView, "statusKind"> & {
   statusKind: StatusKind;
 };
+
+export type ExternalAgentRow = ExternalAgentView;
+export type ExternalAgentCheck = ExternalAgentCheckView;
 
 export type LoginStarted = {
   browserTitle: string;

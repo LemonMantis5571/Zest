@@ -18,6 +18,8 @@ import type {
   AttachmentInput,
   ChatEvent,
   ContextUsage,
+  ExternalAgentCheck,
+  ExternalAgentRow,
   LoginStarted,
   LoginStatus,
   PreparedAttachment,
@@ -46,6 +48,9 @@ const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
 export type DesktopBackend = {
   readonly mode: "tauri" | "fixture";
   listProviders(): Promise<ProviderRow[]>;
+  listExternalAgents(): Promise<ExternalAgentRow[]>;
+  setExternalAgent(id: string, enabled: boolean): Promise<void>;
+  checkExternalAgent(id: string): Promise<ExternalAgentCheck>;
   setProviderKey(id: string, key: string): Promise<void>;
   deleteProviderKey(id: string): Promise<void>;
   providerKeyPresent(id: string): Promise<boolean>;
@@ -142,6 +147,9 @@ export function createTauriBackend(): DesktopBackend {
   return {
     mode: "tauri",
     listProviders: () => tauriApi.listProviders(),
+    listExternalAgents: () => tauriApi.listExternalAgents(),
+    setExternalAgent: (id, enabled) => tauriApi.setExternalAgent(id, enabled),
+    checkExternalAgent: (id) => tauriApi.checkExternalAgent(id),
     setProviderKey: (id, key) => tauriApi.setProviderKey(id, key),
     deleteProviderKey: (id) => tauriApi.deleteProviderKey(id),
     providerKeyPresent: (id) => tauriApi.providerKeyPresent(id),
@@ -200,9 +208,47 @@ export function createFixtureBackend(): DesktopBackend {
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let workspace = ".";
+  const enabledExternalAgents = new Set<string>();
 
   return {
     mode: "fixture",
+    async listExternalAgents() {
+      return [
+        {
+          id: "claude",
+          label: "Claude Code",
+          scope: "Project zest.toml",
+          mode: "Headless CLI",
+          workspace: "Isolated worktree",
+          statusLabel: enabledExternalAgents.has("claude") ? "Enabled" : "Not enabled",
+          detail: enabledExternalAgents.has("claude")
+            ? "Uses your Claude Code CLI session."
+            : "Enable this worker in the desktop app.",
+          configured: enabledExternalAgents.has("claude"),
+          preset: true,
+        },
+        {
+          id: "gemini",
+          label: "Gemini CLI",
+          scope: "Project zest.toml",
+          mode: "ACP",
+          workspace: "Isolated worktree",
+          statusLabel: enabledExternalAgents.has("gemini") ? "Enabled" : "Not enabled",
+          detail: enabledExternalAgents.has("gemini")
+            ? "Uses your Gemini CLI session."
+            : "Enable this worker in the desktop app.",
+          configured: enabledExternalAgents.has("gemini"),
+          preset: true,
+        },
+      ];
+    },
+    async setExternalAgent(id, enabled) {
+      if (enabled) enabledExternalAgents.add(id);
+      else enabledExternalAgents.delete(id);
+    },
+    async checkExternalAgent() {
+      return { available: false, detail: "CLI checks are unavailable in the fixture." };
+    },
     async listProviders() {
       return [
         {

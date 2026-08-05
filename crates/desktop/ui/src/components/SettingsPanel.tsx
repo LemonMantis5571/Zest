@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
+  BotIcon,
   BookOpenIcon,
   ChartColumnIcon,
   ChevronRightIcon,
@@ -27,6 +28,8 @@ import { getBackend, type SkillSummary } from "@/lib/backend";
 import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/models";
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
 import type {
+  ExternalAgentCheck,
+  ExternalAgentRow,
   ProviderRow,
   SessionInfo,
   UsageSnapshot,
@@ -157,6 +160,15 @@ export function SettingsPanel({
   const [providerKeyPresent, setProviderKeyPresent] = useState(false);
   const [providerKeySaving, setProviderKeySaving] = useState(false);
 
+  const [externalAgents, setExternalAgents] = useState<ExternalAgentRow[]>([]);
+  const [externalChecks, setExternalChecks] = useState<Record<string, ExternalAgentCheck>>({});
+  const [externalBusy, setExternalBusy] = useState<{
+    id: string;
+    action: "saving" | "checking";
+  } | null>(null);
+  const [externalLoading, setExternalLoading] = useState(false);
+  const [externalError, setExternalError] = useState<string | null>(null);
+
   const [customPrompt, setCustomPrompt] = useState("");
   const [savedCustom, setSavedCustom] = useState("");
   const [basePrompt, setBasePrompt] = useState("");
@@ -187,6 +199,9 @@ export function SettingsPanel({
     setError(null);
     setPromptError(null);
     setProfileError(null);
+    setExternalLoading(true);
+    setExternalError(null);
+    setExternalChecks({});
 
     const backend = getBackend();
     // Settled, not all: these are independent sections, and one of them
@@ -195,11 +210,12 @@ export function SettingsPanel({
     // that must not take Usage and Skills down with it.
     Promise.allSettled([
       backend.listProviders(),
+      backend.listExternalAgents(),
       backend.getSystemPrompt(),
       backend.listSkills(),
       backend.usageSnapshot(),
     ])
-      .then(([rowsR, promptR, skillsR, snapR]) => {
+      .then(([rowsR, externalR, promptR, skillsR, snapR]) => {
         if (cancelled) return;
 
         if (rowsR.status === "fulfilled") {
@@ -210,6 +226,13 @@ export function SettingsPanel({
           }
         } else {
           setError("Could not load provider settings. Try again.");
+        }
+
+        if (externalR.status === "fulfilled") {
+          setExternalAgents(externalR.value);
+        } else {
+          setExternalAgents([]);
+          setExternalError("Could not load external workers. Try again.");
         }
 
         if (promptR.status === "fulfilled") {
@@ -230,7 +253,10 @@ export function SettingsPanel({
         setUsage(snapR.status === "fulfilled" ? snapR.value : null);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setExternalLoading(false);
+        }
       });
 
     return () => {
@@ -360,6 +386,42 @@ export function SettingsPanel({
       setError("Could not remove the API key. Try again.");
     } finally {
       setProviderKeySaving(false);
+    }
+  }
+
+  async function toggleExternalAgent(agent: ExternalAgentRow) {
+    if (!agent.preset || sending) return;
+    setExternalBusy({ id: agent.id, action: "saving" });
+    setExternalError(null);
+    try {
+      await getBackend().setExternalAgent(agent.id, !agent.configured);
+      setExternalAgents(await getBackend().listExternalAgents());
+      setExternalChecks((previous) => {
+        const next = { ...previous };
+        delete next[agent.id];
+        return next;
+      });
+      if (onReloadSession) await onReloadSession();
+    } catch {
+      setExternalError(
+        `Could not ${agent.configured ? "disable" : "enable"} ${agent.label}. Try again.`
+      );
+    } finally {
+      setExternalBusy(null);
+    }
+  }
+
+  async function checkExternalAgent(agent: ExternalAgentRow) {
+    if (!agent.configured || sending) return;
+    setExternalBusy({ id: agent.id, action: "checking" });
+    setExternalError(null);
+    try {
+      const result = await getBackend().checkExternalAgent(agent.id);
+      setExternalChecks((previous) => ({ ...previous, [agent.id]: result }));
+    } catch {
+      setExternalError(`Could not check ${agent.label}. Try again.`);
+    } finally {
+      setExternalBusy(null);
     }
   }
 
@@ -562,6 +624,121 @@ export function SettingsPanel({
               sessionProvider={session.provider}
               onApply={onReloadSession}
             />
+          </SettingsSection>
+
+          <SettingsSection
+            title="External workers"
+            icon={BotIcon}
+            hint={
+              externalLoading
+                ? "Loading..."
+                : externalAgents.length === 0
+                  ? "Unavailable"
+                  : `${externalAgents.filter((agent) => agent.configured).length} enabled`
+            }
+          >
+            <div
+              aria-busy={externalLoading || externalBusy !== null}
+              className="min-w-0"
+            >
+              <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+                Delegate bounded work to a CLI you already use. Sign in with Claude Code or
+                Gemini CLI first; Zest stores only the worker setup and never the CLI session.
+              </p>
+              {externalLoading ? (
+                <p className="text-xs text-muted-foreground" role="status">
+                  Loading external workers...
+                </p>
+              ) : externalAgents.length ? (
+                <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                {externalAgents.map((agent) => {
+                  const check = externalChecks[agent.id];
+                  const busy = externalBusy?.id === agent.id;
+                  return (
+                    <li
+                      key={agent.id}
+                      className="rounded-lg border border-border/80 bg-card/70 px-3 py-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">{agent.label}</div>
+                          <div className="mt-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                            {agent.statusLabel}
+                          </div>
+                          <div className="mt-0.5 text-[11px] text-muted-foreground">
+                            {agent.mode} {"·"} {agent.workspace}
+                          </div>
+                        </div>
+                        {agent.preset ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={agent.configured ? "secondary" : "outline"}
+                            disabled={sending || busy || externalBusy !== null || externalLoading}
+                            aria-pressed={agent.configured}
+                            aria-label={`${agent.configured ? "Disable" : "Enable"} ${agent.label}`}
+                            onClick={() => void toggleExternalAgent(agent)}
+                          >
+                            {busy && externalBusy?.action === "saving"
+                              ? "Saving..."
+                              : agent.configured
+                                ? "Disable"
+                                : "Enable"}
+                          </Button>
+                        ) : (
+                          <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                            TOML
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                        {agent.detail}
+                      </p>
+                      {check ? (
+                        <p
+                          className={cn(
+                            "mt-1 text-[11px] leading-relaxed",
+                            check.available ? "text-primary" : "text-destructive"
+                          )}
+                          role="status"
+                          aria-live="polite"
+                        >
+                          {check.detail}
+                        </p>
+                      ) : null}
+                      {agent.preset && agent.configured ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="ghost"
+                          className="mt-1.5"
+                          disabled={sending || busy || externalBusy !== null || externalLoading}
+                          onClick={() => void checkExternalAgent(agent)}
+                        >
+                          {busy && externalBusy?.action === "checking" ? "Checking..." : "Check CLI"}
+                        </Button>
+                      ) : null}
+                    </li>
+                  );
+                })}
+                </ul>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  External workers could not be loaded. Try closing and reopening Settings.
+                </p>
+              )}
+              {externalAgents[0] ? (
+                <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+                  Saved in {externalAgents[0].scope}. Delegations use an isolated worktree and
+                  still require your approval before they run.
+                </p>
+              ) : null}
+              {externalError ? (
+                <p className="mt-2 text-xs text-destructive" role="alert">
+                  {externalError}
+                </p>
+              ) : null}
+            </div>
           </SettingsSection>
 
           <SettingsSection
