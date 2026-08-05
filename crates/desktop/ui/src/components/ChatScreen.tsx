@@ -21,8 +21,10 @@ import { CommandPalette, type PaletteAction } from "@/components/CommandPalette"
 import { Composer } from "@/components/Composer";
 import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
+import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
 import { looksLikeDocument } from "@/lib/documentShape";
 import { buildablePlanId } from "@/lib/planActions";
+import { planningQuestionFor } from "@/lib/planningQuestion";
 import { Markdown } from "@/components/Markdown";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
 import { SettingsPanel } from "@/components/SettingsPanel";
@@ -85,7 +87,7 @@ type Props = {
   model: string;
   effort: EffortId;
   onDraftChange: (value: string) => void;
-  onSend: () => void;
+  onSend: (text?: string) => void;
   onStop?: () => void;
   onNewChat: () => void;
   onForkThread: () => Promise<void>;
@@ -127,6 +129,7 @@ type Props = {
     approvalId: string,
     decision: ApprovalChoice
   ) => Promise<void>;
+  onResolveQuestion: (questionId: string, answer: string) => Promise<void>;
   onAttachFiles: () => void;
   onOpenFolder: () => void;
   onRemoveAttachment: (id: string) => void;
@@ -158,6 +161,8 @@ type ChatMessageRowProps = {
   ) => Promise<void>;
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
+  onSend: (text?: string) => void;
+  onResolveQuestion: (questionId: string, answer: string) => Promise<void>;
 };
 
 /**
@@ -175,6 +180,8 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onResolveApproval,
   onOpenDiff,
   onReconnectProvider,
+  onSend,
+  onResolveQuestion,
 }: ChatMessageRowProps) {
   if (msg.role === "user") {
     return (
@@ -213,6 +220,14 @@ const ChatMessageRow = memo(function ChatMessageRow({
       </MessageScrollerItem>
     );
   }
+
+  const structuredQuestion = isLast ? msg.question : undefined;
+  const planningQuestion =
+    structuredQuestion ?? (isLast ? planningQuestionFor(msg) : null);
+  const submitQuestion = structuredQuestion?.questionId
+    ? (answer: string) =>
+        onResolveQuestion(structuredQuestion.questionId as string, answer)
+    : onSend;
 
   return (
     <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
@@ -271,7 +286,13 @@ const ChatMessageRow = memo(function ChatMessageRow({
             </Marker>
           ) : null}
 
-          {msg.text ? (
+          {planningQuestion ? (
+            <PlanningQuestionnaire
+              question={planningQuestion}
+              disabled={structuredQuestion ? false : sending}
+              onSubmit={submitQuestion}
+            />
+          ) : msg.text ? (
             msg.command && looksLikeDocument(msg.text) ? (
               <CommandOutputCard
                 command={msg.command}
@@ -409,6 +430,7 @@ export function ChatScreen({
   onApprovalModeChange,
   onBuildPlan,
   onResolveApproval,
+  onResolveQuestion,
   onAttachFiles,
   onOpenFolder,
   onRemoveAttachment,
@@ -740,6 +762,8 @@ export function ChatScreen({
                       onResolveApproval={onResolveApproval}
                       onOpenDiff={openDiff}
                       onReconnectProvider={onReconnectProvider}
+                      onSend={onSend}
+                      onResolveQuestion={onResolveQuestion}
                     />
                   ))}
                 </MessageScrollerContent>

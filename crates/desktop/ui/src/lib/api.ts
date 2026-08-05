@@ -238,6 +238,10 @@ export function resolveApproval(approvalId: string, decision: ApprovalChoice) {
   return invoke<void>("resolve_approval", { approvalId, decision });
 }
 
+export function resolveQuestion(questionId: string, answer: string) {
+  return invoke<void>("resolve_question", { questionId, answer });
+}
+
 export type ReadingDiffView = {
   diff: string;
   summary: string;

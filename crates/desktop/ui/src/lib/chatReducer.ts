@@ -267,6 +267,26 @@ export function reduceChatEvent(
               metadata: event.metadata ?? t.metadata,
             };
           }),
+          question:
+            m.question?.toolCallId === event.id ? undefined : m.question,
+        })),
+        effects,
+      };
+    }
+    case "question_needed": {
+      const ensured = ensureAssistant(state, event.message_id, newId);
+      return {
+        state: patchAssistant(ensured.state, ensured.id, (m) => ({
+          ...m,
+          question: {
+            questionId: event.question_id,
+            toolCallId: event.tool_call_id,
+            prompt: event.prompt,
+            choices: event.choices.map((value) => ({ value, label: value })),
+            multiple: event.multiple,
+            placeholder: event.placeholder ?? undefined,
+          },
+          streaming: true,
         })),
         effects,
       };
@@ -303,10 +323,15 @@ export function reduceChatEvent(
         next = patchAssistant(next, event.message_id, (m) => ({
           ...m,
           streaming: false,
+          question: undefined,
         }));
       } else if (next.activeAssistantId) {
         const id = next.activeAssistantId;
-        next = patchAssistant(next, id, (m) => ({ ...m, streaming: false }));
+        next = patchAssistant(next, id, (m) => ({
+          ...m,
+          streaming: false,
+          question: undefined,
+        }));
       }
       return {
         state: {
@@ -325,6 +350,7 @@ export function reduceChatEvent(
           ...patchAssistant(ensured.state, ensured.id, (m) => ({
             ...m,
             streaming: false,
+            question: undefined,
             error: m.error ?? "turn cancelled",
           })),
           activeAssistantId: null,
@@ -342,6 +368,7 @@ export function reduceChatEvent(
           ...patchAssistant(ensured.state, ensured.id, (m) => ({
             ...m,
             streaming: false,
+            question: undefined,
             error: event.message,
             // Only set when signing in again is the actual fix.
             reconnectProvider: event.reconnect_provider ?? undefined,

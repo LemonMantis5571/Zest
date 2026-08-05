@@ -1,4 +1,5 @@
 import { looksLikeDocument } from "./documentShape.ts";
+import { planningQuestionFor } from "./planningQuestion.ts";
 import type { ChatMessage } from "./types.ts";
 
 /** The skill whose output Build acts on. */
@@ -26,7 +27,8 @@ export function buildablePlanId(messages: ChatMessage[]): string | null {
     if (
       msg.role === "assistant" &&
       msg.command === PLAN_COMMAND &&
-      looksLikeDocument(msg.text)
+      looksLikeDocument(msg.text) &&
+      !planningQuestionFor(msg)
     ) {
       return msg.id;
     }
