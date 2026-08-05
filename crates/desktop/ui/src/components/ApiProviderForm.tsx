@@ -118,7 +118,9 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
           <KeyRoundIcon className="size-3.5" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold leading-tight">Add API provider</div>
+          <div className="text-sm font-semibold leading-tight">
+            {preset === "custom" ? "Add API provider" : `Connect ${PRESETS[preset].label}`}
+          </div>
           <div className="text-[11px] text-muted-foreground">
             Bring-your-own-key — stored in the OS credential manager
           </div>
@@ -212,7 +214,7 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
         </dl>
       )}
 
-      <Field label="API key" hint="Never written to zest.toml — only the OS keychain.">
+      <Field label={preset === "custom" ? "API key" : `${PRESETS[preset].label} API key`} hint="Never written to zest.toml — only the OS keychain.">
         <input
           value={key}
           onChange={(e) => setKey(e.target.value)}
@@ -235,7 +237,7 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
           Cancel
         </Button>
         <Button type="submit" size="sm" disabled={saving || !canSave}>
-          {saving ? "Saving…" : "Save provider"}
+          {saving ? "Saving…" : preset === "custom" ? "Save provider" : "Save & connect"}
         </Button>
       </div>
     </form>
