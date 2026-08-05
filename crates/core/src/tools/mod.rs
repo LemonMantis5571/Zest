@@ -9,6 +9,7 @@ pub mod list_dir;
 pub mod outcome;
 pub mod prepared;
 pub mod project;
+pub mod question;
 pub mod read_file;
 pub mod read_skill;
 pub mod sensitive;
@@ -38,6 +39,9 @@ use self::web_search::WebSearch;
 use self::write_file::WriteFile;
 
 pub use self::outcome::{SkippedProvider, ToolMetadata, ToolOutcome, UsageDelta};
+pub use self::question::{
+    parse_question_input, AskUser, DenyQuestioner, QuestionRequest, Questioner, ASK_USER_TOOL,
+};
 
 /// A client-side tool.
 ///
@@ -190,6 +194,13 @@ pub fn register_read_tools(
 /// Register `read_skill` against a shared skill registry (hot-reloadable).
 pub fn register_skill_tools(registry: &mut ToolRegistry, skills: Arc<RwLock<SkillSet>>) {
     registry.register(Arc::new(ReadSkill::new(skills)));
+}
+
+/// Register the provider-independent tool that pauses for a user's answer.
+/// Workers deliberately do not receive it; only the parent desktop turn owns a
+/// human interaction surface.
+pub fn register_question_tool(registry: &mut ToolRegistry) {
+    question::register_question_tool(registry);
 }
 
 /// Register project-scoped write tools (`write_file`, `edit_file`). Requires an

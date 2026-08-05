@@ -20,9 +20,10 @@ use crate::skills::SkillSet;
 use crate::tools::approval::{ApprovalPolicy, Approver, DenyApprover};
 use crate::tools::delegate::Delegate;
 use crate::tools::external_agent::ExternalAgent;
+use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::{
-    register_exec_tools, register_read_tools, register_skill_tools, register_write_tools,
-    ToolRegistry,
+    register_exec_tools, register_question_tool, register_read_tools, register_skill_tools,
+    register_write_tools, ToolRegistry,
 };
 use crate::usage::Ledger;
 
@@ -61,6 +62,7 @@ pub struct RuntimeBuilder {
     system: Option<String>,
     ledger: Option<Arc<Mutex<Ledger>>>,
     approver: Option<Arc<dyn Approver>>,
+    questioner: Option<Arc<dyn Questioner>>,
     policy: Option<Arc<Mutex<ApprovalPolicy>>>,
     enable_delegate: bool,
     register_write: bool,
@@ -79,6 +81,7 @@ impl RuntimeBuilder {
             system: None,
             ledger: None,
             approver: None,
+            questioner: None,
             policy: None,
             enable_delegate: true,
             register_write: true,
@@ -134,6 +137,13 @@ impl RuntimeBuilder {
 
     pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
         self.approver = Some(approver);
+        self
+    }
+
+    /// Share the front-end hook used by the provider-independent `ask_user`
+    /// tool. Omitted means headless callers do not advertise that tool.
+    pub fn with_questioner(mut self, questioner: Arc<dyn Questioner>) -> Self {
+        self.questioner = Some(questioner);
         self
     }
 
@@ -285,6 +295,10 @@ impl RuntimeBuilder {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::EXTERNAL_DELEGATION_SYSTEM);
         }
+        if self.questioner.is_some() {
+            base_system.push_str("\n\n");
+            base_system.push_str(crate::prompt::INTERACTIVE_QUESTION_SYSTEM);
+        }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
         let skills = Arc::new(RwLock::new(SkillSet::discover(&root)));
@@ -338,10 +352,16 @@ impl RuntimeBuilder {
         if external_delegate_enabled {
             tools.register(Arc::new(ExternalAgent::new(&root, config.agents.clone())));
         }
+        if self.questioner.is_some() {
+            register_question_tool(&mut tools);
+        }
 
         let approver = self
             .approver
             .unwrap_or_else(|| Arc::new(DenyApprover) as Arc<dyn Approver>);
+        let questioner = self
+            .questioner
+            .unwrap_or_else(|| Arc::new(DenyQuestioner) as Arc<dyn Questioner>);
         let policy = self
             .policy
             .unwrap_or_else(|| Arc::new(Mutex::new(ApprovalPolicy::default())));
@@ -350,6 +370,7 @@ impl RuntimeBuilder {
             .with_system(system)
             .with_ledger(ledger.clone())
             .with_approver(approver)
+            .with_questioner(questioner)
             .with_policy(policy.clone());
         agent.model = model.clone();
         agent.effort = effort.clone();
@@ -503,6 +524,43 @@ mod tests {
             on_system.contains("same turn"),
             "the concurrency hint is the point of the paragraph"
         );
+    }
+
+    #[test]
+    fn interactive_question_guidance_requires_an_interactive_front_end() {
+        let dir = two_provider_dir("question-runtime");
+        let config = Config::find(&dir).unwrap();
+
+        let headless = RuntimeBuilder::new(&dir)
+            .with_config(config.clone())
+            .with_provider("codex")
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert!(!headless.agent.tool_names().contains(&"ask_user"));
+        assert!(!headless
+            .agent
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("# Asking the user"));
+
+        let interactive = RuntimeBuilder::new(&dir)
+            .with_config(config)
+            .with_provider("codex")
+            .with_questioner(Arc::new(DenyQuestioner))
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+        assert!(interactive.agent.tool_names().contains(&"ask_user"));
+        assert!(interactive
+            .agent
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("# Asking the user"));
     }
 
     #[test]

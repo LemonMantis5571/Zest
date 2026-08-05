@@ -99,12 +99,15 @@ pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
 pub use tools::list_dir::ListDir;
 pub use tools::prepared::{PreImage, PreparedToolCall};
+pub use tools::question::{
+    parse_question_input, AskUser, DenyQuestioner, QuestionRequest, Questioner, ASK_USER_TOOL,
+};
 pub use tools::read_file::ReadFile;
 pub use tools::sensitive::is_sensitive_path;
 pub use tools::write_file::WriteFile;
 pub use tools::{
-    register_read_tools, register_skill_tools, register_write_tools, SkippedProvider, Tool,
-    ToolMetadata, ToolOutcome, ToolRegistry, UsageDelta,
+    register_question_tool, register_read_tools, register_skill_tools, register_write_tools,
+    SkippedProvider, Tool, ToolMetadata, ToolOutcome, ToolRegistry, UsageDelta,
 };
 pub use usage::{
     HeadroomView, Ledger, MeasuredUsage, ProviderUsage, ProviderUsageView, UsageSnapshot,
