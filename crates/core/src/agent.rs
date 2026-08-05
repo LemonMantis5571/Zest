@@ -137,7 +137,7 @@ impl Agent {
         self.provider.clone()
     }
 
-    /// Registered tool names (stable order). Used to assert `delegate` wiring.
+    /// Registered tool names (stable order). Used to assert worker-tool wiring.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.names()
     }
@@ -1531,7 +1531,7 @@ mod tests {
         assert!(models_agree("gpt-5.6-sol", "gpt-5.6-sol-high"));
         // Order does not matter — some endpoints answer with the shorter name.
         assert!(models_agree("claude-opus-5-20260514", "claude-opus-5"));
-        // Case and stray whitespace are not a routing change either.
+        // Case and stray whitespace are not a model identity change either.
         assert!(models_agree("Claude-Opus-5", " claude-opus-5 "));
     }
 

@@ -27,7 +27,7 @@ use tokio::task::AbortHandle;
 use tokio::time::sleep;
 
 use super::approval::{ApprovalPreview, ToolRisk};
-use super::outcome::{ToolMetadata, ToolOutcome, UsageDelta};
+use super::outcome::{ToolMetadata, ToolOutcome};
 use super::prepared::PreparedToolCall;
 use super::project::ProjectRoot;
 use super::sensitive::is_sensitive_path;
@@ -278,9 +278,6 @@ impl ExternalAgent {
             ToolMetadata::Delegation {
                 provider_id: agent_id.to_string(),
                 model,
-                routing_kind: Some(mode_label(config.mode).to_string()),
-                skipped: Vec::new(),
-                usage_delta: UsageDelta::default(),
                 diff: (!run.diff.trim().is_empty()).then(|| run.diff.clone()),
             },
         ))

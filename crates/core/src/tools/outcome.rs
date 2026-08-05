@@ -1,7 +1,7 @@
 //! Tool results visible to the model, plus optional typed UI metadata.
 //!
 //! The model only ever sees [`ToolOutcome::body`]. Front-ends may also receive
-//! [`ToolMetadata`] (delegation provenance, measured spend) without stuffing
+//! [`ToolMetadata`] (external-worker provenance) without stuffing
 //! structured JSON into the wire `tool_result`.
 
 use serde::{Deserialize, Serialize};
@@ -45,23 +45,6 @@ impl From<&str> for ToolOutcome {
     }
 }
 
-/// Measured token/request delta attributed to one tool run (Zest metering).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageDelta {
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-/// One provider skipped while resolving a delegate target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkippedProvider {
-    pub provider_id: String,
-    pub reason: String,
-}
-
 /// Typed tool side-channel. Extend with new variants; unknown variants must not
 /// break older UIs (serde will fail closed on load — prefer additive fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,12 +53,6 @@ pub enum ToolMetadata {
     Delegation {
         provider_id: String,
         model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        routing_kind: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        skipped: Vec<SkippedProvider>,
-        #[serde(default)]
-        usage_delta: UsageDelta,
         /// Optional worker diff for front-ends that can open a review view.
         /// The model-visible answer remains in `ToolOutcome::body`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

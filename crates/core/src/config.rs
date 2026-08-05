@@ -1,4 +1,5 @@
-//! `zest.toml` — which providers exist and where tasks go.
+//! `zest.toml` — which providers exist, which one starts a chat, and which
+//! external workers Zest may invoke through ACP or a headless CLI.
 //!
 //! Two principles shape this file:
 //!
@@ -35,10 +36,35 @@ pub struct Config {
     /// parent conversation.
     #[serde(default)]
     pub agents: BTreeMap<String, ExternalAgentConfig>,
+    /// Provider used when a front-end does not choose one explicitly.
+    ///
+    /// This is intentionally separate from external workers: ACP agents are
+    /// selected by the model through `delegate_external`, not by a provider
+    /// provider-routing policy.
     #[serde(default)]
-    pub routing: Routing,
+    pub default: Option<Target>,
+    /// Read-only compatibility for configurations written before ACP became
+    /// the only delegation path. The old routing rules are parsed so an
+    /// existing config does not prevent Zest from starting, but they are never
+    /// executed; `default` is migrated through `default_target` below.
+    #[serde(default, rename = "routing")]
+    legacy_routing: Option<LegacyRouting>,
     #[serde(default)]
     pub tools: ToolsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRouting {
+    #[serde(default)]
+    default: Option<Target>,
+    #[serde(default)]
+    delegation: bool,
+    /// The old rules are intentionally opaque. They are accepted only so an
+    /// installed user config can be opened and replaced from the UI without a
+    /// hard startup failure.
+    #[serde(default)]
+    rules: Vec<toml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -101,7 +127,7 @@ fn default_bash_timeout_ms() -> u64 {
 ///
 /// `kind` discriminates: `anthropic` talks to the API directly, `gateway` talks
 /// to anything that re-exposes some other backend as the Messages API. That
-/// distinction lives here and nowhere else — the router cannot tell them apart.
+/// distinction lives here and nowhere else — the agent loop cannot tell them apart.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderConfig {
@@ -132,7 +158,8 @@ pub enum ProviderConfig {
         /// API root, for example `https://api.openai.com/v1` or
         /// `https://api.deepseek.com`. The client appends `/chat/completions`.
         base_url: String,
-        /// The model used when routing does not choose one explicitly.
+        /// The model used when the default provider does not choose one
+        /// explicitly.
         model: String,
         /// Optional allow-list. Empty means only `model` is accepted.
         #[serde(default)]
@@ -218,43 +245,10 @@ fn default_anthropic_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Routing {
-    /// Where a task goes when no rule matches.
-    #[serde(default)]
-    pub default: Option<Target>,
-    /// Consulted in order; first match wins. Used from Step 5 onward.
-    #[serde(default)]
-    pub rules: Vec<Rule>,
-    /// Whether the model may hand work to another provider at all.
-    ///
-    /// **Off by default**, and off means the `delegate` tool is not registered
-    /// — not merely discouraged. Spending a second subscription is not
-    /// something to enable by accident, and an absent capability cannot be
-    /// talked around the way a flag in the prompt can. Same reasoning as the
-    /// worker registries, which structurally cannot contain `delegate`.
-    #[serde(default)]
-    pub delegation: bool,
-}
-
-impl Routing {
-    /// The task kinds the model may declare, taken from the rules.
-    ///
-    /// A kind with no rule routes nowhere in particular, so the rule list *is*
-    /// the vocabulary. Sorted and deduped: this becomes an enum in the tool
-    /// schema, and a reordering would invalidate the prompt cache for nothing.
-    pub fn kinds(&self) -> Vec<String> {
-        let mut kinds: Vec<String> = self.rules.iter().map(|r| r.kind.clone()).collect();
-        kinds.sort();
-        kinds.dedup();
-        kinds
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
+    /// Provider id from `[providers.<id>]`.
     pub provider: String,
     /// Omitted means the provider's own default.
     #[serde(default)]
@@ -262,28 +256,6 @@ pub struct Target {
     /// Omitted means `high`.
     #[serde(default)]
     pub effort: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Rule {
-    /// Matched against the `kind` a delegate call declares.
-    pub kind: String,
-    pub provider: String,
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Reasoning effort for this worker. Omitted means `high`.
-    ///
-    /// Worth setting: routing a mechanical task to a cheap model and then
-    /// running it at maximum effort spends most of what the routing saved.
-    #[serde(default)]
-    pub effort: Option<String>,
-    /// Extra framing prepended to the worker's system prompt.
-    ///
-    /// A frontend worker and a planner otherwise get identical instructions,
-    /// which wastes the one thing routing by kind actually knows.
-    #[serde(default)]
-    pub prompt: Option<String>,
 }
 
 /// Load `.env` from the project (searching upward), then `~/.zest/.env`.
@@ -374,6 +346,22 @@ fn ensure_config_file(path: &Path, contents: &str) -> Result<bool> {
 }
 
 impl Config {
+    /// Build the single-provider config used by the `ZEST_BASE_URL` override.
+    /// Keeping construction here preserves the private legacy compatibility
+    /// state without making callers know about it.
+    pub fn from_provider_override(
+        providers: BTreeMap<String, ProviderConfig>,
+        default: Target,
+    ) -> Self {
+        Self {
+            providers,
+            agents: BTreeMap::new(),
+            default: Some(default),
+            legacy_routing: None,
+            tools: ToolsConfig::default(),
+        }
+    }
+
     /// Look for `zest.toml` in `dir`, then `~/.zest/zest.toml`. Absent is not an
     /// error — see module note.
     ///
@@ -417,25 +405,30 @@ impl Config {
         Config {
             providers,
             agents: BTreeMap::new(),
-            routing: Routing {
-                default: Some(Target {
-                    provider: "anthropic".to_string(),
-                    model: None,
-                    effort: None,
-                }),
-                rules: Vec::new(),
-                delegation: false,
-            },
+            default: Some(Target {
+                provider: "anthropic".to_string(),
+                model: None,
+                effort: None,
+            }),
+            legacy_routing: None,
             tools: ToolsConfig::default(),
         }
     }
 
-    /// Which provider a task goes to with no rules involved.
+    /// Which provider a new session uses when the front-end did not choose one.
     ///
-    /// Falls back to the only configured provider when routing is silent, so a
-    /// single-provider config needs no `[routing]` section at all.
+    /// Falls back to a legacy `[routing].default` for existing installations,
+    /// then to the only configured provider. A single-provider config needs no
+    /// default section at all.
     pub fn default_target(&self) -> Option<Target> {
-        if let Some(target) = &self.routing.default {
+        if let Some(target) = &self.default {
+            return Some(target.clone());
+        }
+        if let Some(target) = self
+            .legacy_routing
+            .as_ref()
+            .and_then(|routing| routing.default.as_ref())
+        {
             return Some(target.clone());
         }
         if self.providers.len() == 1 {
@@ -453,20 +446,24 @@ impl Config {
     pub fn lint(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
-        if let Some(target) = &self.routing.default {
+        if let Some(target) = self.default.as_ref().or_else(|| {
+            self.legacy_routing
+                .as_ref()
+                .and_then(|r| r.default.as_ref())
+        }) {
             if !self.providers.contains_key(&target.provider) {
                 issues.push(format!(
-                    "routing.default points at unknown provider `{}`",
+                    "default provider points at unknown provider `{}`",
                     target.provider
                 ));
             }
         }
-        for rule in &self.routing.rules {
-            if !self.providers.contains_key(&rule.provider) {
-                issues.push(format!(
-                    "routing rule `{}` points at unknown provider `{}`",
-                    rule.kind, rule.provider
-                ));
+        if let Some(legacy) = &self.legacy_routing {
+            if legacy.delegation || !legacy.rules.is_empty() {
+                issues.push(
+                    "legacy [routing] delegation is ignored; configure ACP workers under [agents.*]"
+                        .into(),
+                );
             }
         }
         for (id, agent) in &self.agents {
@@ -503,17 +500,13 @@ base_url = "http://127.0.0.1:8317"
 api_key_env = "ZEST_GATEWAY_KEY"
 model = "gpt-5.3-codex"
 
-[routing]
-default = { provider = "anthropic", model = "claude-opus-5" }
-
-[[routing.rules]]
-kind = "mechanical"
-provider = "codex"
-model = "gpt-5.3-codex"
+[default]
+provider = "anthropic"
+model = "claude-opus-5"
 "#;
 
     #[test]
-    fn parses_providers_and_routing() {
+    fn parses_providers_and_default() {
         let config = Config::parse(FULL).expect("valid");
 
         assert_eq!(config.providers.len(), 2);
@@ -541,8 +534,32 @@ model = "gpt-5.3-codex"
         assert_eq!(target.provider, "anthropic");
         assert_eq!(target.model.as_deref(), Some("claude-opus-5"));
 
-        assert_eq!(config.routing.rules.len(), 1);
-        assert_eq!(config.routing.rules[0].kind, "mechanical");
+        assert_eq!(config.default.as_ref().unwrap().provider, "anthropic");
+    }
+
+    #[test]
+    fn accepts_legacy_routing_without_executing_it() {
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+
+[routing]
+default = { provider = "anthropic" }
+delegation = true
+
+[[routing.rules]]
+kind = "mechanical"
+provider = "anthropic"
+"#,
+        )
+        .expect("legacy config remains readable");
+
+        assert_eq!(config.default_target().unwrap().provider, "anthropic");
+        let warnings = config.lint();
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("ACP workers")));
     }
 
     #[test]
@@ -630,7 +647,7 @@ command = "claude"
     }
 
     #[test]
-    fn a_single_provider_needs_no_routing_section() {
+    fn a_single_provider_needs_no_default_section() {
         let config = Config::parse(
             r#"
 [providers.anthropic]
@@ -662,26 +679,21 @@ model = "m"
     }
 
     #[test]
-    fn lint_catches_routing_at_a_provider_that_does_not_exist() {
+    fn lint_catches_a_default_provider_that_does_not_exist() {
         let config = Config::parse(
             r#"
 [providers.anthropic]
 kind = "anthropic"
 
-[routing]
-default = { provider = "typo" }
-
-[[routing.rules]]
-kind = "mechanical"
-provider = "also-missing"
+[default]
+provider = "typo"
 "#,
         )
         .expect("parses");
 
         let issues = config.lint();
-        assert_eq!(issues.len(), 2, "{issues:?}");
+        assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(issues[0].contains("typo"));
-        assert!(issues[1].contains("also-missing"));
     }
 
     #[test]

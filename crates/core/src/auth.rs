@@ -16,9 +16,11 @@
 //!    encrypted blob. Reporting those as logged-out would push the user to
 //!    re-authenticate for no reason, so they get `Unknown` instead.
 //!
-//! Connecting from the UI is a **native shell** over vendor OAuth: spawn the
-//! login process with no console window, let the system browser finish ChatGPT/
-//! Claude sign-in, then re-detect. Zest never exchanges tokens itself.
+//! The desktop exposes a native shell only for the Zest-managed Codex sign-in:
+//! it spawns the helper with no console window, lets the system browser finish,
+//! then re-detects. Claude Code and Gemini CLI authenticate their own ACP
+//! workers; Zest never exchanges those tokens or presents duplicate Connect
+//! flows for them.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -61,7 +63,7 @@ impl AuthStatus {
 /// One row in the launch picker.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProviderSlot {
-    /// Stable id used by config, routing rules and the usage ledger.
+    /// Stable id used by config and the usage ledger.
     pub id: &'static str,
     pub label: &'static str,
     /// How this provider is authenticated, in words the picker can show.
