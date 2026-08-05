@@ -90,7 +90,7 @@ add `DEFAULT_SYSTEM` there too.
 
 **Out of scope**:
 - Changing `compose_system` / `.zest/system.md` behavior
-- Worker prompt in `tools/delegate.rs` (`WORKER_SYSTEM`)
+- Worker prompt in `tools/external_agent.rs` (`EXTERNAL_WORKER_SYSTEM`)
 - UI copy in Settings that shows the effective prompt (it reads from session)
 
 ## Git workflow

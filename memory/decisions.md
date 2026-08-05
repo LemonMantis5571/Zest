@@ -14,6 +14,24 @@ Impact:
 
 ---
 
+### 2026-08-05 — ACP is the only delegation path
+
+Decision: the parent conversation stays on its selected provider. Bounded external work uses
+`delegate_external` and an explicitly configured `[agents.*]` ACP or headless CLI worker. Zest's
+internal provider-routing rules, routing editor, dual-provider doctor path, and internal `delegate`
+tool are removed. `[default]` selects only the parent provider.
+
+Reason: ACP already gives Claude Code and Gemini CLI their supported authentication and execution
+boundary. A second Zest-to-Zest routing system duplicated that boundary and made the desktop imply
+capabilities it did not actually use.
+
+Impact: API providers remain available in the provider picker and configuration. Existing
+`[routing]` tables are tolerated for startup; a legacy default is read for compatibility, while
+legacy delegation/rules are ignored with a lint warning. New setup belongs in `[default]` and
+`[agents.*]`.
+
+---
+
 ### 2026-08-05 — Claude and Gemini CLI auth belongs to the worker
 
 Decision: the desktop provider picker launches only the Zest-managed Codex sign-in. Claude Code
