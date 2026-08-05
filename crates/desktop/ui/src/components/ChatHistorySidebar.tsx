@@ -6,6 +6,7 @@ import {
   ChevronsRightIcon,
   FolderIcon,
   FolderOpenIcon,
+  GitForkIcon,
   PlusIcon,
   SearchIcon,
   SquarePenIcon,
@@ -35,6 +36,7 @@ type Props = {
     threadId?: string;
     newThread?: boolean;
   }) => Promise<void>;
+  onForkThread: () => Promise<void>;
   onDeleteThread: (id: string, projectPath: string) => Promise<void>;
   onOpenFolder: () => void;
 };
@@ -131,6 +133,7 @@ export function ChatHistorySidebar({
   onLoadThread,
   onSwitchProvider,
   onOpenProjectChat,
+  onForkThread,
   onDeleteThread,
   onOpenFolder,
 }: Props) {
@@ -287,7 +290,7 @@ export function ChatHistorySidebar({
             });
           }}
           className={cn(
-            "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-7 pl-2 text-left outline-none transition-colors",
+            "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-14 pl-2 text-left outline-none transition-colors",
             "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
             "focus-visible:ring-2 focus-visible:ring-ring/50",
             active
@@ -310,6 +313,28 @@ export function ChatHistorySidebar({
             </span>
           ) : null}
         </button>
+        {active ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            title="Fork conversation"
+            aria-label="Fork conversation"
+            disabled={sending || deleting}
+            className={cn(
+              "absolute top-1 right-7 text-muted-foreground transition-opacity",
+              "hover:bg-muted hover:text-foreground",
+              "focus-visible:opacity-100",
+              "opacity-100"
+            )}
+            onClick={(event) => {
+              event.stopPropagation();
+              void onForkThread();
+            }}
+          >
+            <GitForkIcon aria-hidden="true" />
+          </Button>
+        ) : null}
         <Button
           type="button"
           variant="ghost"

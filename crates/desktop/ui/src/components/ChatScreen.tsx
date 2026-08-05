@@ -572,6 +572,7 @@ export function ChatScreen({
         onLoadThread={onLoadThread}
         onSwitchProvider={onSwitchProvider}
         onOpenProjectChat={onOpenProjectChat}
+        onForkThread={onForkThread}
         onDeleteThread={onDeleteThread}
         onOpenFolder={onOpenFolder}
       />
