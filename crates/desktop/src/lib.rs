@@ -1089,6 +1089,7 @@ async fn check_external_agent(
         .current_dir(root)
         .stdin(Stdio::null())
         .kill_on_drop(true);
+    zest_core::prepare_external_command(&mut command);
     scrub_external_environment(&mut command);
 
     let detail = match tokio::time::timeout(Duration::from_secs(8), command.output()).await {

@@ -541,6 +541,7 @@ async fn spawn_and_run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    prepare_external_command(&mut command);
     scrub_secret_environment(&mut command);
 
     let mut child = command
@@ -657,6 +658,80 @@ fn scrub_secret_environment(command: &mut Command) {
             command.env_remove(name);
         }
     }
+}
+
+/// Make a child see the current user-installed CLI locations even when Zest
+/// itself was started by a long-lived desktop process whose environment
+/// predates a CLI installation or PATH change.
+///
+/// Windows broadcasts environment changes to new processes, not to processes
+/// that are already running. Reading the user's PATH here keeps the Settings
+/// check and the actual worker launch consistent without storing or logging a
+/// machine-specific executable path.
+pub fn prepare_external_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        let Some(user_path) = windows_user_path() else {
+            return;
+        };
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::env::split_paths(&existing).chain(std::env::split_paths(&user_path));
+        if let Ok(path) = std::env::join_paths(paths) {
+            command.env("PATH", path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_user_path() -> Option<std::ffi::OsString> {
+    let output = std::process::Command::new("reg.exe")
+        .args(["query", "HKCU\\Environment", "/v", "Path"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().find(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("Path")
+            && (trimmed.contains("REG_EXPAND_SZ") || trimmed.contains("REG_SZ"))
+    })?;
+    let value = line
+        .split_once("REG_EXPAND_SZ")
+        .or_else(|| line.split_once("REG_SZ"))?
+        .1
+        .trim();
+    let expanded = expand_windows_environment(value);
+    (!expanded.trim().is_empty()).then(|| expanded.into())
+}
+
+#[cfg(windows)]
+fn expand_windows_environment(value: &str) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        expanded.push_str(&rest[..start]);
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('%') else {
+            expanded.push('%');
+            expanded.push_str(after_start);
+            break;
+        };
+        let name = &after_start[..end];
+        if let Ok(replacement) = std::env::var(name) {
+            expanded.push_str(&replacement);
+        } else {
+            expanded.push('%');
+            expanded.push_str(name);
+            expanded.push('%');
+        }
+        rest = &after_start[end + 1..];
+    }
+    if !rest.is_empty() && !value.ends_with('%') {
+        expanded.push_str(rest);
+    }
+    expanded
 }
 
 async fn run_headless(stdout: ChildStdout) -> Result<ExternalAgentRun, String> {
@@ -2177,6 +2252,14 @@ mod tests {
     #[test]
     fn empty_worker_envelope_does_not_become_zero_usage() {
         assert!(external_usage_from_value(&json!({"type":"result","response":"done"})).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expands_user_path_variables_before_starting_a_worker() {
+        let profile = std::env::var("USERPROFILE").expect("Windows user profile");
+        let expanded = expand_windows_environment(r"%USERPROFILE%\bin");
+        assert_eq!(expanded, format!(r"{profile}\bin"));
     }
 
     #[test]
