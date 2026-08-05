@@ -224,6 +224,13 @@ pub enum StreamEvent<'a> {
         diff: Option<&'a str>,
         metadata: Option<crate::tools::ToolMetadata>,
     },
+    /// The endpoint served a different model than the one asked for.
+    ///
+    /// Emitted at most once per turn and **only on disagreement** — silence
+    /// means the request was honoured. Worth surfacing because nothing else can
+    /// tell you: a gateway may route anywhere, and a model's own account of
+    /// which model it is amounts to a guess.
+    ModelSubstituted { requested: String, served: String },
     /// A gated tool is waiting on the user (write/exec). Owned strings so the
     /// preview can outlive the tool-call stack frame.
     ApprovalNeeded {
@@ -281,6 +288,13 @@ pub struct Completion {
     /// Whether the endpoint actually reported token usage for this turn.
     pub usage_available: bool,
     pub limits: Option<RateLimitSnapshot>,
+    /// The model the endpoint says actually served this turn.
+    ///
+    /// Distinct from the model that was *requested*, and the only trustworthy
+    /// statement of which one ran: asking the model itself yields a guess, and a
+    /// gateway is free to route a request anywhere. `None` means the endpoint
+    /// did not say, which is not the same as agreeing.
+    pub served_model: Option<String>,
 }
 
 /// Send the smallest possible real turn, to find out whether this provider can

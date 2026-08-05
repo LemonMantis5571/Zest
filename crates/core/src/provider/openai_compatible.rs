@@ -260,6 +260,8 @@ struct OpenAiAccumulator {
     stop_reason: Option<String>,
     usage: Usage,
     usage_available: bool,
+    /// The `model` every chunk carries — what actually served the request.
+    served_model: Option<String>,
     done: bool,
 }
 
@@ -290,6 +292,14 @@ impl OpenAiAccumulator {
                     .unwrap_or("OpenAI-compatible stream failed")
                     .to_string(),
             });
+        }
+        // Every chunk repeats it; the first one that carries it is enough.
+        if self.served_model.is_none() {
+            self.served_model = event
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|m| !m.trim().is_empty())
+                .map(str::to_string);
         }
         if let Some(usage) = event.get("usage") {
             if !usage.is_null() {
@@ -370,6 +380,7 @@ impl OpenAiAccumulator {
             usage: self.usage,
             usage_available: self.usage_available,
             limits: None,
+            served_model: self.served_model,
         }
     }
 }
@@ -468,5 +479,51 @@ mod tests {
         assert_eq!(completion.stop_reason.as_deref(), Some("tool_use"));
         assert!(completion.usage_available);
         assert_eq!(completion.content[0]["input"]["path"], "README.md");
+    }
+
+    /// The endpoint's own statement of which model ran.
+    ///
+    /// Zest used to drop this, so it could only ever report the model it had
+    /// *asked* for — which is not evidence. Asking the model itself is worse:
+    /// it guesses.
+    #[test]
+    fn records_the_model_the_endpoint_says_it_used() {
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        accumulator
+            .push(
+                &json!({"model":"deepseek-v4-flash","choices":[{"delta":{"content":"hi"}}]}),
+                &mut sink,
+            )
+            .unwrap();
+        // Later chunks repeat it; the first answer stands.
+        accumulator
+            .push(
+                &json!({"model":"deepseek-v4-flash","choices":[{"delta":{},"finish_reason":"stop"}]}),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(
+            accumulator.finish().served_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn a_silent_endpoint_reports_nothing_rather_than_agreement() {
+        // No `model` field must not be read as "served what you asked for".
+        let mut accumulator = OpenAiAccumulator::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        accumulator
+            .push(&json!({"choices":[{"delta":{"content":"hi"}}]}), &mut sink)
+            .unwrap();
+        assert_eq!(accumulator.finish().served_model, None);
+
+        // An empty string is silence too, not a model named "".
+        let mut blank = OpenAiAccumulator::default();
+        blank
+            .push(&json!({"model":"  ","choices":[{"delta":{}}]}), &mut sink)
+            .unwrap();
+        assert_eq!(blank.finish().served_model, None);
     }
 }

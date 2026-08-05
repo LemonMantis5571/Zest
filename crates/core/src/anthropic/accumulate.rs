@@ -23,6 +23,8 @@ pub(crate) struct TurnAccumulator {
     json_bufs: BTreeMap<usize, String>,
     stop_reason: Option<String>,
     usage: Usage,
+    /// What `message_start` said actually served the turn.
+    served_model: Option<String>,
     done: bool,
 }
 
@@ -46,6 +48,14 @@ impl TurnAccumulator {
                 if let Some(u) = ev.pointer("/message/usage") {
                     self.usage = serde_json::from_value(u.clone()).unwrap_or_default();
                 }
+                // The endpoint's own statement of which model ran. A gateway can
+                // route a request anywhere, so this is the only place the answer
+                // is available — the model's own guess does not count.
+                self.served_model = ev
+                    .pointer("/message/model")
+                    .and_then(Value::as_str)
+                    .filter(|m| !m.trim().is_empty())
+                    .map(str::to_string);
             }
 
             "content_block_start" => {
@@ -159,6 +169,7 @@ impl TurnAccumulator {
             usage: self.usage,
             usage_available: true,
             limits,
+            served_model: self.served_model,
         }
     }
 }
@@ -213,6 +224,9 @@ mod tests {
                 }
                 StreamEvent::ToolCallResult { name, .. } => {
                     seen.push(format!("tool_result:{name}"))
+                }
+                StreamEvent::ModelSubstituted { served, .. } => {
+                    seen.push(format!("substituted:{served}"))
                 }
             };
             for payload in parser.feed(sse.as_bytes()) {
@@ -417,5 +431,32 @@ data: {"type":"content_block_stop","index":0}
             result,
             Err(HarnessError::Stream { ref kind, .. }) if kind == "malformed_tool_input"
         ));
+    }
+
+    /// A gateway can route a request anywhere, so the model named in
+    /// `message_start` is the only statement of what actually ran.
+    #[test]
+    fn records_the_model_message_start_reports() {
+        let mut acc = TurnAccumulator::new();
+        let mut sink = |_: StreamEvent<'_>| {};
+        let ev: Value = serde_json::from_str(
+            r#"{"type":"message_start","message":{"model":"claude-opus-5","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+        )
+        .unwrap();
+        acc.push(&ev, &mut sink).unwrap();
+        assert_eq!(
+            acc.finish(None).served_model.as_deref(),
+            Some("claude-opus-5")
+        );
+    }
+
+    #[test]
+    fn a_stream_that_names_no_model_claims_none() {
+        let mut acc = TurnAccumulator::new();
+        let mut sink = |_: StreamEvent<'_>| {};
+        let ev: Value =
+            serde_json::from_str(r#"{"type":"message_start","message":{"usage":{}}}"#).unwrap();
+        acc.push(&ev, &mut sink).unwrap();
+        assert_eq!(acc.finish(None).served_model, None);
     }
 }

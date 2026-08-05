@@ -260,6 +260,7 @@ provider = "codex"
                     requests_remaining: Some(0),
                     ..Default::default()
                 }),
+                served_model: None,
             },
         );
 
@@ -289,6 +290,7 @@ provider = "codex"
                 usage: Default::default(),
                 usage_available: true,
                 limits: None,
+                served_model: None,
             },
         );
 
