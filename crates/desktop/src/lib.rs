@@ -22,7 +22,6 @@ use tokio::process::Command;
 use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
-use zest_core::routing_edit::{routing_document, validate_rules, RuleInput};
 use zest_core::{
     can_start_login, compose_system_with_docs, derive_profile_stats, descriptor_for_picker_id,
     descriptor_from_config, detect_all, display_path, ensure_gateway_running, env_context,
@@ -567,31 +566,6 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "ToolMetaView.ts", rename_all = "camelCase")
-)]
-struct SkippedProviderView {
-    provider_id: String,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "ToolMetaView.ts", rename_all = "camelCase")
-)]
-struct UsageDeltaView {
-    requests: u64,
-    input_tokens: u64,
-    output_tokens: u64,
-}
-
 /// Desktop wire view of core `ToolMetadata` (ts-rs exportable).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -604,12 +578,6 @@ enum ToolMetaView {
     Delegation {
         provider_id: String,
         model: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "export-bindings", ts(optional))]
-        routing_kind: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        skipped: Vec<SkippedProviderView>,
-        usage_delta: UsageDeltaView,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "export-bindings", ts(optional))]
         diff: Option<String>,
@@ -622,26 +590,10 @@ impl From<ToolMetadata> for ToolMetaView {
             ToolMetadata::Delegation {
                 provider_id,
                 model,
-                routing_kind,
-                skipped,
-                usage_delta,
                 diff,
             } => Self::Delegation {
                 provider_id,
                 model,
-                routing_kind,
-                skipped: skipped
-                    .into_iter()
-                    .map(|s| SkippedProviderView {
-                        provider_id: s.provider_id,
-                        reason: s.reason,
-                    })
-                    .collect(),
-                usage_delta: UsageDeltaView {
-                    requests: usage_delta.requests,
-                    input_tokens: usage_delta.input_tokens,
-                    output_tokens: usage_delta.output_tokens,
-                },
                 diff,
             },
         }
@@ -1798,26 +1750,10 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
                 ToolMetaView::Delegation {
                     provider_id,
                     model,
-                    routing_kind,
-                    skipped,
-                    usage_delta,
                     diff,
                 } => ToolMetadata::Delegation {
                     provider_id,
                     model,
-                    routing_kind,
-                    skipped: skipped
-                        .into_iter()
-                        .map(|s| zest_core::SkippedProvider {
-                            provider_id: s.provider_id,
-                            reason: s.reason,
-                        })
-                        .collect(),
-                    usage_delta: zest_core::UsageDelta {
-                        requests: usage_delta.requests,
-                        input_tokens: usage_delta.input_tokens,
-                        output_tokens: usage_delta.output_tokens,
-                    },
                     diff,
                 },
             });
@@ -1969,7 +1905,7 @@ async fn start_session_inner(
         .with_questioner(questioner)
         .with_policy(state.policy.clone())
         .with_remembered_options(prefs.model, prefs.effort)
-        .enable_delegate(true)
+        .enable_external_agents(true)
         .register_write_tools(true)
         // Every non-allowlisted command reaches HubApprover, which is the same
         // card `write_file` already uses.
@@ -2372,8 +2308,8 @@ kind = "gateway"
 base_url = "http://127.0.0.1:8317"
 model = "gpt-5.6-terra"
 
-[routing]
-default = { provider = "codex" }
+[default]
+provider = "codex"
 "#,
         )
         .unwrap();
@@ -3306,180 +3242,6 @@ fn set_system_prompt(
         .and_then(|r| r)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "RoutingRuleView.ts", rename_all = "camelCase")
-)]
-pub struct RoutingRuleView {
-    pub kind: String,
-    pub provider: String,
-    /// Empty means "the provider's own default model".
-    #[serde(default)]
-    pub model: String,
-    /// Empty means `high`.
-    #[serde(default)]
-    pub effort: String,
-    /// Extra framing for this worker. Empty means the generic worker contract.
-    #[serde(default)]
-    pub prompt: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "RoutingView.ts", rename_all = "camelCase")
-)]
-pub struct RoutingView {
-    pub delegation: bool,
-    pub rules: Vec<RoutingRuleView>,
-    /// Every configured provider with its real catalogue, so the editor can
-    /// offer only pairs that exist rather than free text.
-    pub providers: Vec<ProviderModelsView>,
-    /// Where a save will be written.
-    pub config_path: String,
-    /// `[routing].default` provider (config). UI same-account warnings use the
-    /// open session's provider instead — the picker can start a chat on Claude
-    /// even when this default is still Codex.
-    pub default_provider: String,
-    /// True when the active project has its own zest.toml, which **replaces**
-    /// the user one — editing here would then have no effect on this project.
-    pub project_scoped: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "export-bindings", derive(TS))]
-#[cfg_attr(
-    feature = "export-bindings",
-    ts(export, export_to = "ProviderModelsView.ts", rename_all = "camelCase")
-)]
-pub struct ProviderModelsView {
-    pub id: String,
-    pub default_model: String,
-    pub models: Vec<String>,
-    /// Efforts accepted by the default model, for the effort dropdown.
-    pub efforts: Vec<String>,
-}
-
-fn routing_view(state: &State<'_, AppState>) -> Result<RoutingView, String> {
-    let root = resolve_workspace_root(state)?;
-    let config = Config::find(&root).map_err(|e| e.to_string())?;
-    let user_path = zest_core::user_config_path()
-        .map(|p| display_path(p.as_path()))
-        .unwrap_or_else(|| "~/.zest/zest.toml".to_string());
-
-    let providers = config
-        .providers
-        .iter()
-        .map(|(id, entry)| {
-            let descriptor = descriptor_from_config(id, entry);
-            let efforts = descriptor
-                .models
-                .iter()
-                .find(|m| m.id == descriptor.default_model)
-                .map(|m| m.efforts.clone())
-                .unwrap_or_default();
-            ProviderModelsView {
-                id: id.clone(),
-                default_model: descriptor.default_model,
-                models: descriptor.models.into_iter().map(|m| m.id).collect(),
-                efforts,
-            }
-        })
-        .collect();
-
-    Ok(RoutingView {
-        default_provider: config
-            .default_target()
-            .map(|t| t.provider)
-            .unwrap_or_default(),
-        delegation: config.routing.delegation,
-        rules: config
-            .routing
-            .rules
-            .iter()
-            .map(|r| RoutingRuleView {
-                kind: r.kind.clone(),
-                provider: r.provider.clone(),
-                model: r.model.clone().unwrap_or_default(),
-                effort: r.effort.clone().unwrap_or_default(),
-                prompt: r.prompt.clone().unwrap_or_default(),
-            })
-            .collect(),
-        providers,
-        config_path: user_path,
-        project_scoped: root.join(zest_core::config::CONFIG_FILE).is_file(),
-    })
-}
-
-#[tauri::command]
-fn routing_config(state: State<'_, AppState>) -> Result<RoutingView, String> {
-    routing_view(&state)
-}
-
-/// Rules to start from, derived from the providers actually configured.
-///
-/// Returned rather than saved: a preset the user has not looked at should not
-/// silently become their routing policy.
-#[tauri::command]
-fn suggested_routing(state: State<'_, AppState>) -> Result<Vec<RoutingRuleView>, String> {
-    let root = resolve_workspace_root(&state)?;
-    let config = Config::find(&root).map_err(|e| e.to_string())?;
-    Ok(zest_core::routing_edit::suggest_rules(&config)
-        .into_iter()
-        .map(|r| RoutingRuleView {
-            kind: r.kind,
-            provider: r.provider,
-            model: r.model.unwrap_or_default(),
-            effort: r.effort.unwrap_or_default(),
-            prompt: r.prompt.unwrap_or_default(),
-        })
-        .collect())
-}
-
-/// Persist delegation + rules to the **user** config.
-///
-/// Validated against the live provider catalogues first: an unroutable rule
-/// would otherwise fail much later, mid-delegation, on a turn already paid for.
-#[tauri::command]
-fn set_routing_config(
-    state: State<'_, AppState>,
-    delegation: bool,
-    rules: Vec<RoutingRuleView>,
-) -> Result<RoutingView, String> {
-    let root = resolve_workspace_root(&state)?;
-    let config = Config::find(&root).map_err(|e| e.to_string())?;
-
-    let inputs: Vec<RuleInput> = rules
-        .into_iter()
-        .map(|r| RuleInput {
-            kind: r.kind,
-            provider: r.provider,
-            model: Some(r.model).filter(|m| !m.trim().is_empty()),
-            effort: Some(r.effort).filter(|e| !e.trim().is_empty()),
-            prompt: Some(r.prompt).filter(|p| !p.trim().is_empty()),
-        })
-        .collect();
-
-    validate_rules(&config, &inputs)?;
-
-    let path = zest_core::user_config_path()
-        .ok_or_else(|| "cannot locate the user config directory".to_string())?;
-    let updated = routing_document(&path, delegation, &inputs)?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    }
-    zest_core::atomic_write(&path, updated.as_bytes()).map_err(|e| e.to_string())?;
-
-    routing_view(&state)
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -4321,9 +4083,6 @@ pub fn run() {
             set_system_prompt,
             list_skills,
             list_commands,
-            routing_config,
-            suggested_routing,
-            set_routing_config,
             get_workspace_folder,
             pick_workspace_folder,
             pick_files,
