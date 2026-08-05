@@ -1061,12 +1061,42 @@ fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfi
     let Some(preset) = zest_core::config_edit::external_agent_preset(id) else {
         return false;
     };
-    agent.mode == preset.mode
+    let matches_current = agent.mode == preset.mode
         && agent.command == preset.command
         && agent.args == preset.args
         && agent.model == preset.model
         && agent.workspace == preset.workspace
-        && agent.timeout_secs == preset.timeout_secs
+        && agent.timeout_secs == preset.timeout_secs;
+    matches_current || legacy_claude_preset_matches(id, agent)
+}
+
+fn legacy_claude_preset_matches(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
+    if id != "claude"
+        || agent.mode != ExternalAgentMode::Headless
+        || agent.command != "claude"
+        || agent.model.is_some()
+        || agent.workspace != ExternalWorkspace::Isolated
+        || agent.timeout_secs != 900
+    {
+        return false;
+    }
+
+    let args = agent.args.iter().map(String::as_str).collect::<Vec<_>>();
+    args == [
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--strict-mcp-config",
+        "{prompt}",
+    ] || args
+        == [
+            "--print",
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            "--strict-mcp-config",
+            "{prompt}",
+        ]
 }
 
 /// Check whether the configured CLI can start and, when the vendor exposes a
@@ -4069,6 +4099,26 @@ workspace = "isolated"
         .unwrap();
 
         assert!(!external_agent_matches_preset(
+            "claude",
+            &config.agents["claude"]
+        ));
+    }
+
+    #[test]
+    fn previous_claude_presets_remain_toggleable() {
+        let config = Config::parse(
+            r#"
+[agents.claude]
+mode = "headless"
+command = "claude"
+args = ["--print", "--verbose", "--output-format", "stream-json", "--strict-mcp-config", "{prompt}"]
+workspace = "isolated"
+timeout_secs = 900
+"#,
+        )
+        .unwrap();
+
+        assert!(external_agent_matches_preset(
             "claude",
             &config.agents["claude"]
         ));
