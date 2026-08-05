@@ -23,9 +23,11 @@ Zest reads and edits your project with tools, streams replies, and asks before w
 | [Rust](https://rustup.rs/) | **1.97.1** | Pinned in `rust-toolchain.toml` |
 | [Node.js](https://nodejs.org/) | **24.16.0** | `.nvmrc` / `package.json` engines |
 | npm | **11.13.0** | Comes with Node |
-| CLIProxyAPI | Bundled pinned release | Local Codex/Claude OAuth gateway |
+| CLIProxyAPI | Bundled pinned release | Local Codex OAuth gateway |
 
-Optional: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) if you later enable a native Anthropic provider.
+Optional: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) or
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) if you enable external workers.
+Authenticate each CLI with its own sign-in; Zest does not connect those accounts.
 
 ---
 
@@ -48,7 +50,7 @@ node -v              # v24.16.0 (nvm use / nvs use if needed)
 npm -v               # 11.13.0
 ```
 
-### 3. Gateway (Codex, Claude)
+### 3. Gateway (Codex)
 
 Zest bundles a pinned [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 release (MIT) as a Tauri sidecar and starts it on demand, so a downloaded Zest
@@ -66,9 +68,8 @@ local binary and provenance without downloading, or `-CheckPin` to validate only
 the committed release metadata and MIT notice.
 
 On first run Zest writes a loopback-only `config.yaml` with a freshly generated
-key into `%APPDATA%\zest\gateway\`, pointed at the same `~/.cli-proxy-api`
-credential store the vendor CLIs use — so sign-ins that already happened still
-work. Nothing to configure and no `.env` needed.
+key into `%APPDATA%\zest\gateway\`, pointed at the local CLIProxyAPI credential
+store. Nothing to configure and no `.env` needed.
 
 **Already have a hand-installed gateway?** It keeps winning. A
 `tools/CLIProxyAPI/` checkout with its own `config.yaml` is used as-is, and an
@@ -81,14 +82,12 @@ existing `ZEST_GATEWAY_KEY` is never overwritten.
 .\scripts\codex-login-gateway.ps1
 ```
 
-Desktop **Connect** can also spawn this login when the gateway tree is present.
+Desktop **Connect** can also spawn this Codex login when the gateway tree is present.
 
-If Claude through the gateway keeps returning `auth_unavailable` after a rebuild,
-that is the proxy cooling or dropping the session — not Zest wiping credentials.
-Desktop now probes before opening a gateway chat. In `tools/CLIProxyAPI/config.yaml`
-you can also set `disable-cooling: true` (and optionally
-`transient-error-cooldown-seconds: -1`) so a transient 503 does not black-hole the
-account until you Connect again.
+Claude Code and Gemini CLI are separate external workers. Sign in with each CLI,
+then enable it in Settings → External workers; they no longer appear as Zest
+provider sign-in choices. Existing explicit gateway or native provider entries
+remain available to the core and are not rewritten by this UI change.
 
 ### 4. Install JS deps and build the webview
 
@@ -221,8 +220,8 @@ for ACP JSON-RPC over stdio. Claude Code can use `--print
 Gemini CLI can use `--acp` or `-p` with `--output-format stream-json`.
 In the desktop app, Settings → External workers enables the Claude Code and
 Gemini CLI presets and writes these entries for you. Sign in through each CLI
-first; Zest checks only that the executable is available and never stores its
-session.
+first; these are CLI sessions, not Zest provider connections. Zest checks only
+that the executable is available and never stores the CLI session.
 
 External delegation is explicit and approval-gated. Workers run in a temporary
 Git worktree by default, and Zest returns the answer plus a diff for review;
@@ -594,7 +593,8 @@ skip live doctor — do not invent a green result.
 | Delete chat looks like a no-op | Deleting the open chat creates a fresh Untitled chat — look for the toast |
 | Project missing from sidebar | Open that folder once (picker); it is then stored under known workspaces |
 | Provider shows **Not configured** despite being signed in | Being signed in is only half of it — add a `[providers.<id>]` entry to the project or user config |
-| `auth_unavailable` / 503 from the gateway mid-chat | That account's session died or is in cooldown. Click **Reconnect** on the error — it re-runs the gateway login, no terminal needed |
+| `auth_unavailable` / 503 from the Codex gateway mid-chat | The session may have expired or entered cooldown. Click **Reconnect** on the error, then try again |
+| Claude Code or Gemini CLI worker is unavailable | Sign in with that CLI directly, then use Settings → External workers → **Check CLI** |
 | `provider 'codex' is not configured for <folder>` | A project config without Codex intentionally replaces the user config; add `[providers.codex]` there or remove the project config |
 | `provider 'codex' … could not be loaded: ZEST_GATEWAY_KEY is not set` | Copy `.env` to `~/.zest/.env`, or set the variable for your user account |
 | Smart App Control blocks build scripts | Windows Security → Smart App Control Off → reboot → `cargo clean` / rebuild |

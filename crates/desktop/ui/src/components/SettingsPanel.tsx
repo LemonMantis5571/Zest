@@ -641,7 +641,7 @@ export function SettingsPanel({
             >
               <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
                 Delegate bounded work to a CLI you already use. Sign in with Claude Code or
-                Gemini CLI first; Zest stores only the worker setup and never the CLI session.
+                Gemini CLI first. Zest stores only the worker setup and never the CLI session.
               </p>
               {externalLoading ? (
                 <p className="text-xs text-muted-foreground" role="status">
