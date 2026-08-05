@@ -24,7 +24,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { getBackend, type SkillSummary } from "@/lib/backend";
-import { chipLabel, type EffortId } from "@/lib/models";
+import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/models";
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
 import type {
   ProviderRow,
@@ -144,6 +144,7 @@ export function SettingsPanel({
   onOpenFolder,
   onProfileChange,
 }: Props) {
+  const supportsEffort = effortsForModel(session.models, model).length > 0;
   const panelRef = useRef<HTMLDivElement>(null);
   const shortcutsRef = useScrollIntoViewOnBump(focusShortcuts);
   const titleId = useId();
@@ -545,7 +546,7 @@ export function SettingsPanel({
               </div>
             </div>
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              Using {chipLabel(model, effort)}. Change model and effort in the composer.
+              Using {supportsEffort ? chipLabel(model, effort) : modelLabel(model)}. Change model{supportsEffort ? " and effort" : ""} in the composer.
             </p>
           </SettingsSection>
 

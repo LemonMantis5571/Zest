@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::anthropic::AnthropicProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
-use super::{catalogue_for_provider, Provider};
+use super::{catalogue_for_provider, catalogue_without_efforts, Provider};
 use crate::config::{Config, ProviderConfig};
 
 /// A provider that could not be built, and why — phrased for a user to act on.
@@ -118,9 +118,9 @@ fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provid
             base_url,
             model,
             models,
-            efforts,
             credential,
             api_key_env,
+            ..
         } => {
             let key = credential
                 .as_deref()
@@ -133,7 +133,7 @@ fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provid
             let mut provider =
                 OpenAiCompatibleProvider::new(id.to_string(), key, base_url.clone(), model.clone())
                     .map_err(|e| format!("could not build client: {e}"))?
-                    .with_models(catalogue_for_provider(id, model, models, efforts));
+                    .with_models(catalogue_without_efforts(model, models));
             if credential.is_some() || api_key_env.is_some() {
                 provider = provider.with_key_requirement();
             } else {

@@ -94,6 +94,11 @@ export function effortsForModel(
   modelId: string
 ): EffortOption[] {
   const spec = models?.find((m) => m.id === modelId);
+  if (models?.length) {
+    // An explicitly empty capability list means this model has no effort
+    // control. Unknown/legacy model data keeps the historical fallback.
+    if (spec && spec.efforts.length === 0) return [];
+  }
   const allowed = spec?.efforts?.length
     ? spec.efforts
     : EFFORTS.map((e) => e.id);

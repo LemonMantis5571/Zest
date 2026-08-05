@@ -44,15 +44,14 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
             default_model: model.clone(),
             models: catalogue_for_provider(provider_id, model, models, efforts),
         },
-        ProviderConfig::OpenaiCompatible {
-            model,
-            models,
-            efforts,
-            ..
-        } => ProviderDescriptor {
+        ProviderConfig::OpenaiCompatible { model, models, .. } => ProviderDescriptor {
             id: provider_id.to_string(),
             default_model: model.clone(),
-            models: catalogue_from_lists(model, models, efforts),
+            // The OpenAI-compatible adapter deliberately does not send a
+            // vendor-specific reasoning/effort field yet. Do not advertise a
+            // selector that would look authoritative but cannot affect the
+            // request.
+            models: catalogue_without_efforts(model, models),
         },
     }
 }
@@ -144,6 +143,26 @@ pub fn catalogue_from_lists(
         .collect()
 }
 
+/// Build a model catalogue for a provider whose transport does not expose a
+/// reasoning-effort control. Empty effort lists mean “no effort selector” to
+/// the desktop while model validation still remains authoritative.
+pub fn catalogue_without_efforts(default_model: &str, models: &[String]) -> Vec<ModelSpec> {
+    let mut ids: Vec<String> = if models.is_empty() {
+        vec![default_model.to_string()]
+    } else {
+        models.to_vec()
+    };
+    if !ids.iter().any(|m| m == default_model) {
+        ids.insert(0, default_model.to_string());
+    }
+    ids.into_iter()
+        .map(|id| ModelSpec {
+            id,
+            efforts: Vec::new(),
+        })
+        .collect()
+}
+
 /// Like [`catalogue_from_lists`], but provider `codex` gets [`CODEX_KNOWN_MODELS`]
 /// when the config omit `models` — so sticky/UI picks (Sol/Terra/Luna) validate.
 pub fn catalogue_for_provider(
@@ -230,7 +249,10 @@ pub enum StreamEvent<'a> {
     /// means the request was honoured. Worth surfacing because nothing else can
     /// tell you: a gateway may route anywhere, and a model's own account of
     /// which model it is amounts to a guess.
-    ModelSubstituted { requested: String, served: String },
+    ModelSubstituted {
+        requested: String,
+        served: String,
+    },
     /// A gated tool is waiting on the user (write/exec). Owned strings so the
     /// preview can outlive the tool-call stack frame.
     ApprovalNeeded {
@@ -415,5 +437,15 @@ mod tests {
         let cat = catalogue_for_provider("other", "gpt-5.6-sol", &[], &[]);
         assert_eq!(cat.len(), 1);
         assert_eq!(cat[0].id, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn openai_compatible_catalogue_does_not_advertise_effort_controls() {
+        let cat = catalogue_without_efforts(
+            "deepseek-v4-flash",
+            &["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
+        );
+        assert_eq!(cat.len(), 2);
+        assert!(cat.iter().all(|model| model.efforts.is_empty()));
     }
 }
