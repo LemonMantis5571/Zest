@@ -11,6 +11,7 @@ pub mod auth;
 pub mod cancel;
 pub mod commands;
 pub mod config;
+pub mod config_edit;
 pub mod credentials;
 pub mod error;
 pub mod fsutil;

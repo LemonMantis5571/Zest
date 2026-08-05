@@ -39,6 +39,17 @@ export function providerKeyPresent(id: string) {
   return invoke<boolean>("provider_key_present", { id });
 }
 
+export function configureApiProvider(input: {
+  id: string;
+  baseUrl: string;
+  model: string;
+  models: string[];
+  credential: string;
+  key: string;
+}) {
+  return invoke<void>("configure_api_provider", input);
+}
+
 export function usageSnapshot() {
   return invoke<UsageSnapshot>("usage_snapshot");
 }

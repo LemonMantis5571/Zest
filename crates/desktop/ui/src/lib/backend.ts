@@ -45,6 +45,14 @@ export type DesktopBackend = {
   setProviderKey(id: string, key: string): Promise<void>;
   deleteProviderKey(id: string): Promise<void>;
   providerKeyPresent(id: string): Promise<boolean>;
+  configureApiProvider(input: {
+    id: string;
+    baseUrl: string;
+    model: string;
+    models: string[];
+    credential: string;
+    key: string;
+  }): Promise<void>;
   usageSnapshot(): Promise<UsageSnapshot>;
   profileStats(): Promise<ProfileStats>;
   /** Hand core this machine's UTC offset so day boundaries match the clock. */
@@ -127,6 +135,7 @@ export function createTauriBackend(): DesktopBackend {
     setProviderKey: (id, key) => tauriApi.setProviderKey(id, key),
     deleteProviderKey: (id) => tauriApi.deleteProviderKey(id),
     providerKeyPresent: (id) => tauriApi.providerKeyPresent(id),
+    configureApiProvider: (input) => tauriApi.configureApiProvider(input),
     usageSnapshot: () => tauriApi.usageSnapshot(),
     profileStats: () => tauriApi.profileStats(),
     setLocalOffset: () => tauriApi.setLocalOffset(),
@@ -223,6 +232,9 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async providerKeyPresent() {
       return false;
+    },
+    async configureApiProvider() {
+      notAvailable("configureApiProvider");
     },
     async profileStats() {
       // Enough shape to exercise the heatmap offline: a long run of days, a

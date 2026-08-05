@@ -1,10 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { ApiProviderForm } from "@/components/ApiProviderForm";
 
 type Props = {
   open: boolean;
@@ -14,6 +15,7 @@ type Props = {
   onClose: () => void;
   onSelect: (providerId: string) => void;
   onConnect: (providerId: string) => void;
+  onRefresh: () => Promise<void>;
 };
 
 function statusLabel(row: ProviderRow): string {
@@ -36,7 +38,9 @@ export function ProviderSwitchSheet({
   onClose,
   onSelect,
   onConnect,
+  onRefresh,
 }: Props) {
+  const [addingApiProvider, setAddingApiProvider] = useState(false);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -117,6 +121,16 @@ export function ProviderSwitchSheet({
                     >
                       Switch
                     </Button>
+                  ) : row.method === "API key" ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => setAddingApiProvider(true)}
+                    >
+                      Set key
+                    </Button>
                   ) : (
                     <Button
                       type="button"
@@ -133,6 +147,22 @@ export function ProviderSwitchSheet({
             );
           })}
         </ul>
+        {!addingApiProvider ? (
+          <div className="border-t border-border/60 p-2">
+            <Button type="button" variant="outline" className="w-full" disabled={busy} onClick={() => setAddingApiProvider(true)}>
+              Add API provider
+            </Button>
+          </div>
+        ) : (
+          <ApiProviderForm
+            onCancel={() => setAddingApiProvider(false)}
+            onDone={async (id) => {
+              await onRefresh();
+              setAddingApiProvider(false);
+              onSelect(id);
+            }}
+          />
+        )}
       </div>
     </div>
   );
