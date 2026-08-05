@@ -77,4 +77,17 @@ describe("buildablePlanId", () => {
     };
     assert.equal(buildablePlanId([question]), null);
   });
+
+  it("does not offer Build on a numbered choice question", () => {
+    const question: ChatMessage = {
+      id: "a1",
+      role: "assistant",
+      text: "Which framework should we use?\n\n1. React\n2. Svelte",
+      thinking: "",
+      tools: [],
+      command: "plan",
+      streaming: false,
+    };
+    assert.equal(buildablePlanId([question]), null);
+  });
 });

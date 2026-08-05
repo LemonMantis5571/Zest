@@ -11,6 +11,7 @@ import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInf
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/WorkspaceReview.ts";
+import type { PlanningQuestion } from "./planningQuestion.ts";
 
 export type StatusKind = "ready" | "unknown" | "not_logged_in" | "unconfigured";
 
@@ -123,6 +124,8 @@ export type ChatMessage =
       reconnectProvider?: string;
       /** Slash command that produced this turn, if any — titles the output. */
       command?: string;
+      /** Live question requested by the model; not persisted in thread history. */
+      question?: PlanningQuestion;
       streaming: boolean;
     };
 

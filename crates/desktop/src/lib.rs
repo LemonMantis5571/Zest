@@ -31,9 +31,10 @@ use zest_core::{
     ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts, Config,
     ExternalAgentMode, ExternalWorkspace, GatewayState, HarnessError, Ledger, LoginProcess,
     PersistPriority, PersistWorker, ProfileStats, ProjectSessionState, ProviderConfig,
-    ProviderRegistry, ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
-    StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError, ThreadStore, ThreadSummary,
-    ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    ProviderRegistry, ProviderSlot, QuestionRequest, Questioner, RuntimeBuilder, SkillSet,
+    SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError,
+    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
+    THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -158,6 +159,100 @@ impl Approver for HubApprover {
     }
 }
 
+/// Turn-scoped pending interactive questions (not persisted).
+struct QuestionHub {
+    active_turn: Mutex<Option<String>>,
+    senders: Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>,
+    receivers: Mutex<HashMap<String, oneshot::Receiver<Result<String, String>>>>,
+}
+
+impl QuestionHub {
+    fn new() -> Self {
+        Self {
+            active_turn: Mutex::new(None),
+            senders: Mutex::new(HashMap::new()),
+            receivers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn begin_turn(&self, turn_id: &str) {
+        if let Ok(mut guard) = self.active_turn.lock() {
+            *guard = Some(turn_id.to_string());
+        }
+    }
+
+    fn prepare(&self, question_id: &str) {
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut senders) = self.senders.lock() {
+            senders.insert(question_id.to_string(), tx);
+        }
+        if let Ok(mut receivers) = self.receivers.lock() {
+            receivers.insert(question_id.to_string(), rx);
+        }
+    }
+
+    async fn wait(&self, question_id: &str) -> Result<String, String> {
+        let rx = match self.receivers.lock() {
+            Ok(mut receivers) => receivers.remove(question_id),
+            Err(_) => return Err("question state is unavailable".into()),
+        };
+        match rx {
+            Some(rx) => rx
+                .await
+                .unwrap_or_else(|_| Err("question was dismissed".into())),
+            None => Err("no pending question with that id".into()),
+        }
+    }
+
+    fn resolve(&self, question_id: &str, answer: String) -> Result<(), String> {
+        let active = self
+            .active_turn
+            .lock()
+            .map_err(|_| "question state is unavailable".to_string())?
+            .is_some();
+        if !active {
+            return Err("no active turn for question".into());
+        }
+        let tx = self
+            .senders
+            .lock()
+            .map_err(|_| "question state is unavailable".to_string())?
+            .remove(question_id)
+            .ok_or_else(|| "no pending question with that id".to_string())?;
+        let _ = tx.send(Ok(answer));
+        Ok(())
+    }
+
+    fn clear(&self) {
+        if let Ok(mut senders) = self.senders.lock() {
+            for (_, tx) in senders.drain() {
+                let _ = tx.send(Err("question was dismissed".into()));
+            }
+        }
+        if let Ok(mut receivers) = self.receivers.lock() {
+            receivers.clear();
+        }
+        if let Ok(mut active) = self.active_turn.lock() {
+            *active = None;
+        }
+    }
+}
+
+struct HubQuestioner {
+    hub: Arc<QuestionHub>,
+}
+
+#[async_trait]
+impl Questioner for HubQuestioner {
+    async fn prepare(&self, question_id: &str) {
+        self.hub.prepare(question_id);
+    }
+
+    async fn answer(&self, request: &QuestionRequest) -> Result<String, String> {
+        self.hub.wait(&request.question_id).await
+    }
+}
+
 /// The desktop opens in Auto: writes apply, allowlisted commands run, anything
 /// else asks. Core's own default is Manual — see `ApprovalMode` — because a
 /// library with no wired-up gate must not be permissive. Choosing the product
@@ -172,6 +267,7 @@ const PLAN_SKILL: &str = "plan";
 struct AppState {
     sessions: SessionController,
     approvals: Arc<ApprovalHub>,
+    questions: Arc<QuestionHub>,
     login: Mutex<Option<LoginProcess>>,
     persist: Mutex<Option<PersistWorker>>,
     /// Preferred project root (folder picker / last-workspace). Falls back to cwd.
@@ -684,6 +780,20 @@ enum ChatEvent {
         path: String,
         summary: String,
         diff: String,
+    },
+    QuestionNeeded {
+        session_id: String,
+        thread_id: String,
+        turn_id: String,
+        message_id: String,
+        question_id: String,
+        tool_call_id: String,
+        prompt: String,
+        choices: Vec<String>,
+        multiple: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        placeholder: Option<String>,
     },
     Done {
         session_id: String,
@@ -1740,6 +1850,7 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
             summary,
             diff,
         ),
+        ChatEvent::QuestionNeeded { .. } => {}
         ChatEvent::Done { message_id, .. } => thread.apply_done(message_id),
         ChatEvent::Error {
             message_id,
@@ -1780,6 +1891,7 @@ async fn start_session_inner(
     zest_core::load_env();
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
 
     let root = resolve_workspace_root(&state)?;
     let config = config_for_session(&state, &root)?;
@@ -1844,6 +1956,9 @@ async fn start_session_inner(
     let approver: Arc<dyn Approver> = Arc::new(HubApprover {
         hub: state.approvals.clone(),
     });
+    let questioner: Arc<dyn Questioner> = Arc::new(HubQuestioner {
+        hub: state.questions.clone(),
+    });
     let session_config = config.clone();
 
     let mut builder = RuntimeBuilder::new(&root)
@@ -1851,6 +1966,7 @@ async fn start_session_inner(
         .with_provider(&id)
         .with_system(DEFAULT_SYSTEM)
         .with_approver(approver)
+        .with_questioner(questioner)
         .with_policy(state.policy.clone())
         .with_remembered_options(prefs.model, prefs.effort)
         .enable_delegate(true)
@@ -2436,6 +2552,7 @@ async fn open_project_chat(
 fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
 
     state
         .sessions
@@ -2459,6 +2576,7 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
 fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
 
     state
         .sessions
@@ -2483,6 +2601,7 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
 fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
 
     state
         .sessions
@@ -2513,6 +2632,7 @@ fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
 fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
 
     state
         .sessions
@@ -2549,6 +2669,7 @@ fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<Se
 async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
     let store = match open_store(&session.root) {
@@ -2600,6 +2721,7 @@ fn delete_thread(
 ) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
 
     state
         .sessions
@@ -2661,6 +2783,7 @@ async fn send_message(
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
     state.approvals.begin_turn(&turn.turn_id);
+    state.questions.begin_turn(&turn.turn_id);
 
     // Every non-empty turn gets a rewind point before the UI projection changes.
     // The first empty draft does not need a snapshot and should not create
@@ -2670,12 +2793,14 @@ async fn send_message(
             Ok(store) => store,
             Err(error) => {
                 state.approvals.clear();
+                state.questions.clear();
                 let _ = state.sessions.finish_turn(&turn, session);
                 return Err(error);
             }
         };
         if let Err(error) = store.create_checkpoint(&mut session.thread, "Before turn") {
             state.approvals.clear();
+            state.questions.clear();
             let _ = state.sessions.finish_turn(&turn, session);
             return Err(error.to_string());
         }
@@ -2713,6 +2838,7 @@ async fn send_message(
         Ok(w) => w,
         Err(e) => {
             state.approvals.clear();
+            state.questions.clear();
             let _ = state.sessions.finish_turn(&turn, session);
             return Err(desktop_err("persistence", e));
         }
@@ -2834,6 +2960,25 @@ async fn send_message(
                     path,
                     summary,
                     diff,
+                },
+                StreamEvent::QuestionNeeded {
+                    question_id,
+                    tool_call_id,
+                    prompt,
+                    choices,
+                    multiple,
+                    placeholder,
+                } => ChatEvent::QuestionNeeded {
+                    session_id: session_id.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    message_id: assistant_message_id.clone(),
+                    question_id,
+                    tool_call_id,
+                    prompt,
+                    choices,
+                    multiple,
+                    placeholder,
                 },
                 // Surfaced as a warning rather than swallowed: the model chip
                 // shows what was *requested*, so without this the transcript
@@ -2977,6 +3122,7 @@ async fn send_message(
     let _ = app.emit("chat-event", &final_event);
 
     state.approvals.clear();
+    state.questions.clear();
     let _ = state.sessions.finish_turn(&turn, session);
 
     // Error/cancel already emitted as chat-events; keep invoke Ok to avoid
@@ -2992,6 +3138,7 @@ fn cancel_turn(state: State<'_, AppState>) -> Result<(), String> {
         return Err(desktop_err("no_turn", "no turn in progress"));
     }
     state.approvals.clear();
+    state.questions.clear();
     Ok(())
 }
 
@@ -3010,6 +3157,21 @@ fn resolve_approval(
         other => return Err(format!("unknown approval decision `{other}`")),
     };
     state.approvals.resolve(&approval_id, decision)
+}
+
+/// Deliver a structured questionnaire answer to the active `ask_user` tool.
+/// The answer resumes the existing turn; it does not start a second turn.
+#[tauri::command]
+fn resolve_question(
+    state: State<'_, AppState>,
+    question_id: String,
+    answer: String,
+) -> Result<(), String> {
+    let answer = answer.trim().to_string();
+    if answer.is_empty() {
+        return Err("answer cannot be empty".into());
+    }
+    state.questions.resolve(question_id.trim(), answer)
 }
 
 /// Switch the permission mode for the live session.
@@ -3074,6 +3236,7 @@ fn end_session(state: State<'_, AppState>) -> Result<(), String> {
     // end_session cancels the turn token; clear waiters after.
     state.sessions.end_session().map_err(map_session_err)?;
     state.approvals.clear();
+    state.questions.clear();
     Ok(())
 }
 
@@ -3611,6 +3774,7 @@ fn pick_workspace_folder(
     let session_ended = if had_session {
         state.sessions.end_session().map_err(map_session_err)?;
         state.approvals.clear();
+        state.questions.clear();
         true
     } else {
         false
@@ -4104,6 +4268,7 @@ pub fn run() {
         .manage(AppState {
             sessions: SessionController::new(),
             approvals: Arc::new(ApprovalHub::new()),
+            questions: Arc::new(QuestionHub::new()),
             login: Mutex::new(None),
             persist: Mutex::new(None),
             workspace_root: Mutex::new(load_persisted_workspace()),
@@ -4146,6 +4311,7 @@ pub fn run() {
             save_markdown,
             cancel_turn,
             resolve_approval,
+            resolve_question,
             generate_reading_diff,
             set_approval_mode,
             approval_mode,
@@ -4430,5 +4596,19 @@ mod characterization {
         hub.prepare("ap-pending");
         hub.clear();
         assert_eq!(hub.wait("ap-pending").await, ApprovalDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn question_hub_delivers_answers_and_dismisses_pending_questions() {
+        let hub = QuestionHub::new();
+        hub.begin_turn("turn-1");
+        hub.prepare("q1");
+        hub.resolve("q1", "Use React".into()).unwrap();
+        assert_eq!(hub.wait("q1").await.unwrap(), "Use React");
+
+        hub.prepare("q2");
+        hub.clear();
+        assert!(hub.wait("q2").await.is_err());
+        assert!(hub.resolve("q3", "answer".into()).is_err());
     }
 }

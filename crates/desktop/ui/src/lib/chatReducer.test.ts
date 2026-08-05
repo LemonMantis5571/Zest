@@ -164,6 +164,72 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(tools[0].diff, "+x");
   });
 
+  it("renders a structured question and clears it when the tool resumes", () => {
+    let state = reduceAll([
+      {
+        kind: "tool_call_start",
+        ...ID,
+        message_id: "a1",
+        name: "ask_user",
+        id: "q-call",
+      },
+      {
+        kind: "question_needed",
+        ...ID,
+        message_id: "a1",
+        question_id: "q-1",
+        tool_call_id: "q-call",
+        prompt: "Which layout should I use?",
+        choices: ["Compact", "Spacious"],
+        multiple: false,
+      },
+    ]);
+
+    const pending = assistant(state);
+    assert.equal(pending.streaming, true);
+    assert.deepEqual(pending.question, {
+      questionId: "q-1",
+      toolCallId: "q-call",
+      prompt: "Which layout should I use?",
+      choices: [
+        { value: "Compact", label: "Compact" },
+        { value: "Spacious", label: "Spacious" },
+      ],
+      multiple: false,
+      placeholder: undefined,
+    });
+
+    state = reduceChatEvent(state, {
+      kind: "tool_call_result",
+      ...ID,
+      message_id: "a1",
+      name: "ask_user",
+      id: "q-call",
+      summary: "Answered",
+      isError: false,
+    }).state;
+    assert.equal(assistant(state).question, undefined);
+  });
+
+  it("does not leave a question card after a cancelled turn", () => {
+    const state = reduceAll([
+      {
+        kind: "question_needed",
+        ...ID,
+        message_id: "a1",
+        question_id: "q-1",
+        tool_call_id: "q-call",
+        prompt: "What should I call it?",
+        choices: [],
+        multiple: false,
+        placeholder: "Project name",
+      },
+      { kind: "cancelled", ...ID, message_id: "a1" },
+    ]);
+    assert.equal(assistant(state).question, undefined);
+    assert.equal(state.sending, false);
+  });
+
   it("keeps delegation provenance metadata on tool cards", () => {
     const state = reduceAll([
       {
