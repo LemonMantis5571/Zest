@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::{catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
+use super::{catalogue_without_efforts, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
 use crate::anthropic::sse::SseParser;
 use crate::anthropic::types::{Message, ToolDef, Usage};
 use crate::auth::AuthStatus;
@@ -94,7 +94,7 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn models(&self) -> Vec<ModelSpec> {
         if self.models.is_empty() {
-            catalogue_from_lists(&self.default_model, &[], &[])
+            catalogue_without_efforts(&self.default_model, &[])
         } else {
             self.models.clone()
         }
