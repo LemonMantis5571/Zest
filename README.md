@@ -366,11 +366,13 @@ blocks.
 Header avatar opens **Settings → User**. Display name + optional photo (resized to
 a small JPEG under `~/.zest/avatar.jpg`).
 
-### Context usage (legacy estimate wording)
+### Context usage
 
 Footer ring shows how full the context window looks (last API turn’s
-`input_tokens` when available, otherwise a rough estimate). Soft “compact”
-threshold is **not** shipped yet — the meter is informational only.
+`input_tokens` when available, otherwise a rough estimate). Automatic
+compaction starts after a completed turn reaches 80% of the active model’s
+context window; the meter stays informational when the provider reports no
+usage.
 
 ---
 
@@ -379,6 +381,10 @@ threshold is **not** shipped yet — the meter is informational only.
 The context meter now exposes a system/conversation breakdown and an explicit
 **Compact conversation** action. Compaction keeps a rewind checkpoint first;
 usage is marked as an estimate when the provider does not report tokens.
+After a completed turn reaches 80% of the active model's context window, Zest
+automatically compacts the conversation and keeps the same rewind checkpoint.
+If the provider still rejects a request for exceeding its limit, the transcript
+is preserved and the error tells you to compact before resending.
 
 ### JSONL / headless mode
 

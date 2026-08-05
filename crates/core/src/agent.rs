@@ -215,7 +215,10 @@ impl Agent {
             })]),
         ];
         self.sensitive_tool_ids.clear();
-        self.last_usage = Some(completion.usage);
+        // The compaction request measured the old history, not the compacted
+        // conversation. Do not let that maintenance request masquerade as the
+        // next turn's context usage in the footer.
+        self.last_usage = None;
         Ok(summary)
     }
 
@@ -817,6 +820,29 @@ mod tests {
         let mut sink = |_ev: StreamEvent<'_>| {};
         agent.send("hello", &mut sink).await.unwrap();
         assert_eq!(agent.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn compaction_replaces_history_and_clears_stale_usage() {
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+            fail_after: None,
+            stop: "end_turn",
+        });
+        let mut agent = Agent::new(provider, ToolRegistry::new());
+        agent.messages = (0..4)
+            .map(|index| Message::user_text(format!("old message {index}")))
+            .collect();
+        agent.last_usage = Some(Usage {
+            input_tokens: 12_345,
+            ..Usage::default()
+        });
+
+        let summary = agent.compact_context().await.unwrap();
+
+        assert_eq!(summary, "hi");
+        assert_eq!(agent.messages.len(), 2);
+        assert!(agent.last_usage.is_none());
     }
 
     #[tokio::test]

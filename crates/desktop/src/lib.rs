@@ -3259,6 +3259,12 @@ fn format_turn_error(err: &HarnessError) -> String {
 Zest tried to start it and it still isn't answering — check scripts/start-gateway.ps1.\n\n{err}"
             )
         }
+        _ if err.is_context_limit() => {
+            format!(
+                "The model context limit was reached. Open Context usage and compact the conversation, then resend.\n\n{}",
+                api_error_message(err).unwrap_or_else(|| err.to_string())
+            )
+        }
         // Lead with what to do. The raw envelope still follows, because the
         // detail in it ("cooldown", a provider id) is what makes an unusual
         // failure diagnosable — but it should not be the first thing read.

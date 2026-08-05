@@ -103,6 +103,31 @@ impl HarnessError {
         .any(|needle| body.contains(needle))
     }
 
+    /// Whether the provider rejected the request because its context window
+    /// was exceeded. This is intentionally separate from ordinary bad-request
+    /// errors so front-ends can tell the user to compact instead of retrying
+    /// the same payload unchanged.
+    pub fn is_context_limit(&self) -> bool {
+        let Self::Api { status, body } = self.root() else {
+            return false;
+        };
+        if *status == 413 {
+            return true;
+        }
+        let body = body.to_ascii_lowercase();
+        [
+            "context length",
+            "context window",
+            "maximum context",
+            "prompt is too long",
+            "input is too long",
+            "too many tokens",
+            "token limit",
+        ]
+        .iter()
+        .any(|needle| body.contains(needle))
+    }
+
     /// Whether a failure that happened **before any output streamed** is worth
     /// another attempt.
     ///
@@ -217,6 +242,32 @@ mod tests {
         }
         assert!(!HarnessError::Cancelled.is_auth_problem());
         assert!(!HarnessError::StreamIdleTimeout.is_auth_problem());
+    }
+
+    #[test]
+    fn context_limits_are_classified_separately() {
+        for (status, body) in [
+            (
+                400u16,
+                r#"{"error":{"message":"maximum context length is 128k"}}"#,
+            ),
+            (413, r#"{"error":{"message":"payload too large"}}"#),
+            (422, r#"{"error":{"message":"prompt is too long"}}"#),
+        ] {
+            assert!(
+                HarnessError::Api {
+                    status,
+                    body: body.into()
+                }
+                .is_context_limit(),
+                "{status} {body}"
+            );
+        }
+        assert!(!HarnessError::Api {
+            status: 400,
+            body: r#"{"error":{"message":"invalid model"}}"#.into()
+        }
+        .is_context_limit());
     }
 
     /// The regression that made this variant necessary: three failed attempts

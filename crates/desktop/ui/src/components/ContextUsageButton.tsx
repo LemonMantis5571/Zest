@@ -129,6 +129,18 @@ export function ContextUsageButton({
           <p className="m-0 text-[10px] leading-snug text-muted-foreground">
             Source: {usage.source === "last_turn" ? "last API turn" : "estimate"}.
           </p>
+          <p
+            className={cn(
+              "mt-1.5 m-0 text-[10px] leading-snug",
+              usage.shouldAutoCompact
+                ? "text-amber-400"
+                : "text-muted-foreground"
+            )}
+          >
+            {usage.shouldAutoCompact
+              ? "Automatic compaction is due after this turn."
+              : `Automatically compacts at ${usage.autoCompactThresholdPercent}% usage.`}
+          </p>
 
           <div className="mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 border-t border-border/60 pt-3 text-[11px]">
             <span className="text-muted-foreground">System</span>
