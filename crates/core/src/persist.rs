@@ -25,6 +25,7 @@ pub enum PersistPriority {
     Delta,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     Upsert {
         thread: Thread,

@@ -3,8 +3,10 @@ import { CheckIcon, ChevronDownIcon, RotateCcwIcon } from "lucide-react";
 
 import {
   DEFAULT_EFFORT,
+  capabilityForModel,
   chipLabel,
   effortsForModel,
+  formatContextWindow,
   modelLabel,
   modelOptionsFromCapabilities,
   type EffortId,
@@ -43,6 +45,8 @@ export function ModelEffortPicker({
   const labelId = useId();
   const modelOptions = modelOptionsFromCapabilities(models);
   const effortOptions = effortsForModel(models, model);
+  const capability = capabilityForModel(models, model);
+  const contextLabel = formatContextWindow(capability?.contextWindow);
   const supportsEffort = effortOptions.length > 0;
   const resetModel = defaultModel ?? modelOptions[0]?.id ?? model;
 
@@ -118,6 +122,20 @@ export function ModelEffortPicker({
           <div className="px-1.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             Model
           </div>
+          {capability ? (
+            <div className="mx-1.5 mb-1 rounded-md bg-secondary/60 px-2 py-1.5 text-[10px] leading-relaxed text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                {contextLabel ? <span>{contextLabel}</span> : null}
+                <span>{capability.supportsTools ? "Tools" : "Text only"}</span>
+                {capability.supportsVision ? <span>Vision</span> : null}
+              </div>
+              {!supportsEffort ? (
+                <div className="mt-0.5 text-[10px] text-muted-foreground/75">
+                  Effort control unavailable for this model
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div role="listbox" aria-label="Model" className="flex flex-col">
             {modelOptions.map((item) => {
               const selected = item.id === model;

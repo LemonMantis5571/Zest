@@ -36,6 +36,9 @@ export type { SkillSummary, SystemPromptInfo };
 const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
   id: m.id,
   efforts: ["low", "medium", "high", "xhigh", "max"],
+  contextWindow: 256000,
+  supportsTools: true,
+  supportsVision: false,
 }));
 
 /** Desktop I/O surface used by App — Tauri in production, fixture offline. */
@@ -78,6 +81,10 @@ export type DesktopBackend = {
   }): Promise<SessionInfo>;
   loadThread(id: string): Promise<SessionInfo>;
   newThread(): Promise<SessionInfo>;
+  sessionInfo(): Promise<SessionInfo | null>;
+  forkThread(): Promise<SessionInfo>;
+  rewindThread(checkpointId: string): Promise<SessionInfo>;
+  compactContext(): Promise<ContextUsage>;
   deleteThread(id: string, projectPath?: string | null): Promise<SessionInfo>;
   sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
@@ -121,6 +128,7 @@ const FIXTURE_SESSION: SessionInfo = {
   threadId: "fixture",
   defaultModel: DEFAULT_CODEX_MODEL,
   models: FIXTURE_MODELS,
+  checkpoints: [],
   messages: [],
 };
 
@@ -150,6 +158,10 @@ export function createTauriBackend(): DesktopBackend {
     openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadThread: (id) => tauriApi.loadThread(id),
     newThread: () => tauriApi.newThread(),
+    sessionInfo: () => tauriApi.sessionInfo(),
+    forkThread: () => tauriApi.forkThread(),
+    rewindThread: (checkpointId) => tauriApi.rewindThread(checkpointId),
+    compactContext: () => tauriApi.compactContext(),
     deleteThread: (id, projectPath) => tauriApi.deleteThread(id, projectPath),
     sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
     saveMarkdown: (suggestedName, markdown) =>
@@ -353,6 +365,23 @@ export function createFixtureBackend(): DesktopBackend {
       };
       return { ...session };
     },
+    async sessionInfo() {
+      return { ...session };
+    },
+    async forkThread() {
+      session = {
+        ...session,
+        threadId: `fixture-${crypto.randomUUID()}`,
+        checkpoints: [],
+      };
+      return { ...session };
+    },
+    async rewindThread() {
+      return { ...session };
+    },
+    async compactContext() {
+      return this.contextUsage();
+    },
     async deleteThread(id: string) {
       if (id === session.threadId) {
         return this.newThread();
@@ -508,6 +537,11 @@ export function createFixtureBackend(): DesktopBackend {
         remainingTokens: 244000,
         percentFull: 4.7,
         source: "estimate",
+        systemTokens: 3200,
+        conversationTokens: 8800,
+        messageCount: session.messages.length,
+        checkpointCount: session.checkpoints.length,
+        canCompact: session.messages.length >= 4,
       };
     },
     async getUserProfile() {

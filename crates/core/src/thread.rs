@@ -215,6 +215,19 @@ pub struct ThreadSummary {
     pub message_count: usize,
 }
 
+/// A durable conversation checkpoint. The full snapshot lives beside the
+/// thread file; this small record is what the UI needs to render the rewind
+/// affordance without loading every snapshot up front.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadCheckpoint {
+    pub id: String,
+    pub created_at: u64,
+    pub label: String,
+    pub message_count: usize,
+    pub agent_message_count: usize,
+}
+
 /// Typed outcomes when loading a thread from disk.
 #[derive(Debug, Error)]
 pub enum ThreadLoadError {
@@ -267,6 +280,9 @@ pub struct Thread {
     pub wire_format: String,
     #[serde(default)]
     pub messages: Vec<StoredMessage>,
+    /// Conversation checkpoints stored under `.zest/threads/checkpoints/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<ThreadCheckpoint>,
     /// Wire messages for restoring `Agent.messages` so the model sees prior context.
     #[serde(default)]
     pub agent_messages: Vec<Message>,
@@ -297,6 +313,7 @@ impl Thread {
             provider_id: None,
             wire_format: default_wire_format(),
             messages: Vec::new(),
+            checkpoints: Vec::new(),
             agent_messages: Vec::new(),
         }
     }
@@ -554,6 +571,7 @@ impl Thread {
         self.touch();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_tool_result(
         &mut self,
         message_id: &str,
@@ -652,6 +670,10 @@ impl ThreadStore {
 
     fn path_for(&self, id: &ThreadId) -> PathBuf {
         self.dir.join(format!("{}.json", id.as_str()))
+    }
+
+    fn checkpoints_dir_for(&self, id: &ThreadId) -> PathBuf {
+        self.dir.join("checkpoints").join(id.as_str())
     }
 
     pub fn save(&self, thread: &Thread) -> Result<()> {
@@ -771,13 +793,106 @@ impl ThreadStore {
         Ok(thread)
     }
 
+    /// Save a full conversation snapshot before a turn mutates the thread.
+    ///
+    /// The snapshot is intentionally separate from the main thread document:
+    /// retaining a bounded list of metadata there keeps the sidebar cheap while
+    /// rewind still has the exact provider wire history it needs.
+    pub fn create_checkpoint(
+        &self,
+        thread: &mut Thread,
+        label: impl Into<String>,
+    ) -> Result<ThreadCheckpoint> {
+        let thread_id = ThreadId::parse(&thread.id)
+            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        let checkpoint_id =
+            ThreadId::parse(new_id("checkpoint")).expect("generated checkpoint id is always valid");
+        let dir = self.checkpoints_dir_for(&thread_id);
+        fs::create_dir_all(&dir).map_err(|e| {
+            HarnessError::Other(format!("create checkpoint dir {}: {e}", dir.display()))
+        })?;
+
+        let mut snapshot = thread.clone();
+        // Metadata belongs to the live thread. Keeping it out of the snapshot
+        // prevents a rewind from recursively carrying future checkpoints back.
+        snapshot.checkpoints.clear();
+        let path = dir.join(format!("{}.json", checkpoint_id.as_str()));
+        fsutil::atomic_write_json(&path, &snapshot).map_err(|e| {
+            HarnessError::Other(format!("write checkpoint {}: {e}", path.display()))
+        })?;
+
+        let checkpoint = ThreadCheckpoint {
+            id: checkpoint_id.to_string(),
+            created_at: now_secs(),
+            label: label.into(),
+            message_count: thread.messages.len(),
+            agent_message_count: thread.agent_messages.len(),
+        };
+        thread.checkpoints.push(checkpoint.clone());
+
+        const MAX_CHECKPOINTS: usize = 24;
+        if thread.checkpoints.len() > MAX_CHECKPOINTS {
+            let removed = thread
+                .checkpoints
+                .drain(0..thread.checkpoints.len() - MAX_CHECKPOINTS)
+                .collect::<Vec<_>>();
+            for old in removed {
+                let _ = fs::remove_file(dir.join(format!("{}.json", old.id)));
+            }
+        }
+        thread.touch();
+        self.save(thread)?;
+        Ok(checkpoint)
+    }
+
+    /// Restore a checkpoint snapshot. The caller decides whether it should
+    /// replace the active session; this method only validates and reads it.
+    pub fn load_checkpoint(&self, thread_id: &str, checkpoint_id: &str) -> Result<Thread> {
+        let thread_id = ThreadId::parse(thread_id)
+            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        let checkpoint_id = ThreadId::parse(checkpoint_id)
+            .map_err(|e| HarnessError::Other(format!("invalid checkpoint id: {e}")))?;
+        let path = self
+            .checkpoints_dir_for(&thread_id)
+            .join(format!("{}.json", checkpoint_id.as_str()));
+        let raw = fs::read_to_string(&path)
+            .map_err(|e| HarnessError::Other(format!("read checkpoint {}: {e}", path.display())))?;
+        let mut snapshot: Thread = serde_json::from_str(&raw).map_err(|e| {
+            HarnessError::Other(format!("checkpoint {} is corrupt: {e}", path.display()))
+        })?;
+        if snapshot.id != thread_id.as_str() {
+            return Err(HarnessError::Other(
+                "checkpoint belongs to a different thread".into(),
+            ));
+        }
+        snapshot.checkpoints.clear();
+        Ok(snapshot)
+    }
+
+    /// Fork the current thread without sharing future checkpoint state.
+    pub fn fork(&self, source: &Thread, title: Option<&str>) -> Result<Thread> {
+        let mut fork = source.clone();
+        fork.id = new_id("thread");
+        fork.created_at = now_secs();
+        fork.updated_at = fork.created_at;
+        fork.title = title
+            .map(str::to_string)
+            .or_else(|| source.title.as_ref().map(|t| format!("Fork: {t}")));
+        fork.checkpoints.clear();
+        self.save(&fork)?;
+        Ok(fork)
+    }
+
     /// Permanently remove a thread file. Missing files are success (idempotent).
     pub fn delete(&self, id: &str) -> Result<()> {
         let tid = ThreadId::parse(id)
             .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
         let path = self.path_for(&tid);
         match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let _ = fs::remove_dir_all(self.checkpoints_dir_for(&tid));
+                Ok(())
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(HarnessError::Other(format!(
                 "delete thread {}: {e}",
@@ -898,6 +1013,45 @@ mod characterization {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, thread.id);
         assert_eq!(listed[0].message_count, 2);
+    }
+
+    #[test]
+    fn checkpoints_restore_wire_history_and_forks_start_clean() {
+        let root = scratch("checkpoint");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+        thread.apply_user("u1", "first question");
+        thread.apply_assistant_start("a1", None);
+        thread.apply_text_delta("a1", "first answer");
+        thread.apply_done("a1");
+        thread.agent_messages = vec![Message::user_text("first question")];
+        store.save(&thread).unwrap();
+
+        let checkpoint = store
+            .create_checkpoint(&mut thread, "Before the next turn")
+            .unwrap();
+        assert_eq!(thread.checkpoints.len(), 1);
+        assert_eq!(checkpoint.message_count, 2);
+
+        thread.apply_user("u2", "second question");
+        store.save(&thread).unwrap();
+        let restored = store.load_checkpoint(&thread.id, &checkpoint.id).unwrap();
+        assert_eq!(restored.id, thread.id);
+        assert_eq!(restored.messages.len(), 2);
+        assert_eq!(restored.agent_messages.len(), 1);
+        assert!(restored.checkpoints.is_empty());
+
+        let fork = store.fork(&thread, None).unwrap();
+        assert_ne!(fork.id, thread.id);
+        assert_eq!(fork.provider_id.as_deref(), Some("codex"));
+        assert!(fork.title.as_deref().unwrap().starts_with("Fork:"));
+        assert!(fork.checkpoints.is_empty());
+        assert!(store.load(&fork.id).is_ok());
+
+        store.delete(&thread.id).unwrap();
+        assert!(!store
+            .checkpoints_dir_for(&ThreadId::parse(&thread.id).unwrap())
+            .exists());
     }
 
     #[test]

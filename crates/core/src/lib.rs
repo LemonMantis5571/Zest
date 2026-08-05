@@ -71,9 +71,9 @@ pub use provider::anthropic::AnthropicProvider;
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue_for_provider, catalogue_from_lists, catalogue_without_efforts,
-    descriptor_for_picker_id, descriptor_from_config, normalize_effort, probe, Completion,
-    ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, StreamEvent, TurnRequest,
-    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    context_window_for_model, descriptor_for_picker_id, descriptor_from_config, normalize_effort,
+    probe, Completion, ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, StreamEvent,
+    TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use reading_diff::{
     abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,
@@ -85,8 +85,8 @@ pub use skills::{
     MAX_SKILL_BYTES,
 };
 pub use thread::{
-    new_id, StoredMessage, Thread, ThreadId, ThreadLoad, ThreadLoadError, ThreadStore,
-    ThreadSummary, ToolPart as ThreadToolPart, THREAD_FORMAT_VERSION,
+    new_id, StoredMessage, Thread, ThreadCheckpoint, ThreadId, ThreadLoad, ThreadLoadError,
+    ThreadStore, ThreadSummary, ToolPart as ThreadToolPart, THREAD_FORMAT_VERSION,
     WIRE_FORMAT_ANTHROPIC_MESSAGES,
 };
 pub use tools::approval::{
