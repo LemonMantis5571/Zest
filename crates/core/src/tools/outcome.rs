@@ -76,6 +76,10 @@ pub enum ToolMetadata {
         skipped: Vec<SkippedProvider>,
         #[serde(default)]
         usage_delta: UsageDelta,
+        /// Optional worker diff for front-ends that can open a review view.
+        /// The model-visible answer remains in `ToolOutcome::body`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
     },
 }
 
@@ -85,6 +89,12 @@ impl ToolMetadata {
             Self::Delegation {
                 provider_id, model, ..
             } => Some(format!("Delegated to {provider_id} · {model}")),
+        }
+    }
+
+    pub fn delegation_diff(&self) -> Option<&str> {
+        match self {
+            Self::Delegation { diff, .. } => diff.as_deref(),
         }
     }
 }

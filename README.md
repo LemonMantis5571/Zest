@@ -211,6 +211,49 @@ Project-scoped: `list_dir`, `glob`, `grep`, `read_file`, `write_file`, `edit_fil
 Commands: `bash`. Network: `web_search` (DuckDuckGo HTML; no API key). Skills:
 `read_skill`. Multi-provider: `delegate` when more than one provider is configured.
 
+### External workers (CLI / ACP)
+
+Zest can delegate a self-contained task to a locally installed coding agent
+without embedding that agent's SDK or MCP server. Add an `[agents.<id>]` entry
+to `zest.toml` with `mode = "headless"` for JSONL CLI output or `mode = "acp"`
+for ACP JSON-RPC over stdio. Claude Code can use `--print
+--output-format stream-json --strict-mcp-config` with its normal CLI login;
+Gemini CLI can use `--acp` or `-p` with `--output-format stream-json`.
+
+External delegation is explicit and approval-gated. Workers run in a temporary
+Git worktree by default, and Zest returns the answer plus a diff for review;
+changes are not merged automatically. `workspace = "current"` is available for
+non-Git projects but lets the child edit the active checkout after approval.
+Zest does not pass secret-like environment variables to the child and does not
+attach MCP servers. Example:
+
+```toml
+[agents.claude]
+mode = "headless"
+command = "claude"
+args = [
+  "--print",
+  "--output-format", "stream-json",
+  "--strict-mcp-config",
+  "{prompt}",
+]
+workspace = "isolated"
+
+[agents.gemini]
+mode = "acp"
+command = "gemini"
+args = ["--acp"]
+workspace = "isolated"
+```
+
+The parent model receives the `delegate_external` tool only when at least one
+agent is configured. In ACP mode, Zest answers file and terminal requests
+inside the worker workspace; the parent-level delegation approval remains the
+boundary. Zest does not pass secret-like environment variables to workers.
+Do not add Claude's `--bare` flag unless that CLI has its own API-key helper:
+Claude uses `--bare` to skip its normal OAuth/keychain path, and Zest removes
+secret-like environment variables from child processes.
+
 `read_file` numbers its output and takes `offset` / `limit` (2000 lines at a time,
 256 KiB cap). `edit_file` replaces an exact string and is what the agent should
 reach for on an existing file — `write_file` is for creating one.

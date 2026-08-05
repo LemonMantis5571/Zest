@@ -60,6 +60,18 @@ Still give the worker a precise task boundary, file paths, and result shape.
 - Read what comes back before acting on it. A worker can be wrong, and it is \
 your name on the result.";
 
+/// Added only when an explicit CLI/ACP worker is configured. External agents
+/// are workers, not provider identities, and their changes return for review.
+pub const EXTERNAL_DELEGATION_SYSTEM: &str = "\
+# External workers
+
+Configured CLI/ACP workers are available through `delegate_external`. Choose
+one only for a self-contained task with a clear result. The worker normally
+runs in an isolated Git worktree, so review its returned answer and diff before
+making changes in the user's project. ACP file and terminal requests stay
+inside the worker workspace, and the parent delegation approval is the
+boundary.";
+
 /// Root-level docs pulled into the prompt when present, in priority order.
 pub const PROJECT_DOC_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "PROJECT_CONTEXT.md"];
 

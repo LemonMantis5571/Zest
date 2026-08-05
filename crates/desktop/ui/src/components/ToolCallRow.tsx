@@ -63,6 +63,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
   // `bash` is the only tool that asks to run a command rather than change a
   // file; for it, `path` carries the command line verbatim.
   const isCommand = tool.name === "bash";
+  const isDelegation = tool.name === "delegate_external";
 
   if (awaiting) {
     return (
@@ -72,7 +73,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
       >
         <div className="flex items-start gap-2.5 px-3 py-2.5">
           <div className="mt-0.5 grid size-6 place-items-center rounded-md bg-muted/80 text-foreground">
-            {isCommand ? (
+            {isCommand || isDelegation ? (
               <TerminalIcon className="size-3.5" />
             ) : (
               <FilePenLineIcon className="size-3.5" />
@@ -80,13 +81,22 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-xs font-medium text-foreground">
-              {isCommand ? "Run this command?" : `Allow ${tool.name}?`}
+              {isDelegation
+                ? "Delegate this task?"
+                : isCommand
+                  ? "Run this command?"
+                  : `Allow ${tool.name}?`}
             </div>
             <TruncateWithHover
               text={
+                (isDelegation && tool.summary) ||
                 tool.path ||
                 tool.summary ||
-                (isCommand ? "Run a command" : "Write to project file")
+                (isCommand
+                  ? "Run a command"
+                  : isDelegation
+                    ? "Run an external worker"
+                    : "Write to project file")
               }
               className="mt-0.5 font-mono text-[11px] text-muted-foreground"
             />
@@ -134,9 +144,11 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
             // The grant covers this tool and this exact target only, which is
             // what the row above is showing.
             title={
-              isCommand
-                ? "Stop asking about this exact command for the rest of the session"
-                : `Stop asking about ${tool.path || "this file"} for the rest of the session`
+              isDelegation
+                ? "Allow this external worker for the rest of the session"
+                : isCommand
+                  ? "Stop asking about this exact command for the rest of the session"
+                  : `Stop asking about ${tool.path || "this file"} for the rest of the session`
             }
             onClick={() => {
               void resolve("session");

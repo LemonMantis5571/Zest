@@ -376,6 +376,7 @@ impl Delegate {
             routing_kind: kind.map(str::to_string),
             skipped: skipped.clone(),
             usage_delta: usage_delta(&before, &after),
+            diff: None,
         };
 
         // Name who answered. The orchestrator is spending several accounts and

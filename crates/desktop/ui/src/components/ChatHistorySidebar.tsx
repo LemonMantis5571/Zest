@@ -250,13 +250,16 @@ export function ChatHistorySidebar({
   }
 
   async function openThread(project: ProjectChats, thread: ThreadSummary) {
-    if (thread.providerId && thread.providerId !== activeProviderId) {
-      await onSwitchProvider(thread.providerId);
-    }
     if (project.active) {
+      if (thread.providerId && thread.providerId !== activeProviderId) {
+        await onSwitchProvider(thread.providerId);
+      }
       onLoadThread(thread.id);
       return;
     }
+    // The backend resolves the target project's thread owner. Switching the
+    // current project first would mutate the wrong session if the target then
+    // rejects the provider or cannot be opened.
     await onOpenProjectChat({
       root: project.path,
       threadId: thread.id,
