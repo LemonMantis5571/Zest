@@ -90,7 +90,7 @@ pub use tools::approval::{
     AllowApprover, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalPreview,
     ApprovalRequest, Approver, DenyApprover, PolicyOutcome, ToolRisk,
 };
-pub use tools::external_agent::{ExternalAgent, EXTERNAL_AGENT_TOOL};
+pub use tools::external_agent::{prepare_external_command, ExternalAgent, EXTERNAL_AGENT_TOOL};
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
 pub use tools::list_dir::ListDir;
