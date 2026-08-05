@@ -48,8 +48,8 @@ pub use commands::{
     ParsedCommand,
 };
 pub use config::{
-    ensure_user_config, load_env, user_config_path, Config, ProviderConfig, Routing, Rule, Target,
-    DEFAULT_USER_CONFIG,
+    ensure_user_config, load_env, user_config_path, Config, ExternalAgentConfig, ExternalAgentMode,
+    ExternalWorkspace, ProviderConfig, Routing, Rule, Target, DEFAULT_USER_CONFIG,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
@@ -94,6 +94,7 @@ pub use tools::approval::{
     ApprovalRequest, Approver, DenyApprover, PolicyOutcome, ToolRisk,
 };
 pub use tools::delegate::{Delegate, DELEGATE_TOOL};
+pub use tools::external_agent::{ExternalAgent, EXTERNAL_AGENT_TOOL};
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
 pub use tools::list_dir::ListDir;

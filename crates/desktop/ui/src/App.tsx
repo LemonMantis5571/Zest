@@ -1165,6 +1165,10 @@ export default function App() {
       }
       const info = await backend.openProjectChat(options);
       applySession(info, { clearDraft: Boolean(options.newThread) });
+      // A project can fall back to its own default/only provider. Refresh the
+      // picker catalogue so the model list and key status match the session we
+      // actually opened instead of the project we just left.
+      void loadProviders(info.provider).catch(() => {});
       setWorkspacePath(info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
     } catch (err) {

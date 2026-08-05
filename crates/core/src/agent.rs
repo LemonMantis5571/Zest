@@ -371,13 +371,18 @@ impl Agent {
                         } else {
                             summarize_tool_body(&outcome.body)
                         };
+                        let delegation_diff = outcome
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.delegation_diff())
+                            .map(str::to_string);
                         on_event(StreamEvent::ToolCallResult {
                             name: &call.name,
                             id: &call.id,
                             summary: &summary,
                             is_error: outcome.is_error,
                             path: outcome.path.as_deref(),
-                            diff: outcome.diff.as_deref(),
+                            diff: outcome.diff.as_deref().or(delegation_diff.as_deref()),
                             metadata: outcome.metadata,
                         });
                         // Live staged history keeps the real body for the model.
