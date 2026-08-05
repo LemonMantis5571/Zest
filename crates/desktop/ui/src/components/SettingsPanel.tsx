@@ -701,7 +701,11 @@ export function SettingsPanel({
                         <p
                           className={cn(
                             "mt-1 text-[11px] leading-relaxed",
-                            check.available ? "text-primary" : "text-destructive"
+                            !check.available || check.authenticated === false
+                              ? "text-destructive"
+                              : check.authenticated === true
+                                ? "text-primary"
+                                : "text-muted-foreground"
                           )}
                           role="status"
                           aria-live="polite"
