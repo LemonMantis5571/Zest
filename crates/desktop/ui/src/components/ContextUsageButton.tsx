@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { XIcon } from "lucide-react";
+import { CheckCircle2Icon, SparklesIcon, XIcon } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import type { ContextUsage } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -13,9 +14,16 @@ function formatTokens(n: number) {
 type Props = {
   refreshKey: string | number;
   className?: string;
+  onCompact?: () => Promise<void>;
+  compacting?: boolean;
 };
 
-export function ContextUsageButton({ refreshKey, className }: Props) {
+export function ContextUsageButton({
+  refreshKey,
+  className,
+  onCompact,
+  compacting = false,
+}: Props) {
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -121,6 +129,45 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
           <p className="m-0 text-[10px] leading-snug text-muted-foreground">
             Source: {usage.source === "last_turn" ? "last API turn" : "estimate"}.
           </p>
+
+          <div className="mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 border-t border-border/60 pt-3 text-[11px]">
+            <span className="text-muted-foreground">System</span>
+            <span className="font-mono tabular-nums">{formatTokens(usage.systemTokens)}</span>
+            <span className="text-muted-foreground">Conversation</span>
+            <span className="font-mono tabular-nums">
+              {formatTokens(usage.conversationTokens)}
+            </span>
+            <span className="text-muted-foreground">Messages</span>
+            <span className="font-mono tabular-nums">{usage.messageCount}</span>
+            <span className="text-muted-foreground">Checkpoints</span>
+            <span className="font-mono tabular-nums">{usage.checkpointCount}</span>
+          </div>
+
+          {onCompact ? (
+            <div className="mt-3 border-t border-border/60 pt-3">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="w-full justify-center"
+                disabled={!usage.canCompact || compacting}
+                onClick={() => void onCompact()}
+              >
+                {compacting ? (
+                  "Compacting…"
+                ) : (
+                  <>
+                    <SparklesIcon data-icon="inline-start" />
+                    Compact conversation
+                  </>
+                )}
+              </Button>
+              <div className="mt-1.5 flex items-center gap-1 text-[10px] text-muted-foreground">
+                <CheckCircle2Icon className="size-3 shrink-0 text-emerald-400" />
+                A checkpoint is kept before compaction.
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

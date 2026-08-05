@@ -29,8 +29,9 @@ use zest_core::{
     ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts, Config,
     GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority, PersistWorker, ProfileStats,
     ProjectSessionState, ProviderConfig, ProviderRegistry, ProviderSlot, RuntimeBuilder, SkillSet,
-    SkillSummary, StoredMessage, StreamEvent, Thread, ThreadLoadError, ThreadStore, ThreadSummary,
-    ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError,
+    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
+    THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -201,6 +202,38 @@ struct CachedThreadSummary {
 struct ModelCapability {
     id: String,
     efforts: Vec<String>,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    context_window: u64,
+    supports_tools: bool,
+    supports_vision: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ThreadCheckpoint.ts", rename_all = "camelCase")
+)]
+struct ThreadCheckpointView {
+    id: String,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    created_at: u64,
+    label: String,
+    message_count: usize,
+    agent_message_count: usize,
+}
+
+impl From<ThreadCheckpoint> for ThreadCheckpointView {
+    fn from(checkpoint: ThreadCheckpoint) -> Self {
+        Self {
+            id: checkpoint.id,
+            created_at: checkpoint.created_at,
+            label: checkpoint.label,
+            message_count: checkpoint.message_count,
+            agent_message_count: checkpoint.agent_message_count,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +335,9 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
             .map(|m| ModelCapability {
                 id: m.id,
                 efforts: m.efforts,
+                context_window: m.context_window,
+                supports_tools: m.supports_tools,
+                supports_vision: m.supports_vision,
             })
             .collect(),
     }
@@ -355,6 +391,9 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
             .map(|model| ModelCapability {
                 id: model.id,
                 efforts: model.efforts,
+                context_window: model.context_window,
+                supports_tools: model.supports_tools,
+                supports_vision: model.supports_vision,
             })
             .collect(),
     }
@@ -468,6 +507,7 @@ struct SessionInfo {
     /// Rust-authoritative catalogue for the active provider (UI may only add labels).
     default_model: String,
     models: Vec<ModelCapability>,
+    checkpoints: Vec<ThreadCheckpointView>,
     /// UI projects these as `ChatMessage[]` (see `types.ts`); keep codegen free of StoredMessage.
     #[cfg_attr(feature = "export-bindings", ts(type = "unknown[]"))]
     messages: Vec<StoredMessage>,
@@ -1257,6 +1297,9 @@ fn session_capabilities(session: &Session) -> (String, Vec<ModelCapability>) {
             .map(|m| ModelCapability {
                 id: m.id,
                 efforts: m.efforts,
+                context_window: m.context_window,
+                supports_tools: m.supports_tools,
+                supports_vision: m.supports_vision,
             })
             .collect(),
     )
@@ -1274,6 +1317,13 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
         thread_id: session.thread_id.clone(),
         default_model,
         models,
+        checkpoints: session
+            .thread
+            .checkpoints
+            .clone()
+            .into_iter()
+            .map(ThreadCheckpointView::from)
+            .collect(),
         messages: session.thread.messages.clone(),
         warning,
     }
@@ -1891,6 +1941,117 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
         .and_then(|r| r)
 }
 
+/// Fork the active conversation into a new provider-owned thread. The runtime
+/// options stay the same, while future checkpoints belong only to the fork.
+#[tauri::command]
+fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    state.approvals.clear();
+
+    state
+        .sessions
+        .with_session_mut(|session| -> Result<SessionInfo, String> {
+            let store = open_store(&session.root)?;
+            let fork = store
+                .fork(&session.thread, None)
+                .map_err(|e| e.to_string())?;
+            session.agent.clear_messages();
+            session.agent.messages = fork.agent_messages.clone();
+            session.agent.last_usage = None;
+            session.thread_id = fork.id.clone();
+            session.thread = fork;
+            persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
+            Ok(session_info_from(
+                session,
+                Some("forked from the previous conversation".into()),
+            ))
+        })
+        .map_err(map_session_err)
+        .and_then(|r| r)
+}
+
+/// Restore the active conversation to a durable checkpoint. Workspace files
+/// are intentionally untouched: this first version is a safe conversation
+/// rewind, not an implicit filesystem reset.
+#[tauri::command]
+fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    state.approvals.clear();
+
+    state
+        .sessions
+        .with_session_mut(|session| -> Result<SessionInfo, String> {
+            let store = open_store(&session.root)?;
+            let checkpoints = session.thread.checkpoints.clone();
+            let mut restored = store
+                .load_checkpoint(&session.thread_id, checkpoint_id.trim())
+                .map_err(|e| e.to_string())?;
+            restored.checkpoints = checkpoints;
+            restored
+                .assert_provider(&session.provider_id)
+                .map_err(|e| e.to_string())?;
+            session.agent.clear_messages();
+            session.agent.messages = restored.agent_messages.clone();
+            session.agent.last_usage = None;
+            session.thread = restored;
+            session.thread_id = session.thread.id.clone();
+            store.save(&session.thread).map_err(|e| e.to_string())?;
+            persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
+            Ok(session_info_from(
+                session,
+                Some("conversation rewound; workspace files were left unchanged".into()),
+            ))
+        })
+        .map_err(map_session_err)
+        .and_then(|r| r)
+}
+
+/// Ask the active provider for a compact, persistence-safe checkpoint of the
+/// conversation. The operation occupies the normal turn slot so it cannot race
+/// a send or an approval, but it does not add a visible assistant answer.
+#[tauri::command]
+async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    state.approvals.clear();
+
+    let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
+    let store = match open_store(&session.root) {
+        Ok(store) => store,
+        Err(error) => {
+            let _ = state.sessions.finish_turn(&turn, session);
+            return Err(error);
+        }
+    };
+    if session.thread.messages.is_empty() && session.agent.messages.len() < 4 {
+        let _ = state.sessions.finish_turn(&turn, session);
+        return Err("there is not enough conversation to compact yet".into());
+    }
+    if let Err(error) = store.create_checkpoint(&mut session.thread, "Before compaction") {
+        let _ = state.sessions.finish_turn(&turn, session);
+        return Err(error.to_string());
+    }
+
+    let result = session.agent.compact_context().await;
+    let output = match result {
+        Ok(_) => {
+            session
+                .thread
+                .set_agent_messages(session.agent.messages_for_persist());
+            if let Err(error) = store.save(&session.thread) {
+                let _ = state.sessions.finish_turn(&turn, session);
+                return Err(error.to_string());
+            }
+            estimate_context(&session.agent, session.thread.checkpoints.len())
+        }
+        Err(error) => {
+            let _ = state.sessions.finish_turn(&turn, session);
+            return Err(error.to_string());
+        }
+    };
+    let _ = state.sessions.finish_turn(&turn, session);
+    Ok(output)
+}
+
 /// Delete a saved chat. If it is the active thread, switches the session to an
 /// unsaved empty draft for the same provider. The draft becomes a saved chat
 /// when its first message is persisted. `project_path` deletes from another
@@ -1964,6 +2125,25 @@ async fn send_message(
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
     state.approvals.begin_turn(&turn.turn_id);
+
+    // Every non-empty turn gets a rewind point before the UI projection changes.
+    // The first empty draft does not need a snapshot and should not create
+    // visible history by itself.
+    if !session.thread.messages.is_empty() || !session.agent.messages.is_empty() {
+        let store = match open_store(&session.root) {
+            Ok(store) => store,
+            Err(error) => {
+                state.approvals.clear();
+                let _ = state.sessions.finish_turn(&turn, session);
+                return Err(error);
+            }
+        };
+        if let Err(error) = store.create_checkpoint(&mut session.thread, "Before turn") {
+            state.approvals.clear();
+            let _ = state.sessions.finish_turn(&turn, session);
+            return Err(error.to_string());
+        }
+    }
 
     // Plan mode and the `plan` skill are one feature, not two things that share
     // a word: being in the mode runs the skill. A poisoned policy lock reads as
@@ -2952,7 +3132,9 @@ fn read_git_branch(root: &Path) -> Option<String> {
 fn context_usage(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
     state
         .sessions
-        .with_session_mut(|session| estimate_context(&session.agent))
+        .with_session_mut(|session| {
+            estimate_context(&session.agent, session.thread.checkpoints.len())
+        })
         .map_err(map_session_err)
 }
 
@@ -3260,6 +3442,9 @@ pub fn run() {
             open_project_chat,
             load_thread,
             new_thread,
+            fork_thread,
+            rewind_thread,
+            compact_context,
             delete_thread,
             send_message,
             save_markdown,
@@ -3300,6 +3485,7 @@ mod export_bindings {
         SessionInfo::export_all().expect("export SessionInfo bindings");
         ProviderView::export_all().expect("export ProviderView bindings");
         ModelCapability::export_all().expect("export ModelCapability bindings");
+        ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
         ToolMetaView::export_all().expect("export ToolMetaView bindings");
     }
 }

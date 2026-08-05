@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use zest_core::{
     detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, Ledger,
     ProviderConfig, Routing, RuntimeBuilder, StreamEvent, Target, Thread, ThreadStore,
@@ -43,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 run_doctor_live().await?;
             }
+            return Ok(());
+        }
+        Some("run") => {
+            run_headless(std::env::args().skip(2).collect()).await?;
             return Ok(());
         }
         _ => {}
@@ -117,6 +121,206 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Run one turn as a small, line-delimited JSON protocol.
+///
+/// The protocol deliberately keeps approval non-interactive: a gated tool
+/// emits `approval_needed` and is denied. This makes CI and editor integrations
+/// deterministic while preserving the same agent/tool loop as the desktop.
+async fn run_headless(args: Vec<String>) -> anyhow::Result<()> {
+    let mut json = false;
+    let mut model: Option<String> = None;
+    let mut provider: Option<String> = None;
+    let mut effort: Option<String> = None;
+    let mut prompt_parts = Vec::new();
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--model" => {
+                index += 1;
+                model = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow::anyhow!("--model needs a value"))?
+                        .clone(),
+                );
+            }
+            "--provider" => {
+                index += 1;
+                provider = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow::anyhow!("--provider needs a value"))?
+                        .clone(),
+                );
+            }
+            "--effort" => {
+                index += 1;
+                effort = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow::anyhow!("--effort needs a value"))?
+                        .clone(),
+                );
+            }
+            "--" => {
+                prompt_parts.extend(args[index + 1..].iter().cloned());
+                break;
+            }
+            value if value.starts_with('-') => {
+                anyhow::bail!("unknown run option `{value}` (try: zest run --json -- PROMPT)");
+            }
+            value => prompt_parts.push(value.to_string()),
+        }
+        index += 1;
+    }
+
+    if !json {
+        anyhow::bail!("headless mode requires --json");
+    }
+
+    let prompt = if prompt_parts.is_empty() {
+        let mut input = String::new();
+        tokio::io::stdin().read_to_string(&mut input).await?;
+        input.trim().to_string()
+    } else {
+        prompt_parts.join(" ").trim().to_string()
+    };
+    if prompt.is_empty() {
+        anyhow::bail!("run needs a prompt argument or stdin input");
+    }
+
+    let root = std::env::current_dir()?;
+    let config = match gateway_override() {
+        Some(config) => config,
+        None => Config::find(&root)?,
+    };
+    for issue in config.lint() {
+        eprintln!("warning: {issue}");
+    }
+
+    let mut builder = RuntimeBuilder::new(&root)
+        .with_config(config)
+        .with_effort(
+            effort
+                .or_else(|| std::env::var("ZEST_EFFORT").ok())
+                .unwrap_or_else(|| "high".to_string()),
+        )
+        .with_system(DEFAULT_SYSTEM)
+        .enable_delegate(true)
+        .register_write_tools(true)
+        .register_exec_tools(true)
+        .with_approver(Arc::new(JsonApprover));
+    if let Some(provider) = provider {
+        builder = builder.with_provider(provider);
+    }
+    if let Some(model) = model {
+        builder = builder.with_model(model);
+    }
+
+    let runtime = builder.build()?;
+    emit_json(serde_json::json!({
+        "kind": "session",
+        "provider": runtime.provider_id,
+        "model": runtime.model,
+        "effort": runtime.effort,
+    }));
+
+    let mut agent = runtime.agent;
+    let mut on_event = |event: StreamEvent<'_>| emit_stream_json(event);
+    match agent.send(&prompt, &mut on_event).await {
+        Ok(()) => emit_json(serde_json::json!({ "kind": "done" })),
+        Err(err) => {
+            let message = err.to_string();
+            emit_json(serde_json::json!({
+                "kind": "error",
+                "message": message,
+            }));
+            return Err(err.into());
+        }
+    }
+
+    Ok(())
+}
+
+fn emit_json(value: serde_json::Value) {
+    println!("{value}");
+    let _ = std::io::stdout().flush();
+}
+
+fn emit_stream_json(event: StreamEvent<'_>) {
+    match event {
+        StreamEvent::Text(text) if !text.is_empty() => {
+            emit_json(serde_json::json!({ "kind": "text", "text": text }));
+        }
+        StreamEvent::Thinking(text) if !text.is_empty() => {
+            emit_json(serde_json::json!({ "kind": "thinking", "text": text }));
+        }
+        StreamEvent::ToolCallStart { name, id } => emit_json(serde_json::json!({
+            "kind": "tool_call_start",
+            "name": name,
+            "id": id,
+        })),
+        StreamEvent::ToolCallResult {
+            name,
+            id,
+            summary,
+            is_error,
+            path,
+            diff,
+            metadata,
+        } => emit_json(serde_json::json!({
+            "kind": "tool_call_result",
+            "name": name,
+            "id": id,
+            "summary": summary,
+            "isError": is_error,
+            "path": path,
+            "diff": diff,
+            "metadata": metadata.and_then(|value| serde_json::to_value(value).ok()),
+        })),
+        StreamEvent::ApprovalNeeded {
+            approval_id,
+            tool_name,
+            tool_call_id,
+            risk,
+            path,
+            summary,
+            diff,
+        } => emit_json(serde_json::json!({
+            "kind": "approval_needed",
+            "approvalId": approval_id,
+            "toolName": tool_name,
+            "toolCallId": tool_call_id,
+            "risk": serde_json::to_value(risk).unwrap_or(serde_json::Value::Null),
+            "path": path,
+            "summary": summary,
+            "diff": diff,
+        })),
+        StreamEvent::ModelSubstituted { requested, served } => emit_json(serde_json::json!({
+            "kind": "model_substituted",
+            "requested": requested,
+            "served": served,
+        })),
+        StreamEvent::Text(_) | StreamEvent::Thinking(_) => {}
+    }
+}
+
+struct JsonApprover;
+
+#[async_trait::async_trait]
+impl Approver for JsonApprover {
+    async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
+        // The agent emits the corresponding event before waiting here. Keep
+        // this deny-only fallback as a second guard if a future tool bypasses
+        // that event path.
+        emit_json(serde_json::json!({
+            "kind": "approval_decision",
+            "approvalId": request.approval_id,
+            "decision": "deny",
+        }));
+        ApprovalDecision::Deny
+    }
 }
 
 fn print_doctor_help() {

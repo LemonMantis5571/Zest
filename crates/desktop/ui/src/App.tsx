@@ -252,6 +252,7 @@ export default function App() {
     avatarDataUrl: "",
   });
   const [sending, setSending] = useState(false);
+  const [compacting, setCompacting] = useState(false);
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
   const [effort, setEffort] = useState<EffortId>(DEFAULT_EFFORT);
   // Mirrors DESKTOP_DEFAULT_MODE in Rust; reconciled on session start.
@@ -413,6 +414,34 @@ export default function App() {
   const deltaQueueRef = useRef<ChatEvent[]>([]);
   const deltaRafRef = useRef<number | null>(null);
 
+  const refreshCheckpointMetadata = useCallback(() => {
+    const attempt = (remaining: number) => {
+      void backend
+        .sessionInfo()
+        .then((info) => {
+          if (info && info.sessionId === sessionIdRef.current) {
+            setSession((current) =>
+              current
+                ? { ...current, checkpoints: info.checkpoints }
+                : current
+            );
+            return;
+          }
+          // `done` is emitted just before the Rust session slot is released.
+          // Retry briefly so the new checkpoint is visible without racing the
+          // turn finalizer.
+          if (remaining > 0) {
+            window.setTimeout(() => attempt(remaining - 1), 40);
+          }
+        })
+        .catch(() => {
+          /* checkpoint metadata is best-effort UI state */
+        });
+    };
+
+    window.setTimeout(() => attempt(4), 0);
+  }, []);
+
   const applyChatEventNow = useCallback((event: ChatEvent) => {
     const prevSending = sendingRef.current;
     const { state, effects } = reduceChatEvent(
@@ -485,13 +514,14 @@ export default function App() {
       }
       turnStartedAtRef.current = null;
       notifiedApprovalIdsRef.current.clear();
+      refreshCheckpointMetadata();
     }
 
     if (event.kind === "error" || event.kind === "cancelled") {
       turnStartedAtRef.current = null;
       notifiedApprovalIdsRef.current.clear();
     }
-  }, []);
+  }, [refreshCheckpointMetadata]);
 
   const flushDeltaQueue = useCallback(
     (drainAll = false) => {
@@ -892,6 +922,85 @@ export default function App() {
         title: "Could not start new chat",
         description: String(err),
       });
+    }
+  }
+
+  async function onForkThread() {
+    if (sendingRef.current) {
+      toast.add({
+        type: "warning",
+        title: "Finish this turn first",
+        description: "Stop the current turn before creating a fork.",
+      });
+      return;
+    }
+    try {
+      const info = await backend.forkThread();
+      applySession(info, { clearDraft: true });
+      toast.add({
+        type: "success",
+        title: "Fork created",
+        description: "You are now working in a separate conversation.",
+      });
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not fork conversation",
+        description: formatInvokeError(err),
+      });
+    }
+  }
+
+  async function onRewindThread(checkpointId: string) {
+    if (sendingRef.current) {
+      toast.add({
+        type: "warning",
+        title: "Finish this turn first",
+        description: "Stop the current turn before rewinding.",
+      });
+      return;
+    }
+    try {
+      const info = await backend.rewindThread(checkpointId);
+      applySession(info, { clearDraft: true });
+      toast.add({
+        type: "success",
+        title: "Conversation rewound",
+        description: "Workspace files were left unchanged.",
+      });
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not rewind conversation",
+        description: formatInvokeError(err),
+      });
+    }
+  }
+
+  async function onCompactContext() {
+    if (sendingRef.current || compacting) return;
+    setCompacting(true);
+    try {
+      await backend.compactContext();
+      const info = await backend.sessionInfo();
+      if (info && info.sessionId === sessionIdRef.current) {
+        setSession((current) =>
+          current ? { ...current, checkpoints: info.checkpoints } : current
+        );
+      }
+      toast.add({
+        type: "success",
+        title: "Context compacted",
+        description: "A checkpoint was kept so you can rewind if needed.",
+      });
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not compact context",
+        description: formatInvokeError(err),
+      });
+    } finally {
+      setCompacting(false);
     }
   }
 
@@ -1376,6 +1485,10 @@ export default function App() {
             onSend={onSend}
             onStop={onStop}
             onNewChat={onNewChat}
+            onForkThread={onForkThread}
+            onRewindThread={onRewindThread}
+            onCompactContext={onCompactContext}
+            compacting={compacting}
             onDeleteThread={onDeleteThread}
             onOpenProjectChat={onOpenProjectChat}
             providers={providers}

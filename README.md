@@ -130,9 +130,11 @@ Offline UI smoke (no gateway): open the webview with `?fixture=1` during UI-only
 ```powershell
 cargo run -p zest-desktop          # desktop app
 cargo run -p zest                  # CLI chat
+cargo run -p zest -- run --json -- "Summarize the current project"
 cargo run -p zest -- auth          # provider detection
 cargo run -p zest -- usage         # local usage ledger
 cargo run -p zest -- doctor --live # opt-in live acceptance (spends quota)
+cargo run -p zest -- run --json -- "Inspect the repo and report the next step"
 
 npm run ui:build                   # rebuild webview after UI changes
 npm run desktop:dev                # Tauri + Vite HMR (dev)
@@ -324,6 +326,19 @@ than by a depth counter.
 
 ### Chat history (by project)
 
+### Workbench & recovery
+
+The desktop header's Workbench opens a compact task dashboard with live tool
+activity, a transcript outline, and conversation recovery. Each completed turn
+keeps a bounded checkpoint. **Fork conversation** starts a new thread from the
+current wire history; **rewind** restores conversation state only and never
+rolls back workspace files. **Compact context** asks the active provider for a
+short checkpoint, saves the pre-compaction state, and keeps the transcript
+usable for a longer task.
+
+`Ctrl+K` opens the command palette. It searches built-in actions and registered
+slash commands; `Ctrl+Shift+K` opens the shortcut editor.
+
 The left sidebar lists **Projects** (folders you have opened). Each project expands
 to its chats. Threads are stored per project under `<project>/.zest/threads/`
 (gitignored). Known project roots are remembered in `~/.zest/known-workspaces.json`.
@@ -351,11 +366,35 @@ blocks.
 Header avatar opens **Settings → User**. Display name + optional photo (resized to
 a small JPEG under `~/.zest/avatar.jpg`).
 
-### Context usage
+### Context usage (legacy estimate wording)
 
 Footer ring shows how full the context window looks (last API turn’s
 `input_tokens` when available, otherwise a rough estimate). Soft “compact”
 threshold is **not** shipped yet — the meter is informational only.
+
+---
+
+### Current context controls
+
+The context meter now exposes a system/conversation breakdown and an explicit
+**Compact conversation** action. Compaction keeps a rewind checkpoint first;
+usage is marked as an estimate when the provider does not report tokens.
+
+### JSONL / headless mode
+
+For editor integrations and CI, run one turn without the interactive prompt:
+
+```powershell
+zest run --json -- "Review the changed files and list any risks"
+"Fix the failing test" | zest run --json
+```
+
+Every stdout line is a JSON object. The stream starts with a `session` object,
+then emits `text`, `thinking`, `tool_call_start`, `tool_call_result`,
+`approval_needed`, `approval_decision`, `model_substituted`, and finally `done` or `error`. Headless
+approval is intentionally deny-only: gated writes/commands emit their preview
+and are denied instead of hanging on an interactive prompt. Diagnostics go to
+stderr, so stdout remains machine-readable.
 
 ---
 

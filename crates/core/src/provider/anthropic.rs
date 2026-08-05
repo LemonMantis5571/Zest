@@ -99,6 +99,9 @@ impl AnthropicProvider {
                 ModelSpec {
                     id: self.default_model.clone(),
                     efforts,
+                    context_window: super::context_window_for_model(&self.default_model),
+                    supports_tools: true,
+                    supports_vision: false,
                 },
             );
         }

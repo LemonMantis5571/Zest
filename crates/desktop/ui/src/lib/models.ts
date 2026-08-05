@@ -36,7 +36,23 @@ export const DEFAULT_EFFORT: EffortId = "high";
 export type ModelCapability = {
   id: string;
   efforts: string[];
+  contextWindow: number;
+  supportsTools: boolean;
+  supportsVision: boolean;
 };
+
+export function capabilityForModel(
+  models: ModelCapability[] | undefined,
+  modelId: string
+): ModelCapability | undefined {
+  return models?.find((item) => item.id === modelId);
+}
+
+export function formatContextWindow(tokens: number | undefined): string | null {
+  if (!tokens || !Number.isFinite(tokens) || tokens <= 0) return null;
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M context`;
+  return `${Math.round(tokens / 1_000)}k context`;
+}
 
 export function modelLabel(modelId: string): string {
   return MODEL_LABELS[modelId]?.label ?? modelId;

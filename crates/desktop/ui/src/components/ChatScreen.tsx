@@ -4,6 +4,8 @@ import {
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
+  CommandIcon,
+  PanelRightOpenIcon,
   SettingsIcon,
   TriangleAlertIcon,
   XIcon,
@@ -15,6 +17,7 @@ import {
   writeSidebarOpen,
 } from "@/components/ChatHistorySidebar";
 import { CommandOutputCard } from "@/components/CommandOutputCard";
+import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { Composer } from "@/components/Composer";
 import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
@@ -26,6 +29,7 @@ import { SettingsPanel } from "@/components/SettingsPanel";
 import { ToolCallRow } from "@/components/ToolCallRow";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
 import { UserAvatarButton } from "@/components/UserAvatarButton";
+import { WorkbenchPanel } from "@/components/WorkbenchPanel";
 import {
   Attachment,
   AttachmentContent,
@@ -83,6 +87,10 @@ type Props = {
   onSend: () => void;
   onStop?: () => void;
   onNewChat: () => void;
+  onForkThread: () => Promise<void>;
+  onRewindThread: (checkpointId: string) => Promise<void>;
+  onCompactContext: () => Promise<void>;
+  compacting?: boolean;
   onDeleteThread: (id: string, projectPath: string) => Promise<void>;
   onOpenProjectChat: (options: {
     root: string;
@@ -168,7 +176,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
 }: ChatMessageRowProps) {
   if (msg.role === "user") {
     return (
-      <MessageScrollerItem messageId={msg.id} scrollAnchor={isLast}>
+      <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
         <Message align="end" className="justify-end">
           <MessageContent className="items-end gap-1.5">
             {msg.attachments && msg.attachments.length > 0 ? (
@@ -205,7 +213,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   }
 
   return (
-    <MessageScrollerItem messageId={msg.id} scrollAnchor={isLast}>
+    <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
       <Message align="start">
         <MessageContent className="w-full max-w-full gap-2.5">
           <div className="text-[11px] font-medium tracking-wide text-muted-foreground/80">
@@ -377,6 +385,10 @@ export function ChatScreen({
   onSend,
   onStop,
   onNewChat,
+  onForkThread,
+  onRewindThread,
+  onCompactContext,
+  compacting = false,
   onDeleteThread,
   onOpenProjectChat,
   providers,
@@ -411,6 +423,8 @@ export function ChatScreen({
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const openDiff = useCallback(
     (path: string, diff: string) => setDiffTarget({ path, diff }),
     []
@@ -418,6 +432,59 @@ export function ChatScreen({
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = shortRoot(session.root);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
+
+  const jumpToMessage = useCallback((messageId: string) => {
+    document.getElementById(`message-${messageId}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  }, []);
+
+  const paletteActions = useMemo<PaletteAction[]>(
+    () => [
+      {
+        id: "new-chat",
+        label: "New chat",
+        description: "Start a fresh conversation in this project",
+        shortcut: "Ctrl+N",
+        run: () => {
+          if (!sending) onNewChat();
+        },
+      },
+      {
+        id: "toggle-workbench",
+        label: workbenchOpen ? "Close workbench" : "Open workbench",
+        description: "Inspect activity, outline, and recovery checkpoints",
+        run: () => setWorkbenchOpen((value) => !value),
+      },
+      {
+        id: "compact-context",
+        label: "Compact context",
+        description: "Create a checkpoint and summarize the conversation",
+        run: () => {
+          if (!sending && !compacting) void onCompactContext();
+        },
+      },
+      {
+        id: "open-provider",
+        label: "Switch provider",
+        description: "Choose a configured model provider",
+        shortcut: "Ctrl+Shift+M",
+        run: () => setProviderSwitchOpen(true),
+      },
+      {
+        id: "open-settings",
+        label: "Open settings",
+        description: "Configure Zest and keyboard shortcuts",
+        shortcut: "Ctrl+,",
+        run: () => {
+          setFocusUser(false);
+          setSettingsOpen(true);
+        },
+      },
+    ],
+    [compacting, onCompactContext, onNewChat, sending, workbenchOpen]
+  );
 
   // A bump means "open the User section". Zero is the initial value, so the
   // panel does not fly open on mount.
@@ -457,6 +524,16 @@ export function ChatScreen({
         closeSettings();
         return;
       }
+      if (paletteOpen) {
+        e.preventDefault();
+        setPaletteOpen(false);
+        return;
+      }
+      if (workbenchOpen) {
+        e.preventDefault();
+        setWorkbenchOpen(false);
+        return;
+      }
       if (sending && onStop) {
         e.preventDefault();
         onStop();
@@ -464,7 +541,7 @@ export function ChatScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [diffTarget, onStop, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
+  }, [diffTarget, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen, workbenchOpen]);
 
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.
@@ -488,6 +565,7 @@ export function ChatScreen({
     },
     "view.profile": () => onOpenProfile?.(),
     "view.provider": () => setProviderSwitchOpen(true),
+    "view.palette": () => setPaletteOpen(true),
   });
 
   return (
@@ -537,6 +615,28 @@ export function ChatScreen({
             </div>
           </div>
           <div className="flex items-center gap-0.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Command palette (Ctrl+K)"
+              aria-label="Open command palette"
+              aria-expanded={paletteOpen}
+              onClick={() => setPaletteOpen(true)}
+            >
+              <CommandIcon />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Workbench"
+              aria-label="Open workbench"
+              aria-expanded={workbenchOpen}
+              onClick={() => setWorkbenchOpen((value) => !value)}
+            >
+              <PanelRightOpenIcon />
+            </Button>
             <Button
               type="button"
               variant="ghost"
@@ -659,7 +759,7 @@ export function ChatScreen({
             defaultModel={session.defaultModel}
             folderLabel={folderLabel}
             branch={branch}
-            contextRefreshKey={`${session.threadId}:${messages.length}:${sending ? 1 : 0}`}
+            contextRefreshKey={`${session.threadId}:${messages.length}:${session.checkpoints.length}:${sending ? 1 : 0}`}
             sending={sending}
             showModelPicker={showPicker}
             optionsDisabled={optionsDisabled}
@@ -673,6 +773,8 @@ export function ChatScreen({
             onOpenFolder={onOpenFolder}
             onRemoveAttachment={onRemoveAttachment}
             onPasteImages={onPasteImages}
+            onCompactContext={onCompactContext}
+            compacting={compacting}
             aboveComposer={null}
           />
         </div>
@@ -730,6 +832,30 @@ export function ChatScreen({
           onReconnectProvider?.(providerId);
         }}
         onRefresh={onRefreshProviders}
+      />
+
+      <WorkbenchPanel
+        open={workbenchOpen}
+        session={session}
+        messages={messages}
+        sending={sending}
+        compacting={compacting}
+        onClose={() => setWorkbenchOpen(false)}
+        onFork={onForkThread}
+        onRewind={onRewindThread}
+        onCompact={onCompactContext}
+        onJump={jumpToMessage}
+      />
+
+      <CommandPalette
+        open={paletteOpen}
+        actions={paletteActions}
+        onClose={() => setPaletteOpen(false)}
+        onCommand={(name) => {
+          setPaletteOpen(false);
+          onDraftChange(`/${name} `);
+          requestAnimationFrame(() => focusComposer());
+        }}
       />
 
       <DiffViewer target={diffTarget} onClose={() => setDiffTarget(null)} />
