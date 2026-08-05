@@ -281,6 +281,7 @@ export default function App() {
   const currentTurnIdRef = useRef<string | null>(null);
   const turnStartedAtRef = useRef<number | null>(null);
   const notifiedApprovalIdsRef = useRef(new Set<string>());
+  const compactionInFlightRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const attachmentsRef = useRef(attachments);
@@ -442,6 +443,80 @@ export default function App() {
     window.setTimeout(() => attempt(4), 0);
   }, []);
 
+  const maybeAutoCompact = useCallback(() => {
+    const targetSessionId = sessionIdRef.current;
+    if (!targetSessionId || compactionInFlightRef.current || sendingRef.current) {
+      return;
+    }
+
+    const attempt = (remaining: number) => {
+      if (
+        targetSessionId !== sessionIdRef.current ||
+        compactionInFlightRef.current ||
+        sendingRef.current
+      ) {
+        return;
+      }
+
+      void backend
+        .contextUsage()
+        .then((usage) => {
+          if (
+            targetSessionId !== sessionIdRef.current ||
+            compactionInFlightRef.current ||
+            sendingRef.current
+          ) {
+            return;
+          }
+          if (!usage.shouldAutoCompact) return;
+
+          compactionInFlightRef.current = true;
+          setCompacting(true);
+          void backend
+            .compactContext()
+            .then(async () => {
+              try {
+                const info = await backend.sessionInfo();
+                if (info && info.sessionId === sessionIdRef.current) {
+                  setSession((current) =>
+                    current
+                      ? { ...current, checkpoints: info.checkpoints }
+                      : current
+                  );
+                }
+              } catch {
+                /* checkpoint metadata refresh is best-effort */
+              }
+              toast.add({
+                type: "success",
+                title: "Context compacted automatically",
+                description: `A checkpoint was kept at ${usage.autoCompactThresholdPercent}% context usage.`,
+              });
+            })
+            .catch((err) => {
+              toast.add({
+                type: "warning",
+                title: "Automatic compaction paused",
+                description: formatInvokeError(err),
+              });
+            })
+            .finally(() => {
+              compactionInFlightRef.current = false;
+              setCompacting(false);
+            });
+        })
+        .catch(() => {
+          // `done` arrives just before Rust releases the turn slot. Retry the
+          // read briefly instead of treating that expected race as a failure.
+          if (remaining > 0) {
+            window.setTimeout(() => attempt(remaining - 1), 60);
+          }
+        });
+    };
+
+    window.setTimeout(() => attempt(6), 0);
+  }, []);
+
   const applyChatEventNow = useCallback((event: ChatEvent) => {
     const prevSending = sendingRef.current;
     const { state, effects } = reduceChatEvent(
@@ -515,13 +590,14 @@ export default function App() {
       turnStartedAtRef.current = null;
       notifiedApprovalIdsRef.current.clear();
       refreshCheckpointMetadata();
+      maybeAutoCompact();
     }
 
     if (event.kind === "error" || event.kind === "cancelled") {
       turnStartedAtRef.current = null;
       notifiedApprovalIdsRef.current.clear();
     }
-  }, [refreshCheckpointMetadata]);
+  }, [maybeAutoCompact, refreshCheckpointMetadata]);
 
   const flushDeltaQueue = useCallback(
     (drainAll = false) => {
@@ -978,7 +1054,8 @@ export default function App() {
   }
 
   async function onCompactContext() {
-    if (sendingRef.current || compacting) return;
+    if (sendingRef.current || compacting || compactionInFlightRef.current) return;
+    compactionInFlightRef.current = true;
     setCompacting(true);
     try {
       await backend.compactContext();
@@ -1000,6 +1077,7 @@ export default function App() {
         description: formatInvokeError(err),
       });
     } finally {
+      compactionInFlightRef.current = false;
       setCompacting(false);
     }
   }
@@ -1193,7 +1271,9 @@ export default function App() {
         a.status === "done" &&
         (Boolean(a.content?.trim()) || (a.kind === "image" && Boolean(a.dataBase64)))
     );
-    if ((!text && !hasOk) || sending) return;
+    if ((!text && !hasOk) || sending || compacting || compactionInFlightRef.current) {
+      return;
+    }
     const chips: UserAttachmentChip[] = pending
       .filter((a) => a.status === "done")
       .map((a) => ({ name: a.name, kind: a.kind }));
@@ -1216,6 +1296,7 @@ export default function App() {
     pending: PreparedAttachment[],
     { restoreDraftOnFailure }: { restoreDraftOnFailure: boolean }
   ) {
+    if (compactionInFlightRef.current) return;
     // Stay busy until an authoritative done/cancelled/error chat-event arrives.
     setSending(true);
     sendingRef.current = true;

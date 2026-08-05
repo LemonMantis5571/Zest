@@ -183,7 +183,8 @@ export function Composer({
       (Boolean(a.content?.trim()) ||
         (a.kind === "image" && Boolean(a.dataBase64)))
   );
-  const canSend = !sending && (value.trim().length > 0 || hasOkAttachment);
+  const canSend =
+    !sending && !compacting && (value.trim().length > 0 || hasOkAttachment);
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-3 pt-20">
@@ -359,7 +360,7 @@ export function Composer({
                   effort={effort}
                   models={models}
                   defaultModel={defaultModel}
-                  disabled={sending || optionsDisabled}
+                  disabled={sending || compacting || optionsDisabled}
                   onModelChange={onModelChange}
                   onEffortChange={onEffortChange}
                 />
@@ -423,7 +424,7 @@ export function Composer({
           <div className="flex items-center gap-1">
             <ApprovalModePicker
               mode={approvalMode}
-              disabled={optionsDisabled}
+              disabled={optionsDisabled || compacting}
               onModeChange={onApprovalModeChange}
             />
             <ContextUsageButton
