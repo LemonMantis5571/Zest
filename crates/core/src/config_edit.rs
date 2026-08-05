@@ -108,8 +108,8 @@ mod tests {
             &OpenAiProviderInput {
                 id: "deepseek".into(),
                 base_url: "https://api.deepseek.com/".into(),
-                model: "deepseek-chat".into(),
-                models: vec!["deepseek-chat".into(), "deepseek-reasoner".into()],
+                model: "deepseek-v4-flash".into(),
+                models: vec!["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
                 credential: "deepseek".into(),
             },
         )
