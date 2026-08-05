@@ -10,8 +10,9 @@ mod session;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -28,11 +29,11 @@ use zest_core::{
     load_custom_system, load_project_docs, new_id, probe, save_custom_system,
     start_login as core_start_login, truncate_chars, uses_gateway_auth, ApprovalDecision,
     ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts, Config,
-    GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority, PersistWorker, ProfileStats,
-    ProjectSessionState, ProviderConfig, ProviderRegistry, ProviderSlot, RuntimeBuilder, SkillSet,
-    SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError,
-    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION,
+    ExternalAgentMode, ExternalWorkspace, GatewayState, HarnessError, Ledger, LoginProcess,
+    PersistPriority, PersistWorker, ProfileStats, ProjectSessionState, ProviderConfig,
+    ProviderRegistry, ProviderSlot, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
+    StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError, ThreadStore, ThreadSummary,
+    ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -170,6 +171,9 @@ struct AppState {
     /// Mode + session grants. Outlives any one project so switching folders
     /// does not silently reset the user's chosen permission level.
     policy: Arc<Mutex<ApprovalPolicy>>,
+    /// Serialize comment-preserving config read-modify-write operations made
+    /// by Settings so two quick preset changes cannot overwrite each other.
+    config_edit: Mutex<()>,
     /// In-memory summaries keep the sidebar from reparsing every full thread
     /// JSON file after each navigation or completed turn. File metadata is the
     /// invalidation signal, so changes made by another process are still seen.
@@ -278,6 +282,43 @@ struct ProviderView {
     configured: bool,
     default_model: String,
     models: Vec<ModelCapability>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ExternalAgentView.ts", rename_all = "camelCase")
+)]
+struct ExternalAgentView {
+    id: String,
+    label: String,
+    scope: String,
+    mode: String,
+    workspace: String,
+    status_label: String,
+    detail: String,
+    configured: bool,
+    /// Presets can be enabled or removed from Settings. Other entries remain
+    /// visible as read-only rows so manual configuration is discoverable.
+    preset: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "ExternalAgentCheckView.ts",
+        rename_all = "camelCase"
+    )
+)]
+struct ExternalAgentCheckView {
+    available: bool,
+    detail: String,
 }
 
 fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView {
@@ -699,6 +740,23 @@ fn load_workspace_config(state: &AppState) -> Config {
     }
 }
 
+fn editable_config_path(state: &AppState) -> Result<PathBuf, String> {
+    let root = resolve_workspace_root(state)?;
+    if root.join(zest_core::config::CONFIG_FILE).is_file() {
+        return Ok(root.join(zest_core::config::CONFIG_FILE));
+    }
+    zest_core::ensure_user_config()
+        .map_err(|e| e.to_string())?
+        .or_else(zest_core::user_config_path)
+        .ok_or_else(|| "could not locate the user config directory".to_string())
+}
+
+fn clear_workspace_config_cache(state: &AppState) {
+    if let Ok(mut cached) = state.workspace_config.lock() {
+        *cached = None;
+    }
+}
+
 /// A project config is an explicit boundary: it replaces the user config and
 /// must not silently borrow a different provider table. A folder with no
 /// config is different — it is the common case for an existing Zest install
@@ -770,6 +828,221 @@ fn refresh_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     list_providers(state)
 }
 
+const EXTERNAL_AGENT_PRESETS: &[(&str, &str)] =
+    &[("claude", "Claude Code"), ("gemini", "Gemini CLI")];
+
+#[tauri::command]
+fn list_external_agents(state: State<'_, AppState>) -> Vec<ExternalAgentView> {
+    let _read_guard = state.config_edit.lock().ok();
+    let config = load_workspace_config(&state);
+    let scope = external_agent_scope(&state);
+    let mut rows = EXTERNAL_AGENT_PRESETS
+        .iter()
+        .map(|(id, label)| {
+            let configured = config.agents.get(*id);
+            let editable = configured.is_none()
+                || configured.is_some_and(|agent| external_agent_matches_preset(id, agent));
+            external_agent_view(id, label, &scope, configured, editable)
+        })
+        .collect::<Vec<_>>();
+
+    for id in config.agents.keys() {
+        if EXTERNAL_AGENT_PRESETS
+            .iter()
+            .any(|(preset_id, _)| preset_id == id)
+        {
+            continue;
+        }
+        rows.push(external_agent_view(
+            id,
+            &title_case_id(id),
+            &scope,
+            config.agents.get(id),
+            false,
+        ));
+    }
+    rows
+}
+
+fn external_agent_view(
+    id: &str,
+    label: &str,
+    scope: &str,
+    config: Option<&zest_core::ExternalAgentConfig>,
+    preset: bool,
+) -> ExternalAgentView {
+    let (default_mode, default_workspace) = zest_core::config_edit::external_agent_preset(id)
+        .map(|input| (input.mode, input.workspace))
+        .unwrap_or((ExternalAgentMode::Headless, ExternalWorkspace::Isolated));
+    let mode = config.map(|agent| agent.mode).unwrap_or(default_mode);
+    let workspace = config
+        .map(|agent| agent.workspace)
+        .unwrap_or(default_workspace);
+    let configured = config.is_some();
+
+    let (status_label, detail) = if !preset {
+        (
+            "Configured manually".into(),
+            "Manage this worker in zest.toml.".into(),
+        )
+    } else if configured {
+        (
+            "Enabled".into(),
+            format!("Uses your {label} CLI session. Check the CLI before delegating."),
+        )
+    } else {
+        (
+            "Not enabled".into(),
+            format!("Enable to add {label} to delegated work."),
+        )
+    };
+
+    ExternalAgentView {
+        id: id.into(),
+        label: label.into(),
+        scope: scope.into(),
+        mode: external_agent_mode_label(mode).into(),
+        workspace: external_agent_workspace_label(workspace).into(),
+        status_label,
+        detail,
+        configured,
+        preset,
+    }
+}
+
+fn external_agent_scope(state: &AppState) -> String {
+    resolve_workspace_root(state)
+        .ok()
+        .map(|root| {
+            if root.join(zest_core::config::CONFIG_FILE).is_file() {
+                "Project zest.toml".to_string()
+            } else {
+                "User zest.toml".to_string()
+            }
+        })
+        .unwrap_or_else(|| "Active zest.toml".to_string())
+}
+
+fn external_agent_mode_label(mode: ExternalAgentMode) -> &'static str {
+    match mode {
+        ExternalAgentMode::Headless => "Headless CLI",
+        ExternalAgentMode::Acp => "ACP",
+    }
+}
+
+fn external_agent_workspace_label(workspace: ExternalWorkspace) -> &'static str {
+    match workspace {
+        ExternalWorkspace::Isolated => "Isolated worktree",
+        ExternalWorkspace::Current => "Current folder",
+    }
+}
+
+fn title_case_id(id: &str) -> String {
+    id.split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[tauri::command]
+fn set_external_agent(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    let id = id.trim();
+    let Some(preset) = zest_core::config_edit::external_agent_preset(id) else {
+        return Err(
+            "Only the built-in Claude Code and Gemini CLI presets can be changed here.".into(),
+        );
+    };
+    let _edit_guard = state
+        .config_edit
+        .lock()
+        .map_err(|_| "settings are busy; try again".to_string())?;
+    let current = load_workspace_config(&state);
+    if let Some(existing) = current.agents.get(id) {
+        if !external_agent_matches_preset(id, existing) {
+            return Err(format!(
+                "{id} is customized in zest.toml; edit or remove that entry there first"
+            ));
+        }
+    }
+    let path = editable_config_path(&state)?;
+    if enabled {
+        zest_core::config_edit::upsert_external_agent(&path, &preset)?;
+    } else {
+        zest_core::config_edit::remove_external_agent(&path, id)?;
+    }
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
+    let Some(preset) = zest_core::config_edit::external_agent_preset(id) else {
+        return false;
+    };
+    agent.mode == preset.mode
+        && agent.command == preset.command
+        && agent.args == preset.args
+        && agent.model == preset.model
+        && agent.workspace == preset.workspace
+        && agent.timeout_secs == preset.timeout_secs
+}
+
+/// Check only whether the configured CLI can start. This intentionally does
+/// not run a delegated task or attempt to inspect the vendor's auth state.
+/// Authentication belongs to the vendor CLI and is exercised when the user
+/// approves a real delegation.
+#[tauri::command]
+async fn check_external_agent(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ExternalAgentCheckView, String> {
+    let config = load_workspace_config(&state);
+    let agent = config
+        .agents
+        .get(id.trim())
+        .ok_or_else(|| "Enable this worker before checking its CLI.".to_string())?;
+    let root = resolve_workspace_root(&state)?;
+    let mut command = Command::new(&agent.command);
+    command
+        .arg("--version")
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    scrub_external_environment(&mut command);
+
+    let detail = match tokio::time::timeout(Duration::from_secs(8), command.output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            "CLI is available. Sign in with it before delegating.".to_string()
+        }
+        Ok(Ok(_)) => "CLI was found, but its version check failed.".to_string(),
+        Ok(Err(_)) => "CLI not found on PATH.".to_string(),
+        Err(_) => "CLI did not respond to a version check.".to_string(),
+    };
+
+    Ok(ExternalAgentCheckView {
+        available: detail.starts_with("CLI is available"),
+        detail,
+    })
+}
+
+fn scrub_external_environment(command: &mut Command) {
+    for (name, _) in std::env::vars() {
+        let upper = name.to_ascii_uppercase();
+        if ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
+            .iter()
+            .any(|marker| upper.contains(marker))
+        {
+            command.env_remove(name);
+        }
+    }
+}
+
 #[tauri::command]
 fn set_provider_key(state: State<'_, AppState>, id: String, key: String) -> Result<(), String> {
     let config = load_workspace_config(&state);
@@ -820,15 +1093,11 @@ fn configure_api_provider(
     if key.trim().is_empty() {
         return Err("API key is required".into());
     }
-    let root = resolve_workspace_root(&state)?;
-    let path = if root.join(zest_core::config::CONFIG_FILE).is_file() {
-        root.join(zest_core::config::CONFIG_FILE)
-    } else {
-        zest_core::ensure_user_config()
-            .map_err(|e| e.to_string())?
-            .or_else(zest_core::user_config_path)
-            .ok_or_else(|| "could not locate the user config directory".to_string())?
-    };
+    let _edit_guard = state
+        .config_edit
+        .lock()
+        .map_err(|_| "settings are busy; try again".to_string())?;
+    let path = editable_config_path(&state)?;
     zest_core::config_edit::add_openai_provider(
         &path,
         &zest_core::config_edit::OpenAiProviderInput {
@@ -840,9 +1109,7 @@ fn configure_api_provider(
         },
     )?;
     zest_core::credentials::set(credential.trim(), key.trim())?;
-    if let Ok(mut cached) = state.workspace_config.lock() {
-        *cached = None;
-    }
+    clear_workspace_config_cache(&state);
     Ok(())
 }
 
@@ -3727,6 +3994,25 @@ api_key_env = "ANTHROPIC_API_KEY"
         assert_eq!(local_gateway_url(&config, "anthropic"), None);
         assert_eq!(local_gateway_url(&config, "missing"), None);
     }
+
+    #[test]
+    fn customized_external_worker_is_not_treated_as_a_preset() {
+        let config = Config::parse(
+            r#"
+[agents.claude]
+mode = "headless"
+command = "claude"
+args = ["--print", "custom-prompt-position"]
+workspace = "isolated"
+"#,
+        )
+        .unwrap();
+
+        assert!(!external_agent_matches_preset(
+            "claude",
+            &config.agents["claude"]
+        ));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3751,11 +4037,15 @@ pub fn run() {
             workspace_root: Mutex::new(load_persisted_workspace()),
             workspace_config: Mutex::new(None),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
+            config_edit: Mutex::new(()),
             chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
         })
         .invoke_handler(tauri::generate_handler![
             list_providers,
             refresh_providers,
+            list_external_agents,
+            set_external_agent,
+            check_external_agent,
             set_provider_key,
             delete_provider_key,
             provider_key_present,
@@ -3819,6 +4109,8 @@ mod export_bindings {
         ChatEvent::export_all().expect("export ChatEvent bindings");
         SessionInfo::export_all().expect("export SessionInfo bindings");
         ProviderView::export_all().expect("export ProviderView bindings");
+        ExternalAgentView::export_all().expect("export ExternalAgentView bindings");
+        ExternalAgentCheckView::export_all().expect("export ExternalAgentCheckView bindings");
         ModelCapability::export_all().expect("export ModelCapability bindings");
         WorkspaceReview::export_all().expect("export WorkspaceReview bindings");
         ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");

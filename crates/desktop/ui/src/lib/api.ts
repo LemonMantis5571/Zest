@@ -10,6 +10,8 @@ import type {
   AttachmentInput,
   ChatEvent,
   ContextUsage,
+  ExternalAgentCheck,
+  ExternalAgentRow,
   LoginStarted,
   LoginStatus,
   PreparedAttachment,
@@ -26,6 +28,18 @@ import type {
 
 export function listProviders() {
   return invoke<ProviderRow[]>("list_providers");
+}
+
+export function listExternalAgents() {
+  return invoke<ExternalAgentRow[]>("list_external_agents");
+}
+
+export function setExternalAgent(id: string, enabled: boolean) {
+  return invoke<void>("set_external_agent", { id, enabled });
+}
+
+export function checkExternalAgent(id: string) {
+  return invoke<ExternalAgentCheck>("check_external_agent", { id });
 }
 
 export function setProviderKey(id: string, key: string) {
