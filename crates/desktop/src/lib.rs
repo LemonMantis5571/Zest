@@ -1806,6 +1806,126 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
     Ok(out)
 }
 
+/// Pick the provider that can serve a project chat.
+///
+/// A project `zest.toml` intentionally replaces the user config. That means
+/// the provider used by the current project may not exist in the project being
+/// opened. Keep the current provider when possible; otherwise follow the
+/// project's explicit default (or its only provider) instead of making an
+/// otherwise valid project impossible to open.
+fn select_project_provider(
+    config: &Config,
+    requested_provider: &str,
+    thread_provider: Option<&str>,
+) -> Result<String, String> {
+    if let Some(owner) = thread_provider {
+        if config.providers.contains_key(owner) {
+            return Ok(owner.to_string());
+        }
+        return Err(desktop_err(
+            "provider_unavailable",
+            format!(
+                "This conversation uses `{owner}`, but that provider is not configured for this project."
+            ),
+        ));
+    }
+
+    if config.providers.contains_key(requested_provider) {
+        return Ok(requested_provider.to_string());
+    }
+
+    if let Some(default) = config.default_target().and_then(|target| {
+        config
+            .providers
+            .contains_key(&target.provider)
+            .then_some(target.provider)
+    }) {
+        return Ok(default.to_string());
+    }
+
+    if config.providers.len() == 1 {
+        return config.providers.keys().next().cloned().ok_or_else(|| {
+            desktop_err(
+                "provider_unavailable",
+                "This project has no provider configured.",
+            )
+        });
+    }
+
+    if config.providers.is_empty() {
+        return Err(desktop_err(
+            "provider_unavailable",
+            "This project has no provider configured. Add one to zest.toml before opening a chat.",
+        ));
+    }
+
+    Err(desktop_err(
+        "provider_unavailable",
+        "The selected provider is not configured for this project, and the project has no default provider.",
+    ))
+}
+
+#[cfg(test)]
+mod project_provider_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_requested_provider_when_project_declares_it() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-terra"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            select_project_provider(&config, "codex", None).unwrap(),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_project_default_when_requested_provider_is_missing() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-terra"
+
+[routing]
+default = { provider = "codex" }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            select_project_provider(&config, "deepseek", None).unwrap(),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn does_not_reopen_a_thread_with_a_different_provider() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-terra"
+"#,
+        )
+        .unwrap();
+
+        let error = select_project_provider(&config, "codex", Some("deepseek"))
+            .expect_err("a thread owner is a hard boundary");
+        assert!(error.contains("not configured for this project"));
+    }
+}
+
 #[cfg(test)]
 mod chat_summary_tests {
     use super::*;
@@ -1861,24 +1981,33 @@ async fn open_project_chat(
 ) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
 
-    let provider_id = state
+    let requested_provider = state
         .sessions
         .session_info_snapshot(|s| s.provider_id.clone())
         .map_err(map_session_err)?
         .or_else(last_provider)
         .ok_or_else(|| desktop_err("invalid", "no provider — connect one first"))?;
 
-    let root = set_workspace_root(&state, PathBuf::from(root.trim()))?;
+    // Validate the target before changing the active workspace. In particular,
+    // a project-local zest.toml may intentionally omit the provider used by the
+    // current chat.
+    let previous_root = resolve_workspace_root(&state).ok();
+    let root = canonicalize_dir(PathBuf::from(root.trim()))?;
+    let config = config_for_session(&state, &root)?;
+    let thread_id = thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let thread_provider = if let Some(tid) = thread_id {
+        let store = open_store(&root)?;
+        store.load(tid).map_err(|e| e.to_string())?.provider_id
+    } else {
+        None
+    };
+    let provider_id =
+        select_project_provider(&config, &requested_provider, thread_provider.as_deref())?;
 
-    let had_session = state
-        .sessions
-        .session_info_snapshot(|_| ())
-        .map_err(map_session_err)?
-        .is_some();
-    if had_session {
-        state.sessions.end_session().map_err(map_session_err)?;
-        state.approvals.clear();
-    }
+    let root = set_workspace_root(&state, root)?;
 
     if new_thread.unwrap_or(false) {
         let store = open_store(&root)?;
@@ -1886,11 +2015,7 @@ async fn open_project_chat(
             .create_for_provider(&provider_id)
             .map_err(|e| e.to_string())?;
         persist_provider_thread(&root, &provider_id, &thread.id)?;
-    } else if let Some(tid) = thread_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    } else if let Some(tid) = thread_id {
         // Pin sticky thread before start_session resolves it.
         let store = open_store(&root)?;
         let _ = store
@@ -1899,7 +2024,28 @@ async fn open_project_chat(
         persist_provider_thread(&root, &provider_id, tid)?;
     }
 
-    start_session(state, provider_id, None, None).await
+    // `set_session` replaces an idle session, so keep the old one alive until
+    // the new runtime has been built. A failed project switch must not leave
+    // the UI pointing at a session that the backend already discarded.
+    let result = start_session(state.clone(), provider_id.clone(), None, None).await;
+    if result.is_err() {
+        if let Some(previous_root) = previous_root {
+            let _ = set_workspace_root(&state, previous_root);
+        }
+    }
+
+    let mut info = result?;
+    if provider_id != requested_provider {
+        let switched = format!(
+            "{requested_provider} is not configured for this project, so Zest opened it with {}.",
+            info.label
+        );
+        info.warning = Some(match info.warning.take() {
+            Some(existing) => format!("{switched} {existing}"),
+            None => switched,
+        });
+    }
+    Ok(info)
 }
 
 #[tauri::command]

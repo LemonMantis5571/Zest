@@ -182,6 +182,15 @@ function formatInvokeError(err: unknown): string {
     return "The selected model is unavailable for this account. Choose another model.";
   }
   if (
+    raw.includes("not configured for this project") ||
+    raw.includes("does not include the selected provider")
+  ) {
+    return "This project uses its own provider settings. Choose a provider configured for this project, or add it to zest.toml.";
+  }
+  if (raw.includes("no provider configured") || raw.includes("unknown provider")) {
+    return "This project has no usable provider configured. Add one in Settings or zest.toml, then try again.";
+  }
+  if (
     raw.includes("not configured") ||
     raw.includes("configure") ||
     raw.includes("set an api key") ||
