@@ -15,6 +15,7 @@ import {
   restoreApprovalCard,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
+import { rawInvokeError, shouldOfferProviderReconnect } from "@/lib/invokeErrors";
 import { isLongTurn } from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
 import { revealCount } from "@/lib/reveal";
@@ -172,25 +173,52 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
 }
 
 function formatInvokeError(err: unknown): string {
-  const raw = String(err);
-  try {
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      const parsed = JSON.parse(raw.slice(start, end + 1)) as {
-        message?: string;
-        code?: string;
-      };
-      if (parsed.message) {
-        return parsed.code === "busy"
-          ? `${parsed.message} — cancel the current turn first`
-          : parsed.message;
-      }
-    }
-  } catch {
-    /* use raw */
+  const raw = rawInvokeError(err).toLowerCase();
+  if (raw.includes("busy") || raw.includes("already in progress")) {
+    return "A turn is already in progress. Stop it before trying again.";
   }
-  return raw;
+  if (raw.includes("model") && raw.includes("not supported")) {
+    return "The selected model is unavailable for this account. Choose another model.";
+  }
+  if (
+    raw.includes("not configured") ||
+    raw.includes("configure") ||
+    raw.includes("set an api key") ||
+    raw.includes("add an api key")
+  ) {
+    return "Configure this provider in Settings, then try again.";
+  }
+  if (
+    raw.includes("rate limit") ||
+    raw.includes("too many requests") ||
+    raw.includes("overloaded") ||
+    raw.includes("429")
+  ) {
+    return "This provider is busy or rate-limited. Wait a moment and try again.";
+  }
+  if (
+    raw.includes("could not reach") ||
+    raw.includes("connection refused") ||
+    raw.includes("unreachable")
+  ) {
+    return "Could not reach the provider. Check your connection and try again.";
+  }
+  if (
+    raw.includes("auth") ||
+    raw.includes("sign in") ||
+    raw.includes("connect again") ||
+    raw.includes("api key") ||
+    raw.includes("credential")
+  ) {
+    return "This provider needs to be connected before continuing.";
+  }
+  if (raw.includes("context") || raw.includes("token limit") || raw.includes("too long")) {
+    return "This conversation is too long for the selected model. Compact it and try again.";
+  }
+  if (raw.includes("permission") || raw.includes("access denied")) {
+    return "Zest does not have permission to complete that action.";
+  }
+  return "Something went wrong. Try again.";
 }
 
 /**
@@ -203,16 +231,11 @@ function formatInvokeError(err: unknown): string {
  * the picker at all.
  */
 function isModelUnsupported(err: unknown): boolean {
-  const message = formatInvokeError(err).toLowerCase();
+  const message = rawInvokeError(err).toLowerCase();
   return (
     message.includes("is not supported when using") ||
     (message.includes("model") && message.includes("not supported"))
   );
-}
-
-function shouldOfferProviderReconnect(err: unknown): boolean {
-  const message = formatInvokeError(err).toLowerCase();
-  return message.includes("needs connect again") || message.includes("auth_unavailable");
 }
 
 const backend = getBackend();
@@ -333,27 +356,21 @@ export default function App() {
         markProviderVerified(row.id);
         setSessionWarning({
           providerId: row.id,
-          message:
-            `Your ${row.label} sign-in worked, but this account cannot use the ` +
-            `model Zest asked for. Pick another one from the model menu below.` +
-            `\n\n${formatInvokeError(err)}`,
+          message: "You're signed in, but this account cannot use that model. Choose another model below.",
           offerReconnect: false,
         });
         setWaitingHint("Opening chat…");
         try {
           await enterChatRef.current(row.id);
-        } catch (chatErr) {
-          setPickerError(formatInvokeError(chatErr));
+        } catch {
+          setPickerError("Could not open this provider. Try again.");
           setScreen("picker");
         }
         return;
       }
       markProviderVerifyFailed(row.id);
-      setWaitingHint("Signed in, but the provider still refused");
-      setWaitingError(
-        `${row.label} accepted the sign-in but cannot serve a request yet. ` +
-          `Try connecting again.\n\n${String(err)}`
-      );
+      setWaitingHint("Provider unavailable");
+      setWaitingError(`Could not connect to ${row.label}. Try connecting again.`);
       return;
     }
     markProviderVerified(row.id);
@@ -362,7 +379,7 @@ export default function App() {
       await enterChatRef.current(row.id);
     } catch (err) {
       markProviderVerifyFailed(row.id);
-      setPickerError(String(err));
+      setPickerError(formatInvokeError(err));
       setScreen("picker");
     }
   }, []);
@@ -396,7 +413,7 @@ export default function App() {
           setWaitingHint("Sign-in stopped");
           setWaitingError(
             login.detail ??
-              "The browser sign-in stopped before Zest received the credentials."
+              "The sign-in did not finish. Try again."
           );
           return;
         }
@@ -407,7 +424,7 @@ export default function App() {
       if (ticks >= POLL_MAX_TICKS) {
         stopPolling();
         setWaitingHint("Still waiting");
-        setWaitingError("Still waiting — complete sign-in in the browser, or Cancel.");
+        setWaitingError("Complete sign-in in your browser or cancel.");
       }
     }, POLL_MS);
   }, [finishVerifiedLogin, loadProviders, stopPolling]);
@@ -489,8 +506,8 @@ export default function App() {
               }
               toast.add({
                 type: "success",
-                title: "Context compacted automatically",
-                description: `A checkpoint was kept at ${usage.autoCompactThresholdPercent}% context usage.`,
+                title: "Conversation compacted automatically",
+                description: "You can restore the conversation from before compaction.",
               });
             })
             .catch((err) => {
@@ -562,7 +579,7 @@ export default function App() {
     if (effects.warningToast) {
       toast.add({
         type: "warning",
-        title: "History not saved",
+        title: "Chat history not saved",
         description: effects.warningToast,
       });
     }
@@ -702,7 +719,7 @@ export default function App() {
     if (info.warning) {
       toast.add({
         type: "warning",
-        title: "Thread recovery",
+        title: "Conversation updated",
         description: info.warning,
       });
     }
@@ -821,7 +838,7 @@ export default function App() {
             measureStartup("session-ready", "boot-effect");
             return;
           } catch (err) {
-            setPickerError(String(err));
+            setPickerError(formatInvokeError(err));
             setScreen("picker");
             markStartup("picker-error");
             measureStartup("picker-error", "boot-effect");
@@ -839,7 +856,7 @@ export default function App() {
         markStartup("picker-ready");
         measureStartup("picker-ready", "boot-effect");
       } catch (err) {
-        setPickerError(String(err));
+        setPickerError(formatInvokeError(err));
         setScreen("picker");
         markStartup("picker-error");
         measureStartup("picker-error", "boot-effect");
@@ -911,7 +928,7 @@ export default function App() {
       await enterChat(row.id);
     } catch (err) {
       setScreen("picker");
-      setPickerError(String(err));
+      setPickerError(formatInvokeError(err));
     } finally {
       setContinuing(false);
     }
@@ -928,7 +945,7 @@ export default function App() {
       setScreen("waiting");
       startWaitingPoll();
     } catch (err) {
-      setPickerError(String(err));
+      setPickerError(formatInvokeError(err));
     }
   }
 
@@ -953,11 +970,11 @@ export default function App() {
     try {
       await enterChat(providerId);
     } catch (err) {
-      setPickerError(String(err));
+      setPickerError(formatInvokeError(err));
       toast.add({
         type: "error",
         title: "Could not switch provider",
-        description: String(err),
+        description: formatInvokeError(err),
       });
       throw err;
     }
@@ -980,7 +997,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not start sign-in",
-        description: String(err),
+        description: formatInvokeError(err),
       });
     }
   }
@@ -996,7 +1013,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not start new chat",
-        description: String(err),
+        description: formatInvokeError(err),
       });
     }
   }
@@ -1016,7 +1033,7 @@ export default function App() {
       toast.add({
         type: "success",
         title: "Fork created",
-        description: "You are now working in a separate conversation.",
+        description: "A new conversation was created from this one.",
       });
     } catch (err) {
       toast.add({
@@ -1042,7 +1059,7 @@ export default function App() {
       toast.add({
         type: "success",
         title: "Conversation rewound",
-        description: "Workspace files were left unchanged.",
+        description: "Conversation restored. Your files were not changed.",
       });
     } catch (err) {
       toast.add({
@@ -1067,8 +1084,8 @@ export default function App() {
       }
       toast.add({
         type: "success",
-        title: "Context compacted",
-        description: "A checkpoint was kept so you can rewind if needed.",
+        title: "Conversation compacted",
+        description: "You can restore the conversation from before compaction.",
       });
     } catch (err) {
       toast.add({
@@ -1094,7 +1111,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not open thread",
-        description: String(err),
+        description: formatInvokeError(err),
       });
     }
   }
@@ -1122,7 +1139,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not delete chat",
-        description: String(err),
+        description: formatInvokeError(err),
       });
       throw err;
     }
@@ -1371,7 +1388,7 @@ export default function App() {
         toast.add({
           type: "error",
           title: "Could not leave Plan mode",
-          description: String(err),
+          description: formatInvokeError(err),
         });
         return;
       }
@@ -1416,7 +1433,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: allow ? "Could not allow tool" : "Could not deny tool",
-        description: String(err),
+        description: formatInvokeError(err),
       });
       throw err;
     }
@@ -1438,7 +1455,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not change mode",
-        description: String(err),
+        description: formatInvokeError(err),
       });
     }
   }
@@ -1467,7 +1484,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not update model",
-        description: String(err),
+        description: formatInvokeError(err),
       });
     } finally {
       optionsUpdatingRef.current = false;
@@ -1498,7 +1515,7 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not update effort",
-        description: String(err),
+        description: formatInvokeError(err),
       });
     } finally {
       optionsUpdatingRef.current = false;
@@ -1602,7 +1619,7 @@ export default function App() {
               try {
                 await enterChat(id);
               } catch (err) {
-                setPickerError(String(err));
+                setPickerError(formatInvokeError(err));
                 setScreen("picker");
               }
             }}

@@ -21,10 +21,10 @@ type Props = {
 
 function statusLabel(row: ProviderRow): string {
   if (row.statusKind === "ready" && recentVerifyFailed(row.id)) {
-    return "Needs Connect again";
+    return "Reconnect required";
   }
   if (row.statusKind === "ready") return row.method || "Ready";
-  if (row.statusKind === "unknown") return row.detail || "Unknown";
+  if (row.statusKind === "unknown") return "Connection status unavailable";
   return row.detail || "Not ready";
 }
 
@@ -78,7 +78,7 @@ export function ProviderSwitchSheet({
           <div>
             <div className="text-sm font-semibold">Change provider</div>
             <div className="text-[11px] text-muted-foreground">
-              Switch without leaving this chat shell
+              Change providers without leaving this conversation
             </div>
           </div>
           <Button
@@ -171,7 +171,7 @@ export function ProviderSwitchSheet({
                   setKeyProviderId(null);
                   onSelect(keyProviderId);
                 })
-                .catch((err) => setKeyError(String(err)))
+                .catch(() => setKeyError("Could not save the API key. Try again."))
                 .finally(() => setSavingKey(false));
             }}
           >
@@ -179,7 +179,7 @@ export function ProviderSwitchSheet({
               {providers.find((row) => row.id === keyProviderId)?.label ?? "Provider"} API key
             </div>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              Stored securely in the operating system credential manager.
+              Your key is stored securely by your operating system.
             </p>
             <div className="mt-2 flex gap-1.5">
               <input

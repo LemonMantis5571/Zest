@@ -36,6 +36,29 @@ let activeAssistant = null;
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
 
+function userFacingError(error) {
+  const raw = String(error).toLowerCase();
+  if (raw.includes("already generating") || raw.includes("already in progress")) {
+    return "A turn is already in progress. Stop it before trying again.";
+  }
+  if (raw.includes("model") && raw.includes("not supported")) {
+    return "The selected model is unavailable for this account. Choose another model.";
+  }
+  if (
+    raw.includes("auth") ||
+    raw.includes("sign in") ||
+    raw.includes("connect again") ||
+    raw.includes("api key") ||
+    raw.includes("credential")
+  ) {
+    return "This provider needs to be connected before continuing.";
+  }
+  if (raw.includes("context") || raw.includes("token limit") || raw.includes("too long")) {
+    return "This conversation is too long for the selected model. Compact it and try again.";
+  }
+  return "Something went wrong. Try again.";
+}
+
 function showError(message) {
   if (!message) {
     errorEl.hidden = true;
@@ -128,11 +151,8 @@ function render() {
   updateActions();
 }
 
-function shortenUnknown(detail) {
-  if (detail.toLowerCase().includes("outside a readable file")) {
-    return "Installed — session stored outside a readable file";
-  }
-  return detail;
+function shortenUnknown(_detail) {
+  return "Connection status unavailable";
 }
 
 function escapeHtml(value) {
@@ -274,7 +294,7 @@ function handleChatEvent(payload) {
       el.classList.remove("streaming");
       const err = el.querySelector(".msg-error");
       err.hidden = false;
-      err.textContent = payload.message;
+      err.textContent = userFacingError(payload.message);
       activeAssistant = null;
       setSending(false);
       scrollTranscript();
@@ -306,7 +326,7 @@ async function goContinue() {
     await enterChat(info);
   } catch (err) {
     showScreen("picker");
-    showError(String(err));
+    showError(userFacingError(err));
     updateActions();
   }
 }
@@ -322,7 +342,7 @@ secondaryBtn.addEventListener("click", async () => {
     showScreen("waiting");
     startWaitingPoll();
   } catch (err) {
-    showError(String(err));
+    showError(userFacingError(err));
   }
 });
 
@@ -360,8 +380,8 @@ composer.addEventListener("submit", async (e) => {
   } catch (err) {
     // Error event usually already emitted; keep UI unlocked.
     setSending(false);
-    if (!String(err).includes("already generating")) {
-      handleChatEvent({ kind: "error", message: String(err) });
+    if (!String(err).toLowerCase().includes("already generating")) {
+      handleChatEvent({ kind: "error", message: userFacingError(err) });
     }
   }
 });
@@ -404,5 +424,5 @@ listen("chat-event", (event) => {
 });
 
 loadProviders().catch((err) => {
-  showError(String(err));
+  showError(userFacingError(err));
 });

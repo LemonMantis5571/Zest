@@ -120,7 +120,7 @@ export function WorkbenchPanel({
             Workbench
           </div>
           <div className="mt-0.5 text-[11px] text-muted-foreground">
-            Keep the work visible and recoverable.
+            Review your work and return to earlier points.
           </div>
         </div>
         <Button type="button" variant="ghost" size="icon-sm" title="Close workbench" onClick={onClose}>
@@ -194,7 +194,7 @@ export function WorkbenchPanel({
               </div>
               {tasks.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground">
-                  Tool calls and approvals will appear here while Zest works.
+                  Tool activity and approvals will appear here during a turn.
                 </div>
               ) : (
                 <div className="flex flex-col gap-1.5">
@@ -278,7 +278,7 @@ export function WorkbenchPanel({
             </div>
             {outline.length === 0 ? (
               <div className="rounded-xl border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground">
-                Your turns will form an outline here.
+                Your conversation outline will appear here.
               </div>
             ) : (
               <div className="flex flex-col gap-1">

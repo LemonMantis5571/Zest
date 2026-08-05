@@ -361,9 +361,9 @@ describe("reduceChatEvent characterization", () => {
       kind: "warning",
       session_id: "session-1",
       thread_id: "thread-1",
-      message: "history not saved: disk full",
+      message: "Chat history could not be saved.",
     });
-    assert.equal(effects.warningToast, "history not saved: disk full");
+    assert.equal(effects.warningToast, "Chat history could not be saved.");
   });
 
   it("cancelled ends sending and marks assistant", () => {

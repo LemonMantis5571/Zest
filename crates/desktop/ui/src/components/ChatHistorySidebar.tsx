@@ -158,8 +158,8 @@ export function ChatHistorySidebar({
       .then((list) => {
         if (!cancelled) setProjects(list);
       })
-      .catch((err) => {
-        if (!cancelled) setError(String(err));
+      .catch(() => {
+        if (!cancelled) setError("Could not load chat history. Try again.");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

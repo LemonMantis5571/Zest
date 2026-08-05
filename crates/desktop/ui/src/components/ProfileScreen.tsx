@@ -59,7 +59,7 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
     ]).then(([statsResult, usageResult, skillsResult]) => {
       if (!live) return;
       if (statsResult.status === "fulfilled") setStats(statsResult.value);
-      else setError(String(statsResult.reason));
+      else setError("Could not load profile activity. Try again.");
       if (usageResult.status === "fulfilled") setUsage(usageResult.value);
       if (skillsResult.status === "fulfilled") setSkillCount(skillsResult.value.length);
     });
