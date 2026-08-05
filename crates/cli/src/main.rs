@@ -233,6 +233,9 @@ async fn run_doctor_live() -> anyhow::Result<()> {
         StreamEvent::ApprovalNeeded { tool_name, .. } => {
             tool_error = Some(format!("unexpected approval for {tool_name}"));
         }
+        StreamEvent::ModelSubstituted { requested, served } => {
+            println!("\n\x1b[33m! served by {served}, not the requested {requested}\x1b[0m");
+        }
     };
 
     agent
@@ -408,6 +411,9 @@ async fn run_doctor_dual() -> anyhow::Result<()> {
         }
         StreamEvent::ApprovalNeeded { tool_name, .. } => {
             tool_error = Some(format!("unexpected approval for {tool_name}"));
+        }
+        StreamEvent::ModelSubstituted { requested, served } => {
+            println!("\n\x1b[33m! served by {served}, not the requested {requested}\x1b[0m");
         }
     };
 
@@ -739,6 +745,13 @@ impl Renderer {
                 tool_name, summary, ..
             } => {
                 println!("\n\x1b[33m? approve {tool_name}\x1b[0m \x1b[90m{summary}\x1b[0m");
+            }
+            StreamEvent::ModelSubstituted { requested, served } => {
+                if self.thinking_open {
+                    println!("\x1b[0m");
+                    self.thinking_open = false;
+                }
+                println!("\n\x1b[33m! served by {served}, not the requested {requested}\x1b[0m");
             }
         }
     }

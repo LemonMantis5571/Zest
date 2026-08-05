@@ -439,6 +439,7 @@ mod tests {
             },
             usage_available: true,
             limits,
+            served_model: None,
         }
     }
 
@@ -694,6 +695,7 @@ mod daily_tests {
             },
             usage_available: true,
             limits: None,
+            served_model: None,
         }
     }
 }

@@ -220,6 +220,18 @@ impl Agent {
                 }
             };
 
+            // Say so when the endpoint served something other than what was
+            // asked for. Only on disagreement: a notice on every turn would be
+            // noise, and this is the one fact no other surface can supply.
+            if let Some(served) = completion.served_model.as_deref() {
+                if !models_agree(&request.model, served) {
+                    on_event(StreamEvent::ModelSubstituted {
+                        requested: request.model.clone(),
+                        served: served.to_string(),
+                    });
+                }
+            }
+
             // Bill completed paid responses before a late cancel can discard the
             // staged wire history. Accounting must never abort a paid-for turn.
             if let Some(ledger) = &self.ledger {
@@ -612,6 +624,23 @@ impl ToolCallOutcome {
 }
 
 /// Short one-line preview for UI / CLI tool result markers.
+/// Whether a served model name is the one that was requested.
+///
+/// Deliberately loose. Providers routinely answer with a more specific name than
+/// the alias you asked for — `claude-opus-5` is served by `claude-opus-5-<date>`,
+/// and gateways append their own suffixes. Treating that as a substitution would
+/// fire a warning on every healthy turn, which would train people to ignore the
+/// one that matters. So one name containing the other counts as agreement, and
+/// only a genuinely different family is reported.
+fn models_agree(requested: &str, served: &str) -> bool {
+    let requested = requested.trim().to_ascii_lowercase();
+    let served = served.trim().to_ascii_lowercase();
+    if requested.is_empty() || served.is_empty() {
+        return true;
+    }
+    requested == served || served.starts_with(&requested) || requested.starts_with(&served)
+}
+
 fn summarize_tool_body(body: &str) -> String {
     const MAX: usize = 160;
     let flat: String = body
@@ -700,6 +729,7 @@ mod tests {
                 usage: Usage::default(),
                 usage_available: true,
                 limits: None,
+                served_model: None,
             })
         }
     }
@@ -797,6 +827,7 @@ mod tests {
                     usage: Usage::default(),
                     usage_available: true,
                     limits: None,
+                    served_model: None,
                 });
             }
             let content = self
@@ -812,6 +843,7 @@ mod tests {
                 usage: Usage::default(),
                 usage_available: true,
                 limits: None,
+                served_model: None,
             })
         }
     }
@@ -1048,5 +1080,33 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, HarnessError::Cancelled));
         assert!(agent.messages.is_empty());
+    }
+
+    /// A warning nobody can trust is worse than no warning: if a healthy turn
+    /// trips it, people learn to ignore the one that matters.
+    #[test]
+    fn a_more_specific_served_name_is_not_a_substitution() {
+        // Providers routinely answer an alias with a dated build.
+        assert!(models_agree("claude-opus-5", "claude-opus-5-20260514"));
+        assert!(models_agree("deepseek-v4-flash", "deepseek-v4-flash"));
+        assert!(models_agree("gpt-5.6-sol", "gpt-5.6-sol-high"));
+        // Order does not matter — some endpoints answer with the shorter name.
+        assert!(models_agree("claude-opus-5-20260514", "claude-opus-5"));
+        // Case and stray whitespace are not a routing change either.
+        assert!(models_agree("Claude-Opus-5", " claude-opus-5 "));
+    }
+
+    #[test]
+    fn a_different_family_is_reported() {
+        assert!(!models_agree("claude-opus-5", "deepseek-v4-flash"));
+        assert!(!models_agree("deepseek-v4-pro", "deepseek-v4-flash"));
+        assert!(!models_agree("gpt-5.6-sol", "claude-opus-5"));
+    }
+
+    #[test]
+    fn silence_is_never_reported_as_a_substitution() {
+        // An endpoint that names no model has not disagreed with anything.
+        assert!(models_agree("claude-opus-5", ""));
+        assert!(models_agree("", "claude-opus-5"));
     }
 }
