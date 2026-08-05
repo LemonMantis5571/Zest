@@ -8,6 +8,7 @@ import type { RoutingView } from "./generated/RoutingView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
+import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/WorkspaceReview.ts";
 
 export type StatusKind = "ready" | "unknown" | "not_logged_in" | "unconfigured";
 
@@ -78,6 +79,7 @@ export type LoginStatus = {
 };
 
 export type { ModelCapability };
+export type WorkspaceReview = GeneratedWorkspaceReview;
 
 export type ToolMetadata = ToolMetaView;
 

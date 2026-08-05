@@ -21,6 +21,7 @@ import type {
   UsageSnapshot,
   UserProfile,
   WorkspacePickResult,
+  WorkspaceReview,
 } from "./types";
 
 export function listProviders() {
@@ -197,6 +198,10 @@ export function preparePastedImage(options: {
 
 export function gitBranch() {
   return invoke<string | null>("git_branch");
+}
+
+export function verifyWorkspace() {
+  return invoke<WorkspaceReview>("verify_workspace");
 }
 
 export function contextUsage() {

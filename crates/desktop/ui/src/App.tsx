@@ -48,6 +48,7 @@ import type {
   ToolPart,
   UserAttachmentChip,
   UserProfile,
+  WorkspaceReview,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -269,6 +270,7 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<PreparedAttachment[]>([]);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
+  const [workspaceReview, setWorkspaceReview] = useState<WorkspaceReview | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
   const [profile, setProfile] = useState<UserProfile>({
     displayName: "",
@@ -684,6 +686,7 @@ export default function App() {
 
     setSession(info);
     setWorkspacePath(info.root);
+    setWorkspaceReview(null);
     void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
     setSelectedId(info.provider);
     setModel(info.model);
@@ -1039,6 +1042,24 @@ export default function App() {
       toast.add({
         type: "error",
         title: "Could not fork conversation",
+        description: formatInvokeError(err),
+      });
+    }
+  }
+
+  async function onVerifyWorkspace() {
+    try {
+      const review = await backend.verifyWorkspace();
+      setWorkspaceReview(review);
+      toast.add({
+        type: review.patchCheck === "issues" ? "warning" : "success",
+        title: review.patchCheck === "issues" ? "Review needed" : "Workspace checked",
+        description: review.summary,
+      });
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not check workspace",
         description: formatInvokeError(err),
       });
     }
@@ -1556,6 +1577,8 @@ export default function App() {
             onNewChat={onNewChat}
             onForkThread={onForkThread}
             onRewindThread={onRewindThread}
+            workspaceReview={workspaceReview}
+            onVerifyWorkspace={onVerifyWorkspace}
             compacting={compacting}
             onDeleteThread={onDeleteThread}
             onOpenProjectChat={onOpenProjectChat}
