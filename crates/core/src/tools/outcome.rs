@@ -57,6 +57,11 @@ pub enum ToolMetadata {
         /// The model-visible answer remains in `ToolOutcome::body`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
+        /// Optional usage volunteered by the external worker. This is a
+        /// runtime side-channel for the ledger and front-end event; it is not
+        /// written into thread history or sent to the model.
+        #[serde(skip)]
+        usage: Option<crate::usage::ExternalUsageReport>,
     },
 }
 
@@ -72,6 +77,32 @@ impl ToolMetadata {
     pub fn delegation_diff(&self) -> Option<&str> {
         match self {
             Self::Delegation { diff, .. } => diff.as_deref(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_usage_side_channel_is_not_serialized_into_thread_metadata() {
+        let metadata = ToolMetadata::Delegation {
+            provider_id: "claude".into(),
+            model: "sonnet".into(),
+            diff: None,
+            usage: Some(crate::usage::ExternalUsageReport {
+                input_tokens: Some(12),
+                ..Default::default()
+            }),
+        };
+        let value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(value["kind"], "delegation");
+        assert!(value.get("usage").is_none());
+
+        let restored: ToolMetadata = serde_json::from_value(value).unwrap();
+        match restored {
+            ToolMetadata::Delegation { usage, .. } => assert!(usage.is_none()),
         }
     }
 }

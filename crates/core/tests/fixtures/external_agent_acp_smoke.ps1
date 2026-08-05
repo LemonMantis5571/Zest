@@ -34,5 +34,6 @@ if ($permission.result.outcome.outcome -ne 'cancelled') { exit 15 }
 $permission = [Console]::ReadLine() | ConvertFrom-Json
 if ($permission.result.outcome.optionId -ne 'allow-once') { exit 16 }
 
+[Console]::WriteLine('{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"smoke-session","update":{"sessionUpdate":"usage_update","used":22,"size":1000,"cost":{"amount":0.02,"currency":"USD"}}}}')
 [Console]::WriteLine('{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"smoke-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"acp ok"}}}}')
 [Console]::WriteLine('{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}')

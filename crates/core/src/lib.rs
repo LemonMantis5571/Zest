@@ -106,5 +106,6 @@ pub use tools::{
     ToolMetadata, ToolOutcome, ToolRegistry,
 };
 pub use usage::{
-    HeadroomView, Ledger, MeasuredUsage, ProviderUsage, ProviderUsageView, UsageSnapshot,
+    ExternalCost, ExternalUsageReport, ExternalWorkerUsage, ExternalWorkerUsageView, HeadroomView,
+    Ledger, MeasuredUsage, ProviderUsage, ProviderUsageView, UsageSnapshot,
 };

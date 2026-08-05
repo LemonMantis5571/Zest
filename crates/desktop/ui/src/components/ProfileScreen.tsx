@@ -164,7 +164,7 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
           />
         </Panel>
 
-        <Panel title="Tokens by provider">
+        <Panel title="Zest tokens by provider">
           {usage?.providers.length ? (
             usage.providers.map((p) => (
               <Row
@@ -173,9 +173,31 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
                 value={compact(p.measured.totalTokens)}
               />
             ))
-          ) : (
+          ) : !usage?.externalWorkers.length ? (
             <p className="m-0 text-[12px] text-muted-foreground">Nothing recorded yet.</p>
-          )}
+          ) : null}
+          {usage?.externalWorkers.length ? (
+            <>
+              <div className="my-2 border-t border-border/60 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                External workers
+              </div>
+              {usage.externalWorkers.map((worker) => (
+                <Row
+                  key={worker.workerId}
+                  label={`${worker.workerId} (${worker.invocations} ${worker.invocations === 1 ? "run" : "runs"})`}
+                  value={
+                    worker.reportedTokenTotal == null
+                      ? "Not reported"
+                      : `${compact(worker.reportedTokenTotal)} reported`
+                  }
+                />
+              ))}
+              <p className="m-0 mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                Worker figures are reported by the external CLI/ACP process and are not included
+                in Zest totals.
+              </p>
+            </>
+          ) : null}
         </Panel>
       </div>
     </div>
@@ -184,7 +206,7 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
 
 function StatStrip({ stats }: { stats: ProfileStats | null }) {
   const items = [
-    { value: stats ? compact(stats.totalTokens) : "—", label: "Tokens used" },
+    { value: stats ? compact(stats.totalTokens) : "—", label: "Zest tokens" },
     {
       value: stats?.peakDayTokens ? compact(stats.peakDayTokens) : "—",
       label: "Busiest day",

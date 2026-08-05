@@ -591,6 +591,7 @@ impl From<ToolMetadata> for ToolMetaView {
                 provider_id,
                 model,
                 diff,
+                usage: _,
             } => Self::Delegation {
                 provider_id,
                 model,
@@ -1755,6 +1756,7 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
                     provider_id,
                     model,
                     diff,
+                    usage: None,
                 },
             });
             thread.apply_tool_result(
