@@ -376,7 +376,8 @@ Agent-facing docs for contributors: `AGENTS.md`, `PROJECT_CONTEXT.md`, `context/
 
 ## Configuration
 
-`zest.toml` declares providers and routing. Keys are never stored there — only env var **names**.
+`zest.toml` declares providers and routing. API keys are never stored there: API-key providers use
+the operating system credential manager, with optional environment-variable fallbacks for CI.
 
 Looked up in this order:
 
@@ -414,6 +415,36 @@ persist across restarts as well.
 | `ZEST_EFFORT` | Optional effort override |
 | `ZEST_BASE_URL` | One-off gateway origin override (no `/v1/messages`) |
 | `ANTHROPIC_API_KEY` | Native Anthropic when you uncomment that provider |
+
+### OpenAI-compatible providers
+
+Add a provider definition, then open Zest Settings and paste the key. The key is written only to
+the OS credential manager and is never returned to the UI or written to the config file.
+
+```toml
+[providers.deepseek]
+kind = "openai_compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+models = ["deepseek-chat", "deepseek-reasoner"]
+credential = "deepseek"
+```
+
+OpenAI and local OpenAI-compatible servers use the same shape. `base_url` is the API root; Zest
+appends `/chat/completions`:
+
+```toml
+[providers.openai]
+kind = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-5"
+credential = "openai"
+
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5-coder"
+```
 
 ---
 

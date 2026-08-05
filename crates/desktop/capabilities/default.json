@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capabilities for the launch picker",
   "windows": ["main"],
-  "permissions": ["core:default", "core:event:default"]
+  "permissions": ["core:default", "core:event:default", "notification:default"]
 }

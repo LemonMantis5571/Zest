@@ -9,6 +9,7 @@ import {
 } from "@/lib/markdownExport";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { IconSwap } from "@/components/ui/icon-swap";
 
 type Props = {
   /** Original assistant Markdown source, not rendered HTML. */
@@ -74,14 +75,17 @@ export function MarkdownActions({ text, suggestedName, className }: Props) {
         variant="ghost"
         size="icon-sm"
         title="Copy Markdown"
-        aria-label="Copy Markdown"
+        // The label carries the state too. The icon is aria-hidden, so without
+        // this a screen reader gets no sign the copy happened.
+        aria-label={copied ? "Copied to clipboard" : "Copy Markdown"}
         onClick={() => void copy()}
       >
-        {copied ? (
-          <CheckIcon className="size-3.5 text-[var(--success,#27a644)]" />
-        ) : (
-          <CopyIcon className="size-3.5" />
-        )}
+        <IconSwap
+          className="size-3.5"
+          active={copied}
+          initial={<CopyIcon className="size-3.5" />}
+          swapped={<CheckIcon className="size-3.5 text-[var(--success,#27a644)]" />}
+        />
       </Button>
       <Button
         type="button"
@@ -92,11 +96,12 @@ export function MarkdownActions({ text, suggestedName, className }: Props) {
         disabled={saving}
         onClick={() => void save()}
       >
-        {saving ? (
-          <Loader2Icon className="size-3.5 animate-spin" />
-        ) : (
-          <DownloadIcon className="size-3.5" />
-        )}
+        <IconSwap
+          className="size-3.5"
+          active={saving}
+          initial={<DownloadIcon className="size-3.5" />}
+          swapped={<Loader2Icon className="size-3.5 animate-spin" />}
+        />
       </Button>
     </div>
   );

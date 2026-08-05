@@ -11,6 +11,7 @@ pub mod auth;
 pub mod cancel;
 pub mod commands;
 pub mod config;
+pub mod credentials;
 pub mod error;
 pub mod fsutil;
 pub mod gateway;
@@ -20,6 +21,7 @@ pub mod prefs;
 pub mod profile;
 pub mod prompt;
 pub mod provider;
+pub mod reading_diff;
 pub mod routing;
 pub mod routing_edit;
 pub mod runtime;
@@ -70,6 +72,9 @@ pub use provider::{
     catalogue_for_provider, catalogue_from_lists, descriptor_for_picker_id, descriptor_from_config,
     normalize_effort, probe, Completion, ModelSpec, Provider, ProviderDescriptor,
     RateLimitSnapshot, StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+};
+pub use reading_diff::{
+    abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,
 };
 pub use routing::{Resolution, Router};
 pub use runtime::{RuntimeBuilder, RuntimeSession};

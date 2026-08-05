@@ -120,6 +120,12 @@ impl Agent {
         self.provider.id()
     }
 
+    /// Shared provider handle for auxiliary display-only operations such as
+    /// reading-diff generation. These operations never mutate agent history.
+    pub fn provider(&self) -> Arc<dyn Provider> {
+        self.provider.clone()
+    }
+
     /// Registered tool names (stable order). Used to assert `delegate` wiring.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.names()
@@ -279,6 +285,8 @@ impl Agent {
                             id: &call.id,
                             summary: &summary,
                             is_error: outcome.is_error,
+                            path: outcome.path.as_deref(),
+                            diff: outcome.diff.as_deref(),
                             metadata: outcome.metadata,
                         });
                         // Live staged history keeps the real body for the model.
@@ -369,7 +377,17 @@ impl Agent {
         }
 
         if !auto.is_empty() {
-            let planned: Vec<(usize, ToolRisk)> = auto.iter().map(|(i, p)| (*i, p.risk)).collect();
+            let planned: Vec<(usize, ToolRisk, Option<String>, Option<String>)> = auto
+                .iter()
+                .map(|(i, p)| {
+                    (
+                        *i,
+                        p.risk,
+                        (!p.preview.path.is_empty()).then(|| p.preview.path.clone()),
+                        (!p.preview.diff.is_empty()).then(|| p.preview.diff.clone()),
+                    )
+                })
+                .collect();
             let running = auto
                 .into_iter()
                 .map(|(_, prepared)| self.tools.execute_prepared(prepared));
@@ -382,20 +400,27 @@ impl Agent {
 
             match finished {
                 Some(results) => {
-                    for ((index, risk), exec) in planned.into_iter().zip(results) {
+                    for ((index, risk, path, diff), exec) in planned.into_iter().zip(results) {
                         slots[index] = Some(match exec {
                             Ok(outcome) => ToolCallOutcome {
                                 body: outcome.body,
                                 is_error: false,
                                 risk,
+                                path,
+                                diff,
                                 metadata: outcome.metadata,
                             },
-                            Err(message) => ToolCallOutcome::failed(message, risk),
+                            Err(message) => {
+                                let mut failed = ToolCallOutcome::failed(message, risk);
+                                failed.path = path;
+                                failed.diff = diff;
+                                failed
+                            }
                         });
                     }
                 }
                 None => {
-                    for (index, risk) in planned {
+                    for (index, risk, _, _) in planned {
                         slots[index] = Some(ToolCallOutcome::failed(
                             "turn cancelled before tool finished",
                             risk,
@@ -533,6 +558,8 @@ impl Agent {
         risk: ToolRisk,
         cancel: Option<&CancelToken>,
     ) -> ToolCallOutcome {
+        let path = (!prepared.preview.path.is_empty()).then(|| prepared.preview.path.clone());
+        let diff = (!prepared.preview.diff.is_empty()).then(|| prepared.preview.diff.clone());
         let exec = tokio::select! {
             biased;
             _ = wait_cancel(cancel) => {
@@ -546,9 +573,16 @@ impl Agent {
                 body: outcome.body,
                 is_error: false,
                 risk,
+                path,
+                diff,
                 metadata: outcome.metadata,
             },
-            Err(message) => ToolCallOutcome::failed(message, risk),
+            Err(message) => {
+                let mut failed = ToolCallOutcome::failed(message, risk);
+                failed.path = path;
+                failed.diff = diff;
+                failed
+            }
         }
     }
 }
@@ -559,6 +593,8 @@ struct ToolCallOutcome {
     body: String,
     is_error: bool,
     risk: ToolRisk,
+    path: Option<String>,
+    diff: Option<String>,
     metadata: Option<crate::tools::ToolMetadata>,
 }
 
@@ -568,6 +604,8 @@ impl ToolCallOutcome {
             body: body.into(),
             is_error: true,
             risk,
+            path: None,
+            diff: None,
             metadata: None,
         }
     }
@@ -660,6 +698,7 @@ mod tests {
                 content: vec![json!({ "type": "text", "text": "hi" })],
                 stop_reason: Some(self.stop.into()),
                 usage: Usage::default(),
+                usage_available: true,
                 limits: None,
             })
         }
@@ -756,6 +795,7 @@ mod tests {
                     content: vec![json!({ "type": "text", "text": "done" })],
                     stop_reason: Some("end_turn".into()),
                     usage: Usage::default(),
+                    usage_available: true,
                     limits: None,
                 });
             }
@@ -770,6 +810,7 @@ mod tests {
                 content,
                 stop_reason: Some("tool_use".into()),
                 usage: Usage::default(),
+                usage_available: true,
                 limits: None,
             })
         }

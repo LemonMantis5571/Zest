@@ -1,4 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   requestPermission,
@@ -13,6 +14,19 @@ export function isWindowActive() {
     document.visibilityState === "visible" &&
     document.hasFocus()
   );
+}
+
+/** Native focus state is authoritative when the desktop window is minimized. */
+export async function isWindowActuallyActive() {
+  if (isTauri()) {
+    try {
+      const window = getCurrentWindow();
+      return (await window.isFocused()) && !(await window.isMinimized());
+    } catch {
+      return isWindowActive();
+    }
+  }
+  return isWindowActive();
 }
 
 async function notificationPermission() {
@@ -35,12 +49,12 @@ async function notificationPermission() {
 
 /** Send an OS notification when Zest is not the active window. */
 export async function notifyWhenAway(title: string, body: string) {
-  if (isWindowActive()) return false;
+  if (await isWindowActuallyActive()) return false;
   if (!(await notificationPermission())) return false;
 
   try {
     if (isTauri()) {
-      sendNotification({ title, body });
+      await sendNotification({ title, body });
     } else {
       new Notification(title, { body });
     }

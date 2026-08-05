@@ -262,8 +262,8 @@ export function reduceChatEvent(
               summary: event.summary,
               approvalId: undefined,
               // Keep path/diff so completed writes stay clickable in DiffViewer.
-              path: t.path,
-              diff: t.diff,
+              path: event.path ?? t.path,
+              diff: event.diff ?? t.diff,
               metadata: event.metadata ?? t.metadata,
             };
           }),
