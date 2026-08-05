@@ -1023,7 +1023,7 @@ export default function App() {
       toast.add({
         type: "warning",
         title: "Finish this turn first",
-        description: "Stop the current turn before creating a separate conversation.",
+        description: "Stop the current turn before forking the conversation.",
       });
       return;
     }
@@ -1032,13 +1032,13 @@ export default function App() {
       applySession(info, { clearDraft: true });
       toast.add({
         type: "success",
-        title: "Separate conversation created",
+        title: "Fork created",
         description: "You are now in a new conversation with the same history.",
       });
     } catch (err) {
       toast.add({
         type: "error",
-        title: "Could not create a separate conversation",
+        title: "Could not fork conversation",
         description: formatInvokeError(err),
       });
     }
