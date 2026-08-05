@@ -645,41 +645,53 @@ fn expanded_args(config: &ExternalAgentConfig, prompt: &str) -> Vec<String> {
     if config.mode == ExternalAgentMode::Headless && !has_prompt {
         args.push(prompt.to_string());
     }
-    normalize_claude_stream_args(config, args)
+    normalize_claude_args(config, args)
 }
 
-/// Claude Code requires `--verbose` when its headless JSONL stream is selected.
-/// Add it at launch time for older project configs that were written before
-/// Claude enforced that requirement; refreshed presets also persist the flag.
-fn normalize_claude_stream_args(
-    config: &ExternalAgentConfig,
-    mut args: Vec<String>,
-) -> Vec<String> {
+/// Claude Code needs explicit non-interactive permissions for delegated edits.
+/// Add the safe edit-only mode and the stream verbosity flag at launch time for
+/// older project configs; refreshed presets also persist both flags.
+fn normalize_claude_args(config: &ExternalAgentConfig, mut args: Vec<String>) -> Vec<String> {
     if config.mode != ExternalAgentMode::Headless
         || !Path::new(&config.command)
             .file_stem()
             .is_some_and(|stem| stem.eq_ignore_ascii_case("claude"))
-        || args.iter().any(|arg| arg == "--verbose")
     {
         return args;
     }
 
-    let format_index = args.iter().enumerate().find_map(|(index, arg)| {
-        if arg == "--output-format=stream-json" {
-            Some(index)
-        } else if arg == "--output-format"
-            && args
-                .get(index + 1)
-                .is_some_and(|value| value == "stream-json")
-        {
-            Some(index)
-        } else {
-            None
-        }
-    });
+    if !args.iter().any(|arg| arg == "--verbose") {
+        let format_index = args.iter().enumerate().find_map(|(index, arg)| {
+            if arg == "--output-format=stream-json" {
+                Some(index)
+            } else if arg == "--output-format"
+                && args
+                    .get(index + 1)
+                    .is_some_and(|value| value == "stream-json")
+            {
+                Some(index)
+            } else {
+                None
+            }
+        });
 
-    if let Some(index) = format_index {
-        args.insert(index, "--verbose".into());
+        if let Some(index) = format_index {
+            args.insert(index, "--verbose".into());
+        }
+    }
+
+    if !args
+        .iter()
+        .any(|arg| arg == "--permission-mode" || arg.starts_with("--permission-mode="))
+    {
+        let insert_at = args
+            .iter()
+            .position(|arg| arg == "--output-format" || arg.starts_with("--output-format="))
+            .unwrap_or(args.len());
+        args.splice(
+            insert_at..insert_at,
+            ["--permission-mode".into(), "acceptEdits".into()],
+        );
     }
     args
 }
@@ -2140,10 +2152,33 @@ mod tests {
             vec![
                 "--print",
                 "--verbose",
+                "--permission-mode",
+                "acceptEdits",
                 "--output-format",
                 "stream-json",
                 "task"
             ]
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_claude_permission_mode() {
+        let config = ExternalAgentConfig {
+            mode: ExternalAgentMode::Headless,
+            command: "claude".into(),
+            args: vec![
+                "--print".into(),
+                "--permission-mode".into(),
+                "plan".into(),
+                "{prompt}".into(),
+            ],
+            model: None,
+            workspace: ExternalWorkspace::Current,
+            timeout_secs: 30,
+        };
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec!["--print", "--permission-mode", "plan", "task"]
         );
     }
 
