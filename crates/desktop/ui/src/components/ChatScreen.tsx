@@ -94,6 +94,7 @@ type Props = {
   onReloadSession?: () => Promise<void>;
   /** Re-run sign-in for a provider whose credentials the gateway rejected. */
   onReconnectProvider?: (providerId: string) => void;
+  onRefreshProviders: () => Promise<void>;
   onReconnect: () => void;
   /** A background verification that failed after this chat opened. */
   sessionWarning?: SessionWarning | null;
@@ -382,6 +383,7 @@ export function ChatScreen({
   onSwitchProvider,
   onReloadSession,
   onReconnectProvider,
+  onRefreshProviders,
   onReconnect,
   sessionWarning = null,
   onDismissWarning,
@@ -727,6 +729,7 @@ export function ChatScreen({
           setProviderSwitchOpen(false);
           onReconnectProvider?.(providerId);
         }}
+        onRefresh={onRefreshProviders}
       />
 
       <DiffViewer target={diffTarget} onClose={() => setDiffTarget(null)} />
