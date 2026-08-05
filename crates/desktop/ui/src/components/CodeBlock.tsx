@@ -108,7 +108,7 @@ export function CodeBlock({
           )}
         >
           {copied ? (
-            <CheckIcon className="size-3.5 text-[var(--success,#27a644)]" />
+            <CheckIcon className="size-3.5 text-primary" />
           ) : (
             <CopyIcon className="size-3.5" />
           )}

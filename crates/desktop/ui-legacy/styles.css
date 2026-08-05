@@ -14,7 +14,6 @@
   --surface-3: #18191a;
   --hairline: #23252a;
   --hairline-strong: #34343a;
-  --success: #27a644;
   --danger: #e5484d;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -154,7 +153,7 @@ h1 {
 }
 
 .dot.ready {
-  background: var(--success);
+  background: var(--primary);
 }
 
 .dot.unknown {
@@ -194,7 +193,7 @@ h1 {
 }
 
 .status.ready {
-  color: var(--success);
+  color: var(--primary);
 }
 
 .status.unknown {

@@ -174,7 +174,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
     ) : tool.status === "error" ? (
       <XIcon className="size-3 text-destructive" />
     ) : (
-      <CheckIcon className="size-3 text-[var(--success,#27a644)]/90" />
+      <CheckIcon className="size-3 text-primary/90" />
     );
 
   return (
