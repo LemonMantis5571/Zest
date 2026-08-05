@@ -34,6 +34,18 @@
       "icons/zest-icon-128.png",
       "icons/zest-icon.png",
       "icons/zest-icon.ico"
-    ]
+    ],
+    "windows": {
+      "wix": {
+        "bannerPath": "installer/wix-banner.bmp",
+        "dialogImagePath": "installer/wix-dialog.bmp"
+      },
+      "nsis": {
+        "headerImage": "installer/nsis-header.bmp",
+        "sidebarImage": "installer/nsis-sidebar.bmp",
+        "installerIcon": "icons/zest-icon.ico",
+        "uninstallerIcon": "icons/zest-icon.ico"
+      }
+    }
   }
 }
