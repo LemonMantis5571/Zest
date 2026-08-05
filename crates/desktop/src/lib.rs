@@ -3238,7 +3238,7 @@ fn format_turn_error(err: &HarnessError) -> String {
         return "Zest could not reach the provider. Try reconnecting, then send your message again.".into();
     }
     if err.is_context_limit() {
-        return "This conversation is too long for the selected model. Compact it from Context usage, then send again.".into();
+        return "This conversation is too long for the selected model. Start a new conversation or shorten the request.".into();
     }
     if err.is_auth_problem() {
         return "This provider needs you to sign in again. Reconnect, then send your message again.".into();

@@ -1,7 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { CheckCircle2Icon, SparklesIcon, XIcon } from "lucide-react";
+import { CheckCircle2Icon, XIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import type { ContextUsage } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -14,16 +13,9 @@ function formatTokens(n: number) {
 type Props = {
   refreshKey: string | number;
   className?: string;
-  onCompact?: () => Promise<void>;
-  compacting?: boolean;
 };
 
-export function ContextUsageButton({
-  refreshKey,
-  className,
-  onCompact,
-  compacting = false,
-}: Props) {
+export function ContextUsageButton({ refreshKey, className }: Props) {
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -140,7 +132,7 @@ export function ContextUsageButton({
             )}
           >
             {usage.shouldAutoCompact
-              ? "This conversation will be compacted after this turn."
+              ? "This conversation will be compacted automatically after this turn."
               : `Automatic compaction starts at ${usage.autoCompactThresholdPercent}% full.`}
           </p>
 
@@ -157,29 +149,10 @@ export function ContextUsageButton({
             <span className="font-mono tabular-nums">{usage.checkpointCount}</span>
           </div>
 
-          {onCompact ? (
-            <div className="mt-3 border-t border-border/60 pt-3">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="w-full justify-center"
-                disabled={!usage.canCompact || compacting}
-                onClick={() => void onCompact()}
-              >
-                {compacting ? (
-                  "Compacting…"
-                ) : (
-                  <>
-                    <SparklesIcon data-icon="inline-start" />
-                    Compact conversation
-                  </>
-                )}
-              </Button>
-              <div className="mt-1.5 flex items-center gap-1 text-[10px] text-muted-foreground">
-                <CheckCircle2Icon className="size-3 shrink-0 text-primary" />
-                You can restore this conversation from before compaction.
-              </div>
+          {usage.checkpointCount > 0 ? (
+            <div className="mt-3 flex items-center gap-1 border-t border-border/60 pt-3 text-[10px] text-muted-foreground">
+              <CheckCircle2Icon className="size-3 shrink-0 text-primary" />
+              A restore point is available for this conversation.
             </div>
           ) : null}
         </div>

@@ -89,7 +89,6 @@ type Props = {
   onNewChat: () => void;
   onForkThread: () => Promise<void>;
   onRewindThread: (checkpointId: string) => Promise<void>;
-  onCompactContext: () => Promise<void>;
   compacting?: boolean;
   onDeleteThread: (id: string, projectPath: string) => Promise<void>;
   onOpenProjectChat: (options: {
@@ -387,7 +386,6 @@ export function ChatScreen({
   onNewChat,
   onForkThread,
   onRewindThread,
-  onCompactContext,
   compacting = false,
   onDeleteThread,
   onOpenProjectChat,
@@ -458,14 +456,6 @@ export function ChatScreen({
         run: () => setWorkbenchOpen((value) => !value),
       },
       {
-        id: "compact-context",
-        label: "Compact context",
-        description: "Create a checkpoint and summarize the conversation",
-        run: () => {
-          if (!sending && !compacting) void onCompactContext();
-        },
-      },
-      {
         id: "open-provider",
         label: "Switch provider",
         description: "Choose a configured model provider",
@@ -483,7 +473,7 @@ export function ChatScreen({
         },
       },
     ],
-    [compacting, onCompactContext, onNewChat, sending, workbenchOpen]
+    [onNewChat, sending, workbenchOpen]
   );
 
   // A bump means "open the User section". Zero is the initial value, so the
@@ -773,7 +763,6 @@ export function ChatScreen({
             onOpenFolder={onOpenFolder}
             onRemoveAttachment={onRemoveAttachment}
             onPasteImages={onPasteImages}
-            onCompactContext={onCompactContext}
             compacting={compacting}
             aboveComposer={null}
           />
@@ -843,7 +832,6 @@ export function ChatScreen({
         onClose={() => setWorkbenchOpen(false)}
         onFork={onForkThread}
         onRewind={onRewindThread}
-        onCompact={onCompactContext}
         onJump={jumpToMessage}
       />
 

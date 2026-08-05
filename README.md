@@ -330,11 +330,10 @@ than by a depth counter.
 
 The desktop header's Workbench opens a compact task dashboard with live tool
 activity, a transcript outline, and conversation recovery. Each completed turn
-keeps a bounded checkpoint. **Fork conversation** starts a new thread from the
-current wire history; **rewind** restores conversation state only and never
-rolls back workspace files. **Compact context** asks the active provider for a
-short checkpoint, saves the pre-compaction state, and keeps the transcript
-usable for a longer task.
+keeps a bounded checkpoint. Creating a separate conversation starts a new
+thread from the current wire history; **rewind** restores conversation state
+only and never rolls back workspace files. Automatic compaction keeps the
+transcript usable for longer tasks while preserving a rewind checkpoint.
 
 `Ctrl+K` opens the command palette. It searches built-in actions and registered
 slash commands; `Ctrl+Shift+K` opens the shortcut editor.
@@ -376,15 +375,15 @@ usage.
 
 ---
 
-### Current context controls
+### Context handling
 
-The context meter now exposes a system/conversation breakdown and an explicit
-**Compact conversation** action. Compaction keeps a rewind checkpoint first;
+The context meter exposes a system/conversation breakdown and shows when
+automatic compaction will run. Compaction keeps a rewind checkpoint first;
 usage is marked as an estimate when the provider does not report tokens.
 After a completed turn reaches 80% of the active model's context window, Zest
-automatically compacts the conversation and keeps the same rewind checkpoint.
-If the provider still rejects a request for exceeding its limit, the transcript
-is preserved and the error tells you to compact before resending.
+automatically compacts the conversation. If the provider still rejects a
+request for exceeding its limit, the transcript is preserved and the error
+suggests starting a new conversation or shortening the request.
 
 ### JSONL / headless mode
 
