@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { getBackend } from "@/lib/backend";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -41,6 +42,10 @@ export function ProviderSwitchSheet({
   onRefresh,
 }: Props) {
   const [addingApiProvider, setAddingApiProvider] = useState(false);
+  const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -127,7 +132,11 @@ export function ProviderSwitchSheet({
                       size="sm"
                       variant="outline"
                       disabled={busy}
-                      onClick={() => setAddingApiProvider(true)}
+                      onClick={() => {
+                        setKeyProviderId(row.id);
+                        setApiKey("");
+                        setKeyError(null);
+                      }}
                     >
                       Set key
                     </Button>
@@ -147,7 +156,51 @@ export function ProviderSwitchSheet({
             );
           })}
         </ul>
-        {!addingApiProvider ? (
+        {keyProviderId ? (
+          <form
+            className="border-t border-border/60 p-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setSavingKey(true);
+              setKeyError(null);
+              void getBackend()
+                .setProviderKey(keyProviderId, apiKey)
+                .then(async () => {
+                  setApiKey("");
+                  await onRefresh();
+                  setKeyProviderId(null);
+                  onSelect(keyProviderId);
+                })
+                .catch((err) => setKeyError(String(err)))
+                .finally(() => setSavingKey(false));
+            }}
+          >
+            <div className="text-xs font-medium">
+              {providers.find((row) => row.id === keyProviderId)?.label ?? "Provider"} API key
+            </div>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Stored securely in the operating system credential manager.
+            </p>
+            <div className="mt-2 flex gap-1.5">
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder="Paste API key"
+                autoComplete="off"
+                className="min-w-0 flex-1 rounded-md border border-border/80 bg-background px-2.5 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                autoFocus
+              />
+              <Button type="button" size="sm" variant="ghost" disabled={savingKey} onClick={() => setKeyProviderId(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" disabled={!apiKey.trim() || savingKey}>
+                {savingKey ? "Saving…" : "Save"}
+              </Button>
+            </div>
+            {keyError ? <p className="mt-2 text-xs text-destructive">{keyError}</p> : null}
+          </form>
+        ) : !addingApiProvider ? (
           <div className="border-t border-border/60 p-2">
             <Button type="button" variant="outline" className="w-full" disabled={busy} onClick={() => setAddingApiProvider(true)}>
               Add API provider
