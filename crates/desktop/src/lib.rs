@@ -425,6 +425,7 @@ struct ExternalAgentView {
 )]
 struct ExternalAgentCheckView {
     available: bool,
+    authenticated: Option<bool>,
     detail: String,
 }
 
@@ -1068,10 +1069,10 @@ fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfi
         && agent.timeout_secs == preset.timeout_secs
 }
 
-/// Check only whether the configured CLI can start. This intentionally does
-/// not run a delegated task or attempt to inspect the vendor's auth state.
-/// Authentication belongs to the vendor CLI and is exercised when the user
-/// approves a real delegation.
+/// Check whether the configured CLI can start and, when the vendor exposes a
+/// safe status command, whether its own session is authenticated. The command
+/// output is parsed locally; account identity and credential details never
+/// cross the desktop boundary.
 #[tauri::command]
 async fn check_external_agent(
     state: State<'_, AppState>,
@@ -1086,23 +1087,81 @@ async fn check_external_agent(
     let mut command = Command::new(&agent.command);
     command
         .arg("--version")
-        .current_dir(root)
+        .current_dir(&root)
         .stdin(Stdio::null())
         .kill_on_drop(true);
     zest_core::prepare_external_command(&mut command);
     scrub_external_environment(&mut command);
 
-    let detail = match tokio::time::timeout(Duration::from_secs(8), command.output()).await {
-        Ok(Ok(output)) if output.status.success() => {
-            "CLI is available. Sign in with it before delegating.".to_string()
+    match tokio::time::timeout(Duration::from_secs(8), command.output()).await {
+        Ok(Ok(output)) if output.status.success() => {}
+        Ok(Ok(_)) => {
+            return Ok(ExternalAgentCheckView {
+                available: true,
+                authenticated: None,
+                detail: "CLI was found, but its version check failed.".to_string(),
+            });
         }
-        Ok(Ok(_)) => "CLI was found, but its version check failed.".to_string(),
-        Ok(Err(_)) => "CLI not found on PATH.".to_string(),
-        Err(_) => "CLI did not respond to a version check.".to_string(),
+        Ok(Err(_)) => {
+            return Ok(ExternalAgentCheckView {
+                available: false,
+                authenticated: None,
+                detail: "CLI not found on PATH.".to_string(),
+            });
+        }
+        Err(_) => {
+            return Ok(ExternalAgentCheckView {
+                available: false,
+                authenticated: None,
+                detail: "CLI did not respond to a version check.".to_string(),
+            });
+        }
+    };
+
+    let (authenticated, detail) = if id.trim() == "claude" {
+        let mut auth = Command::new(&agent.command);
+        auth.args(["auth", "status", "--json"])
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        zest_core::prepare_external_command(&mut auth);
+        scrub_external_environment(&mut auth);
+
+        match tokio::time::timeout(Duration::from_secs(8), auth.output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                let authenticated = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                    .ok()
+                    .and_then(|value| value.get("loggedIn").and_then(|value| value.as_bool()));
+                let detail = match authenticated {
+                    Some(true) => "CLI available. Signed in to Claude.".to_string(),
+                    Some(false) => "CLI available, but Claude is not signed in.".to_string(),
+                    None => "CLI available. Sign-in status could not be verified.".to_string(),
+                };
+                (authenticated, detail)
+            }
+            Ok(Ok(_)) => (
+                None,
+                "CLI available. Sign-in status could not be verified.".to_string(),
+            ),
+            Ok(Err(_)) => (
+                None,
+                "CLI available, but its sign-in status could not be checked.".to_string(),
+            ),
+            Err(_) => (
+                None,
+                "CLI available, but its sign-in check timed out.".to_string(),
+            ),
+        }
+    } else {
+        (
+            None,
+            "CLI available. This worker does not expose a sign-in status check.".to_string(),
+        )
     };
 
     Ok(ExternalAgentCheckView {
-        available: detail.starts_with("CLI is available"),
+        available: true,
+        authenticated,
         detail,
     })
 }

@@ -241,7 +241,11 @@ export function createFixtureBackend(): DesktopBackend {
       else enabledExternalAgents.delete(id);
     },
     async checkExternalAgent() {
-      return { available: false, detail: "CLI checks are unavailable in the fixture." };
+      return {
+        available: false,
+        authenticated: null,
+        detail: "CLI checks are unavailable in the fixture.",
+      };
     },
     async listProviders() {
       return [
