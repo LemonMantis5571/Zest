@@ -29,6 +29,7 @@ import type {
   UsageSnapshot,
   UserProfile,
   WorkspacePickResult,
+  WorkspaceReview,
 } from "./types";
 
 export type { SkillSummary, SystemPromptInfo };
@@ -110,6 +111,7 @@ export type DesktopBackend = {
     name?: string;
   }): Promise<PreparedAttachment>;
   gitBranch(): Promise<string | null>;
+  verifyWorkspace(): Promise<WorkspaceReview>;
   contextUsage(): Promise<ContextUsage>;
   getUserProfile(): Promise<UserProfile>;
   setUserProfile(profile: UserProfile): Promise<UserProfile>;
@@ -186,6 +188,7 @@ export function createTauriBackend(): DesktopBackend {
     pickFiles: () => tauriApi.pickFiles(),
     preparePastedImage: (options) => tauriApi.preparePastedImage(options),
     gitBranch: () => tauriApi.gitBranch(),
+    verifyWorkspace: () => tauriApi.verifyWorkspace(),
     contextUsage: () => tauriApi.contextUsage(),
     getUserProfile: () => tauriApi.getUserProfile(),
     setUserProfile: (profile) => tauriApi.setUserProfile(profile),
@@ -529,6 +532,15 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async gitBranch() {
       return "master";
+    },
+    async verifyWorkspace() {
+      return {
+        summary: "Fixture workspace is ready.",
+        repository: "git",
+        changedFiles: ["src/example.ts"],
+        changedFileCount: 1,
+        patchCheck: "clean",
+      };
     },
     async contextUsage() {
       return {

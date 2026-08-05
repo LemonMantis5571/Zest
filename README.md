@@ -348,6 +348,10 @@ for longer tasks while preserving a rewind checkpoint.
 `Ctrl+K` opens the command palette. It searches built-in actions and registered
 slash commands; `Ctrl+Shift+K` opens the shortcut editor.
 
+Workbench **Verify** performs a quick local review of the active Git workspace:
+it lists changed files and checks the patch for whitespace errors. It does not
+run project scripts or modify files.
+
 The left sidebar lists **Projects** (folders you have opened). Each project expands
 to its chats. Threads are stored per project under `<project>/.zest/threads/`
 (gitignored). Known project roots are remembered in `~/.zest/known-workspaces.json`.

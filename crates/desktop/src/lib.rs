@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
+use tokio::process::Command;
 use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
@@ -206,6 +207,27 @@ struct ModelCapability {
     context_window: u64,
     supports_tools: bool,
     supports_vision: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "WorkspaceReview.ts", rename_all = "camelCase")
+)]
+struct WorkspaceReview {
+    /// Short, user-facing result of the local review.
+    summary: String,
+    /// `git`, `not_git`, or `unavailable`.
+    repository: String,
+    /// Every changed path is counted; only the first few are returned for the
+    /// compact Workbench panel.
+    changed_files: Vec<String>,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    changed_file_count: usize,
+    /// `clean`, `issues`, or `unavailable`.
+    patch_check: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3114,6 +3136,103 @@ fn read_git_branch(root: &Path) -> Option<String> {
     None
 }
 
+fn workspace_review_without_git(repository: &str, summary: &str) -> WorkspaceReview {
+    WorkspaceReview {
+        summary: summary.to_string(),
+        repository: repository.to_string(),
+        changed_files: Vec::new(),
+        changed_file_count: 0,
+        patch_check: "unavailable".into(),
+    }
+}
+
+fn changed_files_from_status(status: &str) -> Vec<String> {
+    status
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.get(3..).unwrap_or(line).trim().to_string())
+        .collect()
+}
+
+/// Run the smallest useful local review: inspect Git status and check the
+/// patch for whitespace errors. It never runs project scripts or changes files.
+async fn review_workspace_at(root: &Path) -> Result<WorkspaceReview, String> {
+    let probe = match Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(workspace_review_without_git(
+                "unavailable",
+                "Git is not installed, so the workspace could not be reviewed.",
+            ));
+        }
+        Err(error) => return Err(format!("could not inspect workspace: {error}")),
+    };
+
+    if !probe.status.success() || String::from_utf8_lossy(&probe.stdout).trim() != "true" {
+        return Ok(workspace_review_without_git(
+            "not_git",
+            "This folder is not a Git repository.",
+        ));
+    }
+
+    let status = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+        .await
+        .map_err(|error| format!("could not read workspace changes: {error}"))?;
+    if !status.status.success() {
+        return Err("Git could not read the workspace changes.".into());
+    }
+
+    let all_changed_files = changed_files_from_status(&String::from_utf8_lossy(&status.stdout));
+    let changed_file_count = all_changed_files.len();
+    let changed_files = all_changed_files.into_iter().take(24).collect();
+
+    let patch = Command::new("git")
+        .args(["diff", "--check"])
+        .current_dir(root)
+        .output()
+        .await
+        .map_err(|error| format!("could not check the workspace patch: {error}"))?;
+    let patch_check = if patch.status.success() {
+        "clean"
+    } else {
+        "issues"
+    };
+    let summary = match (changed_file_count, patch_check) {
+        (0, "clean") => "Working tree is clean.".to_string(),
+        (0, _) => "The patch check found issues.".to_string(),
+        (count, "clean") => format!(
+            "{count} changed {}. No patch whitespace errors found.",
+            if count == 1 { "file" } else { "files" }
+        ),
+        (count, _) => format!(
+            "{count} changed {}. The patch check found issues.",
+            if count == 1 { "file" } else { "files" }
+        ),
+    };
+
+    Ok(WorkspaceReview {
+        summary,
+        repository: "git".into(),
+        changed_files,
+        changed_file_count,
+        patch_check: patch_check.into(),
+    })
+}
+
+#[tauri::command]
+async fn verify_workspace(state: State<'_, AppState>) -> Result<WorkspaceReview, String> {
+    let root = resolve_workspace_root(&state)?;
+    review_workspace_at(&root).await
+}
+
 #[tauri::command]
 fn context_usage(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
     state
@@ -3427,6 +3546,7 @@ pub fn run() {
             pick_files,
             prepare_pasted_image,
             git_branch,
+            verify_workspace,
             context_usage,
             get_user_profile,
             set_user_profile
@@ -3445,6 +3565,7 @@ mod export_bindings {
         SessionInfo::export_all().expect("export SessionInfo bindings");
         ProviderView::export_all().expect("export ProviderView bindings");
         ModelCapability::export_all().expect("export ModelCapability bindings");
+        WorkspaceReview::export_all().expect("export WorkspaceReview bindings");
         ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
         ToolMetaView::export_all().expect("export ToolMetaView bindings");
     }
@@ -3541,6 +3662,29 @@ mod characterization {
             },
         );
         assert_eq!(thread.messages.len(), 2);
+    }
+
+    #[test]
+    fn workspace_review_parses_porcelain_paths_without_status_codes() {
+        let files =
+            changed_files_from_status(" M src/lib.rs\n?? notes/todo.md\nR  old.rs -> new.rs\n");
+        assert_eq!(
+            files,
+            vec![
+                "src/lib.rs".to_string(),
+                "notes/todo.md".to_string(),
+                "old.rs -> new.rs".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_review_without_git_is_explicitly_unavailable() {
+        let review = workspace_review_without_git("not_git", "not a repository");
+        assert_eq!(review.repository, "not_git");
+        assert_eq!(review.patch_check, "unavailable");
+        assert_eq!(review.changed_file_count, 0);
+        assert_eq!(review.summary, "not a repository");
     }
 
     fn slot(id: &'static str, status: AuthStatus) -> ProviderSlot {

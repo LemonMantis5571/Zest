@@ -63,6 +63,7 @@ import type {
   SessionInfo,
   SessionWarning,
   UserProfile,
+  WorkspaceReview,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -89,6 +90,8 @@ type Props = {
   onNewChat: () => void;
   onForkThread: () => Promise<void>;
   onRewindThread: (checkpointId: string) => Promise<void>;
+  workspaceReview: WorkspaceReview | null;
+  onVerifyWorkspace: () => Promise<void>;
   compacting?: boolean;
   onDeleteThread: (id: string, projectPath: string) => Promise<void>;
   onOpenProjectChat: (options: {
@@ -386,6 +389,8 @@ export function ChatScreen({
   onNewChat,
   onForkThread,
   onRewindThread,
+  workspaceReview,
+  onVerifyWorkspace,
   compacting = false,
   onDeleteThread,
   onOpenProjectChat,
@@ -833,8 +838,10 @@ export function ChatScreen({
         messages={messages}
         sending={sending}
         compacting={compacting}
+        review={workspaceReview}
         onClose={closeWorkbench}
         onFork={onForkThread}
+        onVerify={onVerifyWorkspace}
         onRewind={onRewindThread}
         onJump={jumpToMessage}
       />
