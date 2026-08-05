@@ -7,6 +7,9 @@
 .env
 .env.*
 !.env.example
+# Machine-specific signing overlay (thumbprint is public, but the file names a
+# certificate only this machine has). The .example stays committed.
+crates/desktop/tauri.signing.conf.json
 
 # --- Project-local Zest state (do not commit chat history or personal prompts) ---
 .zest/threads/
