@@ -13,8 +13,6 @@ import type {
   ApprovalChoice,
   ApprovalMode,
   CommandView,
-  RoutingRule,
-  RoutingView,
   AttachmentInput,
   ChatEvent,
   ContextUsage,
@@ -101,9 +99,6 @@ export type DesktopBackend = {
   approvalMode(): Promise<string>;
   verifyProvider(id: string): Promise<void>;
   listCommands(): Promise<CommandView[]>;
-  routingConfig(): Promise<RoutingView>;
-  suggestedRouting(): Promise<RoutingRule[]>;
-  setRoutingConfig(delegation: boolean, rules: RoutingRule[]): Promise<RoutingView>;
   endSession(): Promise<void>;
   getSystemPrompt(): Promise<SystemPromptInfo>;
   setSystemPrompt(custom: string): Promise<SystemPromptInfo>;
@@ -186,10 +181,6 @@ export function createTauriBackend(): DesktopBackend {
     approvalMode: () => tauriApi.approvalMode(),
     verifyProvider: (id) => tauriApi.verifyProvider(id),
     listCommands: () => tauriApi.listCommands(),
-    routingConfig: () => tauriApi.routingConfig(),
-    suggestedRouting: () => tauriApi.suggestedRouting(),
-    setRoutingConfig: (delegation, rules) =>
-      tauriApi.setRoutingConfig(delegation, rules),
     endSession: () => tauriApi.endSession(),
     getSystemPrompt: () => tauriApi.getSystemPrompt(),
     setSystemPrompt: (custom) => tauriApi.setSystemPrompt(custom),
@@ -506,22 +497,6 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async listCommands() {
       return [];
-    },
-    async routingConfig() {
-      return {
-        delegation: false,
-        rules: [],
-        providers: [],
-        configPath: "fixture",
-        defaultProvider: "",
-        projectScoped: false,
-      };
-    },
-    async suggestedRouting() {
-      return [];
-    },
-    async setRoutingConfig() {
-      throw new Error("fixture: routing is read-only");
     },
     async endSession() {
       /* no-op */

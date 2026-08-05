@@ -5,8 +5,6 @@ import type {
   ApprovalChoice,
   ApprovalMode,
   CommandView,
-  RoutingRule,
-  RoutingView,
   AttachmentInput,
   ChatEvent,
   ContextUsage,
@@ -263,18 +261,6 @@ export function verifyProvider(id: string) {
 
 export function listCommands() {
   return invoke<CommandView[]>("list_commands");
-}
-
-export function routingConfig() {
-  return invoke<RoutingView>("routing_config");
-}
-
-export function suggestedRouting() {
-  return invoke<RoutingRule[]>("suggested_routing");
-}
-
-export function setRoutingConfig(delegation: boolean, rules: RoutingRule[]) {
-  return invoke<RoutingView>("set_routing_config", { delegation, rules });
 }
 
 export function approvalMode() {

@@ -8,7 +8,6 @@ import {
   type LucideIcon,
   ScrollTextIcon,
   ServerIcon,
-  SplitIcon,
   UserIcon,
   XIcon,
 } from "lucide-react";
@@ -17,7 +16,6 @@ import {
   KeyboardShortcuts,
   useScrollIntoViewOnBump,
 } from "@/components/KeyboardShortcuts";
-import { RoutingSettings } from "@/components/RoutingSettings";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -50,7 +48,7 @@ type Props = {
   focusUser?: boolean;
   onClose: () => void;
   onChangeProvider: () => void;
-  /** Rebuild the session so a routing change applies without a restart. */
+  /** Rebuild the session after an external worker is enabled or disabled. */
   onReloadSession?: () => Promise<void>;
   onReconnect: () => void;
   onOpenFolder: () => void;
@@ -614,18 +612,7 @@ export function SettingsPanel({
           </SettingsSection>
 
           <SettingsSection
-            title="Routing"
-            icon={SplitIcon}
-            hint="Send task kinds to different providers"
-          >
-            <RoutingSettings
-              sessionProvider={session.provider}
-              onApply={onReloadSession}
-            />
-          </SettingsSection>
-
-          <SettingsSection
-            title="External workers"
+            title="ACP workers"
             icon={BotIcon}
             hint={
               externalLoading
@@ -640,8 +627,8 @@ export function SettingsPanel({
               className="min-w-0"
             >
               <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
-                Delegate bounded work to a CLI you already use. Sign in with Claude Code or
-                Gemini CLI first. Zest stores only the worker setup and never the CLI session.
+                Delegate bounded work to a CLI you already use through ACP or headless mode.
+                Sign in with Claude Code or Gemini CLI first. Zest stores only the worker setup.
               </p>
               {externalLoading ? (
                 <p className="text-xs text-muted-foreground" role="status">
