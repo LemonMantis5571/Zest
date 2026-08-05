@@ -298,6 +298,22 @@ fn emit_stream_json(event: StreamEvent<'_>) {
             "summary": summary,
             "diff": diff,
         })),
+        StreamEvent::QuestionNeeded {
+            question_id,
+            tool_call_id,
+            prompt,
+            choices,
+            multiple,
+            placeholder,
+        } => emit_json(serde_json::json!({
+            "kind": "question_needed",
+            "questionId": question_id,
+            "toolCallId": tool_call_id,
+            "question": prompt,
+            "choices": choices,
+            "multiple": multiple,
+            "placeholder": placeholder,
+        })),
         StreamEvent::ModelSubstituted { requested, served } => emit_json(serde_json::json!({
             "kind": "model_substituted",
             "requested": requested,
@@ -437,6 +453,9 @@ async fn run_doctor_live() -> anyhow::Result<()> {
         }
         StreamEvent::ApprovalNeeded { tool_name, .. } => {
             tool_error = Some(format!("unexpected approval for {tool_name}"));
+        }
+        StreamEvent::QuestionNeeded { .. } => {
+            tool_error = Some("unexpected interactive question".into());
         }
         StreamEvent::ModelSubstituted { served, .. } => {
             println!("\n\x1b[33m! The selected model was unavailable; this response used {served} instead.\x1b[0m");
@@ -616,6 +635,9 @@ async fn run_doctor_dual() -> anyhow::Result<()> {
         }
         StreamEvent::ApprovalNeeded { tool_name, .. } => {
             tool_error = Some(format!("unexpected approval for {tool_name}"));
+        }
+        StreamEvent::QuestionNeeded { .. } => {
+            tool_error = Some("unexpected interactive question".into());
         }
         StreamEvent::ModelSubstituted { served, .. } => {
             println!("\n\x1b[33m! The selected model was unavailable; this response used {served} instead.\x1b[0m");
@@ -952,6 +974,9 @@ impl Renderer {
                 tool_name, summary, ..
             } => {
                 println!("\n\x1b[33m? approve {tool_name}\x1b[0m \x1b[90m{summary}\x1b[0m");
+            }
+            StreamEvent::QuestionNeeded { prompt, .. } => {
+                println!("\n\x1b[36m? {prompt}\x1b[0m");
             }
             StreamEvent::ModelSubstituted { served, .. } => {
                 if self.thinking_open {

@@ -72,6 +72,18 @@ making changes in the user's project. ACP file and terminal requests stay
 inside the worker workspace, and the parent delegation approval is the
 boundary.";
 
+/// Added when the parent runtime registers `ask_user`. The tool is deliberately
+/// explicit: the model decides when a real user decision is needed, and the
+/// front-end renders the structured request instead of guessing from prose.
+pub const INTERACTIVE_QUESTION_SYSTEM: &str = "\
+# Asking the user
+
+When you need a user decision, preference, or missing detail before continuing, \
+use `ask_user`. Ask one focused question at a time. Use concise `choices` when \
+the user should pick from a finite set; omit them for a free-form answer. Do \
+not use it for status updates or questions you can answer by inspecting the \
+project. The turn pauses until the user answers, then continue from that answer.";
+
 /// Root-level docs pulled into the prompt when present, in priority order.
 pub const PROJECT_DOC_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "PROJECT_CONTEXT.md"];
 

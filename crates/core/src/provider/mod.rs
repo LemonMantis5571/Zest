@@ -280,6 +280,17 @@ pub enum StreamEvent<'a> {
         diff: Option<&'a str>,
         metadata: Option<crate::tools::ToolMetadata>,
     },
+    /// A provider-independent interactive question requested by the model.
+    /// The agent waits for the front-end answer before emitting the matching
+    /// tool result and continuing the turn.
+    QuestionNeeded {
+        question_id: String,
+        tool_call_id: String,
+        prompt: String,
+        choices: Vec<String>,
+        multiple: bool,
+        placeholder: Option<String>,
+    },
     /// The endpoint served a different model than the one asked for.
     ///
     /// Emitted at most once per turn and **only on disagreement** — silence
