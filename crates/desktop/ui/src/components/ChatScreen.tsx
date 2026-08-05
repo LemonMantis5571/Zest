@@ -423,6 +423,12 @@ export function ChatScreen({
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const closeWorkbench = useCallback(() => {
+    setWorkbenchOpen(false);
+    requestAnimationFrame(() => {
+      document.getElementById("workbench-toggle")?.focus();
+    });
+  }, []);
   const openDiff = useCallback(
     (path: string, diff: string) => setDiffTarget({ path, diff }),
     []
@@ -519,11 +525,6 @@ export function ChatScreen({
         setPaletteOpen(false);
         return;
       }
-      if (workbenchOpen) {
-        e.preventDefault();
-        setWorkbenchOpen(false);
-        return;
-      }
       if (sending && onStop) {
         e.preventDefault();
         onStop();
@@ -531,7 +532,7 @@ export function ChatScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [diffTarget, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen, workbenchOpen]);
+  }, [diffTarget, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
 
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.
@@ -620,12 +621,14 @@ export function ChatScreen({
               type="button"
               variant="ghost"
               size="icon-sm"
-              title="Workbench"
-              aria-label="Open workbench"
+              title={workbenchOpen ? "Close Workbench" : "Open Workbench"}
+              aria-label={workbenchOpen ? "Close Workbench" : "Open Workbench"}
+              aria-controls="workbench-panel"
               aria-expanded={workbenchOpen}
+              id="workbench-toggle"
               onClick={() => setWorkbenchOpen((value) => !value)}
             >
-              <PanelRightOpenIcon />
+              <PanelRightOpenIcon aria-hidden="true" />
             </Button>
             <Button
               type="button"
@@ -829,7 +832,7 @@ export function ChatScreen({
         messages={messages}
         sending={sending}
         compacting={compacting}
-        onClose={() => setWorkbenchOpen(false)}
+        onClose={closeWorkbench}
         onFork={onForkThread}
         onRewind={onRewindThread}
         onJump={jumpToMessage}
