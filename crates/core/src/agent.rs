@@ -280,9 +280,13 @@ impl Agent {
                 model: self.model.clone(),
                 system: self.system.clone(),
                 messages: staged.clone(),
-                tools: self.tools.definitions(),
+                // A model catalogue is a capability contract, not just picker
+                // decoration. Do not send function definitions to a text-only
+                // model, and do not send an effort request to a model whose
+                // provider has no wire-level effort control.
+                tools: self.tools_for_model(),
                 max_tokens: self.max_tokens,
-                effort: Some(self.effort.clone()),
+                effort: self.effort_for_model(),
                 thinking: true,
                 cancel: cancel.cloned(),
             };
@@ -407,6 +411,43 @@ impl Agent {
                 }
             }
         }
+    }
+
+    /// Return only the tools the selected model advertises support for.
+    ///
+    /// Provider implementations still own the final wire conversion. This
+    /// small gate keeps the agent loop from asking a text-only model to reason
+    /// about a function schema it cannot use.
+    fn tools_for_model(&self) -> Vec<crate::anthropic::types::ToolDef> {
+        let supports_tools = self
+            .provider
+            .models()
+            .into_iter()
+            .find(|spec| spec.id == self.model)
+            .map(|spec| spec.supports_tools)
+            .unwrap_or(true);
+        if supports_tools {
+            self.tools.definitions()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Return an effort request only when the selected model exposes one.
+    ///
+    /// `Agent::effort` remains a stable session value for persistence and the
+    /// UI, but providers without an effort control must receive `None` rather
+    /// than a plausible-looking `high` field that a vendor may reject or
+    /// interpret differently.
+    fn effort_for_model(&self) -> Option<String> {
+        let supports_effort = self
+            .provider
+            .models()
+            .into_iter()
+            .find(|spec| spec.id == self.model)
+            .map(|spec| !spec.efforts.is_empty())
+            .unwrap_or(true);
+        supports_effort.then(|| self.effort.clone())
     }
 
     fn check_cancel(cancel: Option<&CancelToken>) -> Result<()> {
@@ -764,6 +805,7 @@ mod tests {
     use crate::anthropic::types::Usage;
     use crate::auth::AuthStatus;
     use crate::provider::Completion;
+    use crate::provider::ModelSpec;
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -807,6 +849,96 @@ mod tests {
                 served_model: None,
             })
         }
+    }
+
+    struct CapabilityProvider {
+        seen: Arc<Mutex<Vec<(Option<String>, usize)>>>,
+    }
+
+    #[async_trait]
+    impl Provider for CapabilityProvider {
+        fn id(&self) -> &str {
+            "capability-test"
+        }
+
+        fn default_model(&self) -> &str {
+            "text-only-model"
+        }
+
+        fn models(&self) -> Vec<ModelSpec> {
+            vec![ModelSpec {
+                id: "text-only-model".into(),
+                efforts: Vec::new(),
+                context_window: 16_000,
+                supports_tools: false,
+                supports_vision: false,
+            }]
+        }
+
+        fn auth_status(&self) -> AuthStatus {
+            AuthStatus::Ready { account: None }
+        }
+
+        async fn stream_turn(
+            &self,
+            req: &TurnRequest,
+            _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+        ) -> Result<Completion> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((req.effort.clone(), req.tools.len()));
+            Ok(Completion {
+                content: vec![json!({ "type": "text", "text": "done" })],
+                stop_reason: Some("end_turn".into()),
+                usage: Usage::default(),
+                usage_available: true,
+                limits: None,
+                served_model: None,
+            })
+        }
+    }
+
+    struct NoopTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for NoopTool {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object", "properties": {} })
+        }
+
+        async fn run(
+            &self,
+            _input: serde_json::Value,
+        ) -> std::result::Result<crate::tools::ToolOutcome, String> {
+            Ok(crate::tools::ToolOutcome::text("noop"))
+        }
+    }
+
+    #[tokio::test]
+    async fn model_capabilities_gate_effort_and_tool_definitions() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(CapabilityProvider { seen: seen.clone() });
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(NoopTool));
+
+        let mut agent = Agent::new(provider, tools);
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        agent.send("hello", &mut sink).await.unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[(None, 0)],
+            "unsupported capabilities must not reach the provider"
+        );
     }
 
     #[tokio::test]

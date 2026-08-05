@@ -48,6 +48,7 @@ export function ModelEffortPicker({
   const capability = capabilityForModel(models, model);
   const contextLabel = formatContextWindow(capability?.contextWindow);
   const supportsEffort = effortOptions.length > 0;
+  const pickerLabel = supportsEffort ? "Model and effort" : "Model";
   const resetModel = defaultModel ?? modelOptions[0]?.id ?? model;
 
   useEffect(() => {
@@ -95,10 +96,10 @@ export function ModelEffortPicker({
       <button
         type="button"
         disabled={disabled}
-        aria-haspopup="listbox"
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? labelId : undefined}
-        title={supportsEffort ? "Model and reasoning effort" : "Model"}
+        title={pickerLabel}
         className={cn(
           "inline-flex max-w-[260px] cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none transition-colors",
           "hover:bg-secondary hover:text-foreground",
@@ -116,7 +117,7 @@ export function ModelEffortPicker({
         <div
           id={labelId}
           role="dialog"
-          aria-label="Model and effort"
+          aria-label={pickerLabel}
           className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[220px] rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg"
         >
           <div className="px-1.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -131,7 +132,7 @@ export function ModelEffortPicker({
               </div>
               {!supportsEffort ? (
                 <div className="mt-0.5 text-[10px] text-muted-foreground/75">
-                  Effort control unavailable for this model
+                  This model manages reasoning automatically
                 </div>
               ) : null}
             </div>
