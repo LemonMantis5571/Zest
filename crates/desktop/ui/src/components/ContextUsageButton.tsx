@@ -127,7 +127,9 @@ export function ContextUsageButton({
           </div>
 
           <p className="m-0 text-[10px] leading-snug text-muted-foreground">
-            Source: {usage.source === "last_turn" ? "last API turn" : "estimate"}.
+            {usage.source === "last_turn"
+              ? "Based on the latest response."
+              : "Estimated from the conversation."}
           </p>
           <p
             className={cn(
@@ -138,8 +140,8 @@ export function ContextUsageButton({
             )}
           >
             {usage.shouldAutoCompact
-              ? "Automatic compaction is due after this turn."
-              : `Automatically compacts at ${usage.autoCompactThresholdPercent}% usage.`}
+              ? "This conversation will be compacted after this turn."
+              : `Automatic compaction starts at ${usage.autoCompactThresholdPercent}% full.`}
           </p>
 
           <div className="mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 border-t border-border/60 pt-3 text-[11px]">
@@ -176,7 +178,7 @@ export function ContextUsageButton({
               </Button>
               <div className="mt-1.5 flex items-center gap-1 text-[10px] text-muted-foreground">
                 <CheckCircle2Icon className="size-3 shrink-0 text-emerald-400" />
-                A checkpoint is kept before compaction.
+                You can restore this conversation from before compaction.
               </div>
             </div>
           ) : null}

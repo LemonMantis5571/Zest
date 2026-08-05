@@ -64,7 +64,7 @@ export function ProviderPicker({
           Choose a provider
         </h1>
         <p className="m-0 max-w-[38ch] text-[13px] leading-relaxed text-muted-foreground">
-          Uses the sign-in your CLI already created — Zest never asks for your password.
+          Use an existing sign-in. Zest never asks for your password.
         </p>
       </header>
 
@@ -105,7 +105,7 @@ export function ProviderPicker({
           const selectedRow = p.id === selectedId;
           const verifyFailed = recentVerifyFailed(p.id);
           const detail = verifyFailed
-            ? "Last check failed — Connect again"
+            ? "Connection check failed — reconnect"
             : p.statusKind === "ready"
               ? p.method
               : p.statusKind === "unknown"
@@ -209,7 +209,7 @@ export function ProviderPicker({
         <div className="mt-4 rounded-lg border border-border/70 bg-card/40 p-3">
           <div className="text-xs font-medium">{selected.label} API key</div>
           <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-            Stored securely in the operating system credential manager.
+            Your key is stored securely by your operating system.
           </p>
           <div className="mt-2 flex gap-1.5">
             <input
@@ -233,7 +233,7 @@ export function ProviderPicker({
                     setApiKey("");
                     return onRefresh();
                   })
-                  .catch((err) => setKeyError(String(err)))
+                  .catch(() => setKeyError("Could not save the API key. Try again."))
                   .finally(() => setSavingKey(false));
               }}
             >
@@ -260,9 +260,6 @@ export function ProviderPicker({
   );
 }
 
-function shortenUnknown(detail: string) {
-  if (detail.toLowerCase().includes("outside a readable file")) {
-    return "Installed — session stored outside a readable file";
-  }
-  return detail;
+function shortenUnknown(_detail: string) {
+  return "Connection status unavailable";
 }

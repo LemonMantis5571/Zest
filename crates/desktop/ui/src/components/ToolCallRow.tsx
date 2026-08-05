@@ -23,6 +23,18 @@ type Props = {
   onOpenDiff?: (path: string, diff: string) => void;
 };
 
+function userFacingRoutingReason(reason: string): string {
+  const raw = reason.toLowerCase();
+  if (raw.includes("not loaded")) return "Provider unavailable.";
+  if (raw.includes("exhaust") || raw.includes("rate") || raw.includes("cooldown")) {
+    return "Provider limit reached.";
+  }
+  if (raw.includes("invalid model") || raw.includes("effort") || raw.includes("not supported")) {
+    return "The selected model or effort is unavailable.";
+  }
+  return "Provider could not handle this task.";
+}
+
 /**
  * Compact tool row — quiet chrome, expands for detail.
  * Rows with a diff open the full DiffViewer on click.
@@ -206,7 +218,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
           />
         ) : (
           <span className="min-w-0 flex-1 text-[11.5px] text-muted-foreground/75">
-            {hasSkipped ? `${skipped.length} fallback` : hasDiff ? "View diff" : null}
+            {hasSkipped ? `${skipped.length} skipped` : hasDiff ? "View diff" : null}
           </span>
         )}
         {hasDiff ? (
@@ -225,12 +237,12 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
           {hasSkipped ? (
             <div className="space-y-1">
               <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
-                Fallback reasons
+                Skipped routes
               </div>
               <ul className="space-y-0.5 text-[11px] text-muted-foreground">
                 {skipped.map((s) => (
                   <li key={`${s.providerId}:${s.reason}`}>
-                    skipped {s.providerId}: {s.reason}
+                    {s.providerId}: {userFacingRoutingReason(s.reason)}
                   </li>
                 ))}
               </ul>

@@ -57,11 +57,11 @@ export function MarkdownActions({ text, suggestedName, className }: Props) {
           description: savedPath,
         });
       }
-    } catch (error) {
+    } catch {
       toast.add({
         type: "error",
         title: "Could not save Markdown",
-        description: error instanceof Error ? error.message : String(error),
+        description: "Zest could not save the file. Try again.",
       });
     } finally {
       setSaving(false);

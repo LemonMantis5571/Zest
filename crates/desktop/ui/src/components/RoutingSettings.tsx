@@ -70,8 +70,8 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
         setRules(next.rules);
         setDelegation(next.delegation);
       })
-      .catch((err) => {
-        if (!cancelled) setError(String(err));
+      .catch(() => {
+        if (!cancelled) setError("Could not load routing settings. Try again.");
       });
     return () => {
       cancelled = true;
@@ -101,8 +101,8 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
       setDelegation(next.delegation);
       setSaved(true);
       setApplied(false);
-    } catch (err) {
-      setError(String(err));
+    } catch {
+      setError("Could not save routing settings. Try again.");
     } finally {
       setSaving(false);
     }
@@ -152,16 +152,16 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
           <span className="block text-sm font-medium">Allow delegation</span>
           <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
             {canDelegate
-              ? "Lets the model hand a subtask to another provider. Off means the delegate tool is not offered at all."
-              : "Needs a second configured provider before there is anywhere to delegate to."}
+              ? "Allows tasks to be sent to another provider. Turn this off to keep all work with the current provider."
+              : "Add another provider to enable task routing."}
           </span>
         </span>
       </label>
 
       {view.projectScoped ? (
         <div className="rounded-lg border border-[var(--warning,#c78a2a)]/40 bg-[var(--warning,#c78a2a)]/10 px-3 py-2 text-[11px] leading-snug text-muted-foreground">
-          This project has its own <code>zest.toml</code>, which replaces the user
-          config. Changes saved here will not apply to it.
+          This project uses its own <code>zest.toml</code>. Changes here will not
+          affect this project.
         </div>
       ) : null}
 
@@ -172,11 +172,11 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
       {canDelegate ? (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
           <span>
-            This chat runs on{" "}
+            This conversation uses{" "}
             <code className="text-foreground">{sessionProvider || "—"}</code>
           </span>
           <span>
-            Unmatched kinds go to{" "}
+            Unmatched tasks use{" "}
             <code className="text-foreground">
               {view.defaultProvider || "—"}
             </code>
@@ -190,13 +190,13 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
             Rules
           </span>
           <span className="text-[10px] text-muted-foreground/70">
-            first match wins
+            First matching rule is used
           </span>
         </div>
 
         {rules.length === 0 ? (
           <p className="text-[11px] leading-snug text-muted-foreground">
-            No rules. Delegated work goes to the default provider.
+            No rules yet. Routed tasks use the default provider.
           </p>
         ) : null}
 
@@ -240,8 +240,8 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
               sessionProvider &&
               rule.provider === sessionProvider ? (
                 <p className="mb-2 text-[10px] leading-snug text-muted-foreground/80">
-                  Same account as this chat — a fresh worker with no shared
-                  context, not a different model.
+                  This uses the same provider as the current conversation, but it
+                  starts without the conversation history.
                 </p>
               ) : null}
 
@@ -347,7 +347,7 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
                 .then((suggested) => {
                   if (suggested.length > 0) mutate(suggested);
                 })
-                .catch((err) => setError(String(err)));
+                .catch(() => setError("Could not suggest routing rules. Try again."));
             }}
           >
             <WandSparklesIcon className="size-3.5" /> Suggest rules
@@ -375,8 +375,8 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
         <div className="flex items-center justify-between gap-2 rounded-lg border border-border/80 bg-card/80 px-3 py-2">
           <span className="min-w-0 flex-1 text-[11px] leading-snug text-muted-foreground">
             {applied
-              ? "Applied. Delegation is live in this chat."
-              : "Saved, but not in effect yet — this session still has the old routing."}
+              ? "Applied. New routed tasks use these rules."
+              : "Saved. Apply now to use these rules in this conversation."}
           </span>
           {!applied && onApply ? (
             <Button
@@ -388,7 +388,7 @@ export function RoutingSettings({ sessionProvider, onApply }: Props) {
                 setError(null);
                 void onApply()
                   .then(() => setApplied(true))
-                  .catch((err) => setError(String(err)))
+                  .catch(() => setError("Could not apply routing settings. Try again."))
                   .finally(() => setApplying(false));
               }}
             >

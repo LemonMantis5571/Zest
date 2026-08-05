@@ -207,7 +207,7 @@ export function SettingsPanel({
             void backend.providerKeyPresent(current.id).then(setProviderKeyPresent).catch(() => setProviderKeyPresent(false));
           }
         } else {
-          setError(String(rowsR.reason));
+          setError("Could not load provider settings. Try again.");
         }
 
         if (promptR.status === "fulfilled") {
@@ -216,13 +216,14 @@ export function SettingsPanel({
           setBasePrompt(promptR.value.base);
           setPromptPath(promptR.value.customPath);
         } else {
-          // Never fake empty settings state — say why it is missing.
           setBasePrompt("");
-          setPromptError(String(promptR.reason));
+          setPromptError("Could not load your instructions. Try again.");
         }
 
         setSkills(skillsR.status === "fulfilled" ? skillsR.value : []);
-        if (skillsR.status === "rejected") setError(String(skillsR.reason));
+        if (skillsR.status === "rejected") {
+          setError("Could not load skills. Try again.");
+        }
 
         setUsage(snapR.status === "fulfilled" ? snapR.value : null);
       })
@@ -296,8 +297,8 @@ export function SettingsPanel({
       window.setTimeout(() => setPromptSavedFlash(false), 1600);
       const nextSkills = await getBackend().listSkills().catch(() => skills);
       setSkills(nextSkills);
-    } catch (err) {
-      setPromptError(String(err));
+    } catch {
+      setPromptError("Could not save your instructions. Try again.");
     } finally {
       setPromptSaving(false);
     }
@@ -322,8 +323,8 @@ export function SettingsPanel({
       onProfileChange(next);
       setDisplayName(next.displayName);
       setAvatarDataUrl(next.avatarDataUrl);
-    } catch (err) {
-      setProfileError(String(err));
+    } catch {
+      setProfileError("Could not save your profile. Try again.");
     } finally {
       setProfileSaving(false);
     }
@@ -339,8 +340,8 @@ export function SettingsPanel({
       setProviderKeyPresent(true);
       const rows = await getBackend().listProviders();
       setProvider(rows.find((row) => row.id === provider.id) ?? provider);
-    } catch (err) {
-      setError(String(err));
+    } catch {
+      setError("Could not save the API key. Try again.");
     } finally {
       setProviderKeySaving(false);
     }
@@ -353,8 +354,8 @@ export function SettingsPanel({
     try {
       await getBackend().deleteProviderKey(provider.id);
       setProviderKeyPresent(false);
-    } catch (err) {
-      setError(String(err));
+    } catch {
+      setError("Could not remove the API key. Try again.");
     } finally {
       setProviderKeySaving(false);
     }
@@ -365,8 +366,8 @@ export function SettingsPanel({
     setProfileError(null);
     try {
       setAvatarDataUrl(await optimizeAvatarFile(file));
-    } catch (err) {
-      setProfileError(err instanceof Error ? err.message : String(err));
+    } catch {
+      setProfileError("Could not use that image. Choose a JPEG under 48 KB.");
     }
   }
 
@@ -580,7 +581,7 @@ export function SettingsPanel({
                     <div className="text-sm font-medium">{row.providerId}</div>
                     <div className="mt-1.5 space-y-1 text-[11px] text-muted-foreground">
                       <div>
-                        <span className="text-foreground/80">Used in Zest</span>
+                        <span className="text-foreground/80">Zest usage</span>
                         {": "}
                         {row.measured.requests}{" "}
                         {row.measured.requests === 1 ? "request" : "requests"} ·{" "}
@@ -589,7 +590,7 @@ export function SettingsPanel({
                       <div>
                         {row.headroom.kind === "provider_reported" ? (
                           <>
-                            <span className="text-foreground/80">Provider limit</span>
+                            <span className="text-foreground/80">Provider-reported limit</span>
                             {": "}
                             {row.headroom.requestsRemaining != null
                               ? `${row.headroom.requestsRemaining} left`
@@ -600,7 +601,7 @@ export function SettingsPanel({
                           </>
                         ) : (
                           <span className="text-foreground/80">
-                            No limit shared by this provider
+                            This provider did not report a limit
                           </span>
                         )}
                       </div>
@@ -608,7 +609,7 @@ export function SettingsPanel({
                   </div>
                 ))}
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  This is what Zest used in this app — not your full plan remaining.
+                  Zest usage only — this does not show your provider plan balance.
                 </p>
               </div>
             ) : (
@@ -622,7 +623,7 @@ export function SettingsPanel({
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
               Optional project instructions. Saved to{" "}
               <span className="font-mono text-[11px] text-foreground/80">{promptPath}</span>
-              . Empty is fine — Zest still uses its built-in coding-agent rules.
+              . Leave it blank to use Zest's default instructions.
               Takes effect on the next message.
             </p>
             {!customPrompt.trim() && basePrompt.trim() ? (
@@ -651,7 +652,7 @@ export function SettingsPanel({
             <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
               <span className={overSoftLimit ? "text-destructive" : undefined}>
                 {customPrompt.length.toLocaleString()} chars
-                {overSoftLimit ? " · large prompts may hurt cache hit rate" : ""}
+                {overSoftLimit ? " · long prompts may use more context" : ""}
               </span>
               {promptSavedFlash ? (
                 <span className="text-[var(--success,#27a644)]">Saved — next message uses it</span>
@@ -691,7 +692,7 @@ export function SettingsPanel({
             }
           >
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              Cursor-style <span className="font-mono text-[11px]">SKILL.md</span> folders in{" "}
+              Skill folders with <span className="font-mono text-[11px]">SKILL.md</span> files in{" "}
               <span className="font-mono text-[11px]">.zest/skills/</span> and{" "}
               <span className="font-mono text-[11px]">~/.zest/skills/</span>.
             </p>
