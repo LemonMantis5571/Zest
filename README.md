@@ -208,7 +208,7 @@ called out on the summary.
 
 Project-scoped: `list_dir`, `glob`, `grep`, `read_file`, `write_file`, `edit_file`.
 Commands: `bash`. Network: `web_search` (DuckDuckGo HTML; no API key). Skills:
-`read_skill`. Multi-provider: `delegate` when more than one provider is configured.
+`read_skill`. External delegation: `delegate_external` for configured ACP/headless workers.
 
 ### External workers (CLI / ACP)
 
@@ -302,83 +302,40 @@ The transcript keeps what you typed, not the expansion, so the sidebar stays
 readable. An unknown `/token` is sent as-is rather than rejected — a typo should
 not eat your message. Start a message with `//` for a literal slash.
 
-### Routing (delegation)
+### Delegation (ACP workers)
 
-**Off by default.** Turn it on in **Settings → Routing**, where you also map task
-kinds to providers:
+Zest delegates bounded, approval-gated work only to external workers that you
+already use. Configure Claude Code or Gemini CLI under Settings → ACP workers;
+their own CLI sessions remain owned by those tools.
 
-| Kind | Provider | Model | Effort |
-|---|---|---|---|
-| `planning` | codex | gpt-5.6-luna | high |
-| `implementation` | claude | claude-opus-5 | high |
-| `mechanical` | codex | gpt-5.4-mini | low |
+The parent model receives `delegate_external` only when at least one worker is
+configured. Each worker runs in an isolated Git worktree by default and returns
+its answer plus a diff for review. ACP file and terminal requests stay inside
+that workspace, and the parent approval remains the execution boundary.
 
-**The parent chat does the orchestrating.** It delegates a piece, reads the
-answer, then delegates the next — so every hop is a row in your transcript with
-its provider, model and token delta. A *worker* can never delegate again: its
-registry structurally cannot contain the tool, which is what bounds the fan-out
-without a depth counter.
-
-Delegation is gated like anything else that spends money. Outside Auto and
-Bypass you get a card naming the exact provider and model before the call goes
-out, and the route is re-checked at dispatch — if a rate limit changed the
-answer between the card and the call, it aborts rather than quietly spending a
-different account.
-
-Off means the `delegate` tool is **not registered at all** — the model cannot see
-it and cannot spend a second subscription. Configuring rules is not enough on its
-own; the switch is separate.
-
-Rules need two or more configured providers. Model dropdowns are fed by each
-provider's real catalogue, and a rule is validated against it before saving.
-Rules are consulted in order, first match wins, so listing two providers for one
-kind gives you a fallback chain. A kind with no matching rule goes to
-`[routing].default`. Saved to `~/.zest/zest.toml`.
-
-After saving, hit **Apply now** — the tool registry is built once per session, so
-New chat (which only swaps the thread) keeps the old routing. Applying rebuilds
-the session and reloads the open chat from disk; nothing is lost.
-
-**Never configured routing before?** With two providers loaded, **Suggest rules**
-fills in a working starting point derived from what you actually have. It only
-suggests rules that reach a *different* provider — see below for why that matters.
-
-Each rule shows what it truly resolves to (`claude · claude-opus-5 · high`).
-A rule pointing at the provider the open chat already uses is noted, not
-flagged: that is still a real delegation — the worker starts with **no
-conversation history** — it just isolates context rather than changing model.
-Point the kind elsewhere if you wanted a different model.
-
-Two things sound like "the default" and are not the same:
-
-| | |
-|---|---|
-| **This chat runs on** | whichever provider you picked in the launcher |
-| **`[routing].default`** | where a *delegated* task goes when no rule matches — and the chat provider for the CLI, which has no picker |
-
-The Routing panel states both, because a note about one reads as a claim about
-the other otherwise.
-
-Equivalent TOML:
+For headless or CI setup, declare workers explicitly:
 
 ```toml
-[routing]
-delegation = true
-default = { provider = "codex", model = "gpt-5.6-sol" }
-rules = [
-  { kind = "planning", provider = "codex", model = "gpt-5.6-luna" },
-  { kind = "implementation", provider = "claude", model = "claude-opus-5" },
-  # `effort` and `prompt` are optional. Worth setting both: routing a
-  # mechanical task to a cheap model and then running it at max effort spends
-  # most of what the routing saved.
-  { kind = "mechanical", provider = "codex", model = "gpt-5.4-mini", effort = "low",
-    prompt = "Make the smallest change that works. Do not refactor." },
+[agents.claude]
+mode = "headless"
+command = "claude"
+args = [
+  "--print",
+  "--output-format", "stream-json",
+  "--strict-mcp-config",
+  "{prompt}",
 ]
+workspace = "isolated"
+
+[agents.gemini]
+mode = "acp"
+command = "gemini"
+args = ["--acp"]
+workspace = "isolated"
 ```
 
-Delegated workers get the read and write tools but never `bash`, and never
-`delegate` itself — recursion is prevented by the capability being absent rather
-than by a depth counter.
+Zest never performs their sign-in, embeds their SDK, or attaches MCP servers.
+The worker executable must already be authenticated and available on the PATH.
 
 ### Chat history (by project)
 
@@ -476,7 +433,7 @@ crates/core/       zest-core — agent loop, providers, tools, skills, threads
 crates/cli/        zest — terminal front-end
 crates/desktop/    zest-desktop — Tauri + React (ui/)
 scripts/           gateway helpers + verify.ps1
-zest.toml          providers + routing (safe to commit)
+zest.toml          providers + ACP worker setup (safe to commit)
 .env.example       template for ZEST_GATEWAY_KEY
 ```
 
@@ -486,7 +443,7 @@ Agent-facing docs for contributors: `AGENTS.md`, `PROJECT_CONTEXT.md`, `context/
 
 ## Configuration
 
-`zest.toml` declares providers and routing. API keys are never stored there: API-key providers use
+`zest.toml` declares providers, the default provider, and optional ACP workers. API keys are never stored there: API-key providers use
 the operating system credential manager, with optional environment-variable fallbacks for CI.
 
 Looked up in this order:
@@ -517,6 +474,15 @@ switch when the destination has neither project nor user-global config. This
 keeps an open Codex session usable in a new codebase without weakening the
 explicit project-config boundary; create `~/.zest/zest.toml` to make the setup
 persist across restarts as well.
+
+When more than one Zest API provider is configured, choose the parent provider
+explicitly:
+
+```toml
+[default]
+provider = "codex"
+model = "gpt-5.6-terra"
+```
 
 | Variable | Purpose |
 |----------|---------|
@@ -574,7 +540,7 @@ cargo run -p zest -- doctor --live
 
 Opt-in. Requires a working gateway/login and spends real quota. Reloads the usage ledger from disk
 before asserting success (no RAM-only fake pass). Checks streamed text, `read_file` on `README.md`,
-ledger delta, thread reload. Writes/`delegate` disabled for this command. If creds are missing,
+ledger delta, thread reload. Writes/external workers are disabled for this command. If creds are missing,
 skip live doctor — do not invent a green result.
 
 ---

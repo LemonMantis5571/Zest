@@ -2,111 +2,70 @@
 
 ## Project Name
 
-**Zest** — a coding harness written in Rust.
+**Zest** - a provider-aware coding harness with explicit ACP delegation, written in Rust.
 
 ## Purpose
 
-Zest is a **multi-provider orchestration harness** for coding agents.
+Zest gives a coding agent a focused parent session: it reads and edits a project, runs commands,
+asks before risky work, shows diffs, and keeps the transcript recoverable.
 
-The defining capability is routing: send each task to the model that suits it, across providers
-that are authenticated separately — Gemini and Claude work can run through already-authenticated
-external CLIs, while GPT-5.6 Luna uses a Codex login — and keep a running account of what each provider has
-left. Cheap, fast models take mechanical work; expensive models take the hard reasoning; the
-harness decides which is which and never silently burns the wrong budget.
+When a task is better handled by another tool, Zest delegates a bounded subtask to an external
+worker that is already authenticated in its own CLI. Claude Code and Gemini CLI are the first
+workers. Zest uses ACP or a non-interactive CLI, keeps the worker in an isolated workspace by
+default, requires approval before execution, and returns the answer and diff for review.
 
-Around that sits the coding-agent shape (Claude Code / Codex): it reads and edits a codebase, runs
-commands, and asks permission before doing anything it cannot take back.
-
-What makes this worth building is that no single-vendor tool does it. Claude Code speaks Anthropic,
-Codex speaks OpenAI. Zest is provider-agnostic by construction, which means the routing policy and
-the usage ledger are the product — not the agent loop, which is comparatively simple.
-
-It is **not LimeBot**, and that distinction matters for every decision here:
-
-| | LimeBot (LimeBot-OS) | Zest |
-|---|---|---|
-| Shape | Personal AI assistant | Coding agent |
-| Interaction | Long-running, multi-channel (Discord, Telegram, WhatsApp, web) | Invoked in a project directory, one session at a time |
-| Emphasis | Memory, persona, conversation | Filesystem, tools, approvals, diffs |
-| Stack | Python + Node CLI + React web UI | Rust + Tauri, one installer with a bundled gateway sidecar |
-| Relationship | Reference implementation | Shares design lessons, no code and no runtime |
-
-Zest borrows LimeBot's accumulated design — skill layout, prompt work, config shape — as
-*concepts*. Nothing is imported.
+Zest does not implement vendor OAuth for workers, embed their SDKs, attach MCP servers, or route
+individual tasks between Zest providers. The selected Zest provider owns the parent conversation.
 
 ## Main Users
 
 The author, working in local repositories on Windows. Not a product; no multi-tenancy, no hosted
-component, no accounts.
+component, no accounts or telemetry.
 
 ## Main Systems
 
-- **`zest-core`** — headless library: model client, agent loop, tool registry. No terminal or UI
-  assumptions.
-- **`zest`** — terminal front-end. One consumer of the core.
-- **`zest-desktop`** — Tauri shell: provider picker, Codex Connect (vendor OAuth spawn), and chat session
-  UI (projects sidebar, attachments, approvals/diffs, context meter). Webview is a Vite + React +
-  shadcn build under `crates/desktop/ui/` (Node is build/dev only).
-- **Anthropic Messages API** — the wire protocol implemented natively today, over raw HTTP + SSE.
-  No SDK.
-
-Planned, and the actual point of the project:
-
-- **Provider layer** — one `Provider` per authenticated backend (Anthropic, Codex, Antigravity/
-  Gemini, …). Each owns its credentials, its model catalogue, and how it reports usage.
-- **Router + delegated workers** — parent chat stays provider-pinned; multi-provider work goes
-  through `delegate` workers resolved by routing policy + ledger fallback (v1 decision).
-- **Usage ledger** — per-provider consumption and remaining headroom, persisted across runs.
-- **Gateway (bundled runtime)** — Zest pins and ships
-  [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Tauri sidecar. It holds OAuth
-  logins for Codex, Claude, Gemini/Antigravity, Grok and Kimi and re-exposes them through compatible
-  APIs. Zest owns provisioning, loopback security, supervision, diagnostics and UX; CLIProxyAPI
-  owns vendor OAuth and protocol translation. The desktop only launches the Codex sign-in; Claude
-  Code and Gemini CLI workers authenticate in their own CLIs. A hand-installed gateway remains an
-  override.
+- **zest-core** - headless library: provider layer, agent loop, tools, ACP/headless workers,
+  persistence, usage ledger, and approvals.
+- **zest** - terminal front-end. One consumer of the core.
+- **zest-desktop** - Tauri shell: provider picker, Codex Connect, API-key setup, ACP worker setup,
+  project/chat history, attachments, approvals/diffs, context meter, and recovery controls.
+- **Provider layer** - one Provider per configured parent backend. Anthropic, gateway, and
+  OpenAI-compatible providers share the abstraction but do not imply task routing.
+- **ACP workers** - configured under [agents.<id>]; invoked only through delegate_external.
+- **Usage ledger** - records Zest traffic honestly per provider. External CLI usage is not invented.
+- **Gateway** - bundled CLIProxyAPI sidecar for the supported subscription bootstrap. It is an
+  implementation detail of provider access, not an external worker.
 
 ## Important Constraints
 
-- **Rust agent path.** No Python, no Node in the agent/runtime path. Desktop UI may use a React
-  webview built ahead of time; the agent loop stays in `zest-core`.
-- **Providers are a first-class abstraction**, not configuration. Whether a given provider is
-  reached natively or through a gateway must be an implementation detail behind one trait, so
-  either can be swapped without touching the router.
-- **Model: `claude-opus-5`** is the default for Anthropic. See `context/constraints.md` for the API
-  rules that follow — several cause a 400 if violated.
-- **Usage accounting must be honest.** Subscription-backed CLI logins mostly do not expose a
-  "remaining quota" endpoint. Where a provider reports headroom, read it; where it does not, meter
-  locally against a configured budget and label the number as an estimate. Never present a guess
-  as a reading.
-- **One install, managed runtime.** The desktop installer includes the pinned CLIProxyAPI sidecar,
-  so users install and configure nothing separately. Native provider clients may replace it one
-  provider at a time behind `Provider` only when documented APIs make that safer; do not rebuild a
-  second monolithic gateway inside Zest.
-- **The permission layer gates dangerous tools.** `write_file` and `edit_file` ship with an
-  approval gate and atomic replace. `bash` ships behind the same gate: a small set of
-  genuinely read-only, metacharacter-free commands (`cargo check`, `git status`, …) runs
-  unattended; everything else shows the exact command line and waits. There is no OS sandbox
-  — see `memory/decisions.md` for why that bar was dropped rather than waited on.
+- **Rust agent path.** No Python or Node in the agent/runtime path. The desktop UI may use a
+  prebuilt React webview; the agent loop stays in zest-core.
+- **ACP stays explicit.** Workers must be configured and already signed in. No hidden provider
+  switching or automatic delegation.
+- **Secrets stay out of config.** API keys use the OS credential manager with an environment
+  fallback for CI. Worker CLI sessions remain owned by their CLIs.
+- **Usage accounting must be honest.** Mark provider-reported usage separately from unavailable
+  usage. Never fabricate exact external-worker token counts.
+- **One install, managed runtime.** The desktop installer includes the pinned gateway sidecar; do
+  not add a second monolithic runtime.
+- **The permission layer gates dangerous tools.** Writes and commands use the approval policy.
+  External worker execution is also approval-gated.
+- **Provider-specific history is immutable.** A chat stays with its selected provider because
+  wire history can contain provider-specific thinking signatures and tool shapes.
 
 ## Preferred Style
 
 - Direct and concrete. Lead with the outcome, then the reasoning.
-- Say what is verified and what is not. "It compiles" and "it works against the live API" are
-  different claims and should never be blurred.
-- Comments explain *why*, especially where the code looks wrong but isn't (see the raw-JSON
-  content blocks, or the byte-level SSE buffering). Never comment what the next line does.
-- Prose over bullet fragments when explaining a decision.
+- Say what is verified and what is not. Compilation and live API success are different claims.
+- Comments explain why, especially around wire formats, process boundaries, and security.
+- Preserve the lightweight desktop identity: sleek, quiet UI with useful state and visible diffs.
 
 ## Things the AI Should Avoid
 
-- **Treating Zest as LimeBot.** Different project, different shape. Do not add channels, personas,
-  or assistant features.
-- **Adding an SDK.** There is no official Anthropic Rust SDK; community ones are thin. The
-  hand-written client is deliberate and gives full control over streaming and tool blocks.
-- **Guessing at the Messages API.** Model IDs, streaming event shapes, and which parameters 400
-  have all changed recently. Check the reference; do not answer from memory.
-- **Typing the assistant content blocks.** They are `serde_json::Value` on purpose — see
-  `memory/decisions.md`.
-- **Sampling parameters.** `temperature`, `top_p`, `top_k` are rejected on Opus 5.
-- **Claiming the loop works** until it has been run against a live key end to end with a real tool
-  call.
+- Treating Zest as a general assistant or adding channels, personas, or hosted accounts.
+- Reintroducing a Zest-to-Zest routing policy or the removed internal delegate tool.
+- Implementing OAuth or copying secrets for Claude Code/Gemini CLI.
+- Attaching MCP servers to external workers.
+- Adding an SDK when the existing hand-written provider clients are sufficient.
+- Guessing at provider APIs, model IDs, or streaming shapes.
+- Claiming the loop works until it has been tested against the relevant live path.
