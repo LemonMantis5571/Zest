@@ -2118,6 +2118,17 @@ async fn send_message(
                     summary,
                     diff,
                 },
+                // Surfaced as a warning rather than swallowed: the model chip
+                // shows what was *requested*, so without this the transcript
+                // would silently attribute a turn to the wrong model.
+                StreamEvent::ModelSubstituted { requested, served } => ChatEvent::Warning {
+                    session_id: session_id.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    message: format!(
+                        "This turn was served by `{served}`, not the `{requested}` you selected."
+                    ),
+                },
             };
 
             if let Ok(mut thread) = live_thread.lock() {

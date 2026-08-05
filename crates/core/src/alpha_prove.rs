@@ -114,6 +114,7 @@ impl Provider for ScriptedProvider {
                 },
                 usage_available: true,
                 limits: None,
+                served_model: None,
             });
         }
 
@@ -128,6 +129,7 @@ impl Provider for ScriptedProvider {
             },
             usage_available: true,
             limits: None,
+            served_model: None,
         })
     }
 }
@@ -210,6 +212,7 @@ fn fallback_reasons_surface_exhausted_provider() {
                 requests_remaining: Some(0),
                 ..Default::default()
             }),
+            served_model: None,
         },
     );
 
