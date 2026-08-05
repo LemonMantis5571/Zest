@@ -19,7 +19,6 @@ futures-util.workspace = true
 getrandom = "0.3"
 globset.workspace = true
 ignore.workspace = true
-keyring.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -31,3 +30,18 @@ toml.workspace = true
 toml_edit = "0.25"
 tempfile = "3"
 walkdir.workspace = true
+
+# keyring ships NO credential store unless a backend feature is enabled — it
+# silently falls back to an in-memory mock, where `set` succeeds and a later
+# `get` from a fresh Entry finds nothing. That shipped: API keys appeared to
+# save and every provider then reported itself unconfigured.
+#
+# Per-target rather than one feature list, so Windows does not pull dbus.
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
