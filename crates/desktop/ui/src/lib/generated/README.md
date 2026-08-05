@@ -18,5 +18,7 @@ Committed files:
 - `ModelCapability.ts` — model id + efforts
 - `ToolMetaView.ts` — delegation provenance side-channel
 
+`WorkspaceReview.ts` is the read-only Git workspace review result.
+
 `ChatMessage` / `ToolPart` / `UsageSnapshot` stay handwritten in `../types.ts`
 (UI projection + usage command). App code imports from `../types.ts`.

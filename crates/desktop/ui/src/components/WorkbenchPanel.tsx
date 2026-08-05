@@ -15,7 +15,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { ChatMessage, SessionInfo } from "@/lib/types";
+import type { ChatMessage, SessionInfo, WorkspaceReview } from "@/lib/types";
 
 type Props = {
   open: boolean;
@@ -23,8 +23,10 @@ type Props = {
   messages: ChatMessage[];
   sending: boolean;
   compacting: boolean;
+  review: WorkspaceReview | null;
   onClose: () => void;
   onFork: () => Promise<void>;
+  onVerify: () => Promise<void>;
   onRewind: (checkpointId: string) => Promise<void>;
   onJump: (messageId: string) => void;
 };
@@ -63,8 +65,10 @@ export function WorkbenchPanel({
   messages,
   sending,
   compacting,
+  review,
   onClose,
   onFork,
+  onVerify,
   onRewind,
   onJump,
 }: Props) {
@@ -110,6 +114,15 @@ export function WorkbenchPanel({
     setBusyAction("fork");
     try {
       await onFork();
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function runVerify() {
+    setBusyAction("verify");
+    try {
+      await onVerify();
     } finally {
       setBusyAction(null);
     }
@@ -255,6 +268,80 @@ export function WorkbenchPanel({
                   <div className="mt-0.5 font-mono text-foreground">{messages.length}</div>
                 </div>
               </div>
+            </section>
+
+            <section className="rounded-xl border border-border/70 bg-background/30 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {review?.patchCheck === "issues" ? (
+                      <TriangleAlertIcon className="size-3.5 text-amber-400" aria-hidden="true" />
+                    ) : review ? (
+                      <CheckCircle2Icon className="size-3.5 text-primary" aria-hidden="true" />
+                    ) : null}
+                    Workspace check
+                  </div>
+                  <div className="mt-1 text-xs text-foreground">
+                    {review?.summary ?? "Review Git changes without changing files."}
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={sending || compacting || busyAction !== null}
+                  onClick={() => void runVerify()}
+                >
+                  <RefreshCwIcon
+                    data-icon="inline-start"
+                    className={cn(busyAction === "verify" && "animate-spin")}
+                    aria-hidden="true"
+                  />
+                  {review ? "Run again" : "Verify"}
+                </Button>
+              </div>
+              {review ? (
+                <div className="mt-3 space-y-2 text-[11px]">
+                  <div className="flex items-center justify-between gap-3 rounded-md bg-secondary/50 px-2 py-1.5">
+                    <span className="text-muted-foreground">Patch check</span>
+                    <span
+                      className={cn(
+                        "font-medium",
+                        review.patchCheck === "clean"
+                          ? "text-primary"
+                          : review.patchCheck === "issues"
+                            ? "text-amber-400"
+                            : "text-muted-foreground"
+                      )}
+                    >
+                      {review.patchCheck === "clean"
+                        ? "Clear"
+                        : review.patchCheck === "issues"
+                          ? "Review needed"
+                          : "Unavailable"}
+                    </span>
+                  </div>
+                  {review.changedFiles.length > 0 ? (
+                    <div className="space-y-1 rounded-md bg-secondary/50 px-2 py-1.5">
+                      <div className="text-muted-foreground">
+                        Changed files ({review.changedFileCount})
+                      </div>
+                      <ul className="space-y-0.5 font-mono text-[10px] text-foreground/80">
+                        {review.changedFiles.slice(0, 5).map((file) => (
+                          <li key={file} className="truncate" title={file}>
+                            {file}
+                          </li>
+                        ))}
+                      </ul>
+                      {review.changedFileCount > review.changedFiles.length ? (
+                        <div className="text-[10px] text-muted-foreground">
+                          +{review.changedFileCount - review.changedFiles.length} more
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </section>
 
             <section>
