@@ -467,6 +467,8 @@ async fn run_doctor_dual() -> anyhow::Result<()> {
         DELEGATE_TOOL,
         &format!("Delegated to {worker_id}"),
         false,
+        None,
+        None,
         Some(ToolMetadata::Delegation {
             provider_id: worker_id.clone(),
             model: "doctor".into(),

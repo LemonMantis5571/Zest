@@ -25,6 +25,7 @@ import {
   AttachmentTitle,
 } from "@/components/ui/attachment";
 import { Button } from "@/components/ui/button";
+import { IconSwap } from "@/components/ui/icon-swap";
 import {
   chipLabel,
   modelLabel,
@@ -362,31 +363,34 @@ export function Composer({
                 </span>
               )}
             </div>
-            {sending ? (
-                <Button
-                type="button"
-                size="icon-sm"
-                aria-label="Stop"
-                title="Stop (Esc or Ctrl+.)"
-                className="rounded-full"
-                onClick={() => onStop?.()}
-              >
-                <SquareIcon className="size-3.5 fill-current" />
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                size="icon-sm"
-                disabled={!canSend}
-                aria-label="Send"
-                className="rounded-full"
-                onClick={() => {
-                  if (canSend) onSubmit();
-                }}
-              >
-                <ArrowUpIcon />
-              </Button>
-            )}
+            {/*
+              One button for both states, not a ternary over two. Swapping the
+              element unmounted whichever was focused, so starting a turn from
+              the keyboard dropped focus to the body — and a remount cannot be
+              cross-faded anyway.
+            */}
+            <Button
+              type="button"
+              size="icon-sm"
+              disabled={!sending && !canSend}
+              aria-label={sending ? "Stop" : "Send"}
+              title={sending ? "Stop (Esc or Ctrl+.)" : undefined}
+              className="rounded-full"
+              onClick={() => {
+                if (sending) {
+                  onStop?.();
+                  return;
+                }
+                if (canSend) onSubmit();
+              }}
+            >
+              <IconSwap
+                className="size-3.5"
+                active={sending}
+                initial={<ArrowUpIcon className="size-3.5" />}
+                swapped={<SquareIcon className="size-3.5 fill-current" />}
+              />
+            </Button>
           </div>
         </div>
         <div className="mt-2 flex items-center justify-between gap-2 px-1 text-[11px] text-muted-foreground">

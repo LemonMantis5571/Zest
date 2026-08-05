@@ -307,6 +307,59 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     }
 }
 
+fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
+    let descriptor = config
+        .providers
+        .get(id)
+        .map(|entry| descriptor_from_config(id, entry))
+        .unwrap_or_else(|| descriptor_for_picker_id(id));
+    let (status_kind, status_label, detail) = match ProviderRegistry::from_config(config)
+        .0
+        .get(id)
+        .map(|provider| provider.auth_status())
+    {
+        Some(AuthStatus::Ready { .. }) => ("ready", "Ready", "API key provider".to_string()),
+        Some(AuthStatus::Unknown { reason }) => ("unknown", "Unverified", reason),
+        Some(AuthStatus::NotLoggedIn { fix }) => ("not_logged_in", "Not configured", fix),
+        Some(AuthStatus::Unconfigured) | None => (
+            "unconfigured",
+            "Not configured",
+            "Set an API key in Settings".to_string(),
+        ),
+    };
+    ProviderView {
+        id: id.to_string(),
+        label: id
+            .split(['-', '_'])
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        method: "API key".into(),
+        status_kind: status_kind.into(),
+        status_label: status_label.into(),
+        detail,
+        selectable: status_kind == "ready",
+        can_connect: false,
+        configured: true,
+        default_model: descriptor.default_model,
+        models: descriptor
+            .models
+            .into_iter()
+            .map(|model| ModelCapability {
+                id: model.id,
+                efforts: model.efforts,
+            })
+            .collect(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -423,6 +476,15 @@ struct SessionInfo {
     warning: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadingDiffView {
+    diff: String,
+    summary: String,
+    removed_lines: usize,
+    folded_lines: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -483,6 +545,12 @@ enum ChatEvent {
         summary: String,
         #[serde(rename = "isError")]
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        diff: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "export-bindings", ts(optional))]
         metadata: Option<ToolMetaView>,
@@ -618,16 +686,67 @@ fn remember_workspace_config(state: &AppState, config: &Config) {
 #[tauri::command]
 fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     let config = load_workspace_config(&state);
-    detect_all()
+    let mut rows: Vec<ProviderView> = detect_all()
         .iter()
         .filter(|s| PICKER_IDS.contains(&s.id))
         .map(|s| provider_view_from_slot(s, &config))
-        .collect()
+        .collect();
+    let existing: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+    for (id, entry) in &config.providers {
+        if existing.contains(id) || !matches!(entry, ProviderConfig::OpenaiCompatible { .. }) {
+            continue;
+        }
+        rows.push(configured_provider_view(id, &config));
+    }
+    rows
 }
 
 #[tauri::command]
 fn refresh_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     list_providers(state)
+}
+
+#[tauri::command]
+fn set_provider_key(state: State<'_, AppState>, id: String, key: String) -> Result<(), String> {
+    let config = load_workspace_config(&state);
+    let Some(ProviderConfig::OpenaiCompatible {
+        credential,
+        api_key_env,
+        ..
+    }) = config.providers.get(&id)
+    else {
+        return Err(format!(
+            "provider `{id}` is not an OpenAI-compatible provider"
+        ));
+    };
+    if credential.is_none() && api_key_env.is_some() {
+        return Err("this provider is configured for environment authentication".into());
+    }
+    zest_core::credentials::set(credential.as_deref().unwrap_or(&id), &key)
+}
+
+#[tauri::command]
+fn delete_provider_key(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let config = load_workspace_config(&state);
+    let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
+    else {
+        return Err(format!(
+            "provider `{id}` is not an OpenAI-compatible provider"
+        ));
+    };
+    zest_core::credentials::delete(credential.as_deref().unwrap_or(&id))
+}
+
+#[tauri::command]
+fn provider_key_present(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let config = load_workspace_config(&state);
+    let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
+    else {
+        return Err(format!(
+            "provider `{id}` is not an OpenAI-compatible provider"
+        ));
+    };
+    zest_core::credentials::present(credential.as_deref().unwrap_or(&id))
 }
 
 #[tauri::command]
@@ -806,6 +925,12 @@ async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
         )
     })?;
 
+    if matches!(provider.auth_status(), AuthStatus::Unconfigured) {
+        return Err(ProbeFailure::Setup(format!(
+            "{id} is not configured with a usable API key"
+        )));
+    }
+
     let model = provider.default_model().to_string();
     probe(provider.as_ref(), &model)
         .await
@@ -819,7 +944,7 @@ async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
 fn local_gateway_url(config: &Config, id: &str) -> Option<String> {
     match config.providers.get(id)? {
         ProviderConfig::Gateway { base_url, .. } => Some(base_url.clone()),
-        ProviderConfig::Anthropic { .. } => None,
+        ProviderConfig::Anthropic { .. } | ProviderConfig::OpenaiCompatible { .. } => None,
     }
 }
 
@@ -1145,6 +1270,8 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
             id,
             summary,
             is_error,
+            path,
+            diff,
             metadata,
             ..
         } => {
@@ -1173,7 +1300,16 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
                     },
                 },
             });
-            thread.apply_tool_result(message_id, id, name, summary, *is_error, core_meta);
+            thread.apply_tool_result(
+                message_id,
+                id,
+                name,
+                summary,
+                *is_error,
+                path.as_deref(),
+                diff.as_deref(),
+                core_meta,
+            );
         }
         ChatEvent::ApprovalNeeded {
             message_id,
@@ -1230,10 +1366,25 @@ async fn start_session(
     let slot = detect_all()
         .into_iter()
         .find(|s| s.id == id)
-        .ok_or_else(|| format!("unknown provider `{id}`"))?;
+        .map(|slot| (slot.status.selectable(), slot.label.to_string()));
+    let (selectable, provider_label) = match slot {
+        Some(slot) => slot,
+        None => {
+            let provider = ProviderRegistry::from_config(&config)
+                .0
+                .get(&id)
+                .ok_or_else(|| format!("unknown provider `{id}`"))?;
+            (
+                provider.auth_status().selectable(),
+                configured_provider_view(&id, &config).label,
+            )
+        }
+    };
 
-    if !slot.status.selectable() {
-        return Err(format!("{} is not ready — connect it first", slot.label));
+    if !selectable {
+        return Err(format!(
+            "{provider_label} is not ready — configure it first"
+        ));
     }
 
     // Only the local half. Opening a chat waits for the gateway's port, which is
@@ -1303,7 +1454,7 @@ async fn start_session(
         model: runtime.model,
         effort: runtime.effort,
         provider_id: id,
-        provider_label: slot.label.to_string(),
+        provider_label,
         root,
         thread_id: thread.id.clone(),
         thread,
@@ -1726,10 +1877,11 @@ fn delete_thread(
                 None => session.root.clone(),
             };
             let store = open_store(&target_root)?;
-            // Ownership check — never delete another provider's thread.
-            let _ = store
-                .load_for_provider(&id, &session.provider_id)
-                .map_err(|e| e.to_string())?;
+            // Deletion is allowed across providers: the sidebar intentionally
+            // lists every provider's chats, and removing a chat does not
+            // restore or execute it. Reopening still uses load_for_provider
+            // and therefore keeps the cross-provider safety boundary.
+            let _ = store.load(&id).map_err(|e| e.to_string())?;
             store.delete(&id).map_err(|e| e.to_string())?;
 
             // Compare via display paths — `session.root` may be `\\?\…` while the
@@ -1890,6 +2042,8 @@ async fn send_message(
                     id,
                     summary,
                     is_error,
+                    path,
+                    diff,
                     metadata,
                 } => ChatEvent::ToolCallResult {
                     session_id: session_id.clone(),
@@ -1900,6 +2054,8 @@ async fn send_message(
                     id: id.to_string(),
                     summary: summary.to_string(),
                     is_error,
+                    path: path.map(str::to_string),
+                    diff: diff.map(str::to_string),
                     metadata: metadata.map(ToolMetaView::from),
                 },
                 StreamEvent::ApprovalNeeded {
@@ -2108,6 +2264,38 @@ fn approval_mode(state: State<'_, AppState>) -> Result<String, String> {
         .map_err(|_| "approval policy lock poisoned".to_string())?
         .mode();
     Ok(mode.as_str().to_string())
+}
+
+#[tauri::command]
+async fn generate_reading_diff(
+    state: State<'_, AppState>,
+    diff: String,
+) -> Result<ReadingDiffView, String> {
+    let snapshot = state
+        .sessions
+        .session_info_snapshot(|session| {
+            (
+                session.agent.provider(),
+                session.model.clone(),
+                session.effort.clone(),
+            )
+        })
+        .map_err(map_session_err)?
+        .ok_or_else(|| {
+            desktop_err(
+                "no_session",
+                "open a provider before generating a reading diff",
+            )
+        })?;
+    let result = zest_core::abridge_reading_diff(snapshot.0, &snapshot.1, &snapshot.2, &diff)
+        .await
+        .map_err(|e| desktop_err("reading_diff", e.to_string()))?;
+    Ok(ReadingDiffView {
+        diff: result.diff,
+        summary: result.summary,
+        removed_lines: result.removed_lines,
+        folded_lines: result.folded_lines,
+    })
 }
 
 #[tauri::command]
@@ -3002,6 +3190,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_providers,
             refresh_providers,
+            set_provider_key,
+            delete_provider_key,
+            provider_key_present,
             usage_snapshot,
             profile_stats,
             set_local_offset,
@@ -3023,6 +3214,7 @@ pub fn run() {
             save_markdown,
             cancel_turn,
             resolve_approval,
+            generate_reading_diff,
             set_approval_mode,
             approval_mode,
             end_session,
@@ -3094,6 +3286,8 @@ mod characterization {
             id: "t1".into(),
             summary: "wrote f.txt".into(),
             is_error: false,
+            path: None,
+            diff: None,
             metadata: None,
         };
         let v = serde_json::to_value(&event).unwrap();

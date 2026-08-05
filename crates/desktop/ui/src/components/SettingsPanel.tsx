@@ -150,6 +150,9 @@ export function SettingsPanel({
   const [provider, setProvider] = useState<ProviderRow | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [providerKey, setProviderKey] = useState("");
+  const [providerKeyPresent, setProviderKeyPresent] = useState(false);
+  const [providerKeySaving, setProviderKeySaving] = useState(false);
 
   const [customPrompt, setCustomPrompt] = useState("");
   const [savedCustom, setSavedCustom] = useState("");
@@ -197,9 +200,11 @@ export function SettingsPanel({
         if (cancelled) return;
 
         if (rowsR.status === "fulfilled") {
-          setProvider(
-            rowsR.value.find((p) => p.id === session.provider) ?? null
-          );
+          const current = rowsR.value.find((p) => p.id === session.provider) ?? null;
+          setProvider(current);
+          if (current?.method === "API key") {
+            void backend.providerKeyPresent(current.id).then(setProviderKeyPresent).catch(() => setProviderKeyPresent(false));
+          }
         } else {
           setError(String(rowsR.reason));
         }
@@ -320,6 +325,37 @@ export function SettingsPanel({
       setProfileError(String(err));
     } finally {
       setProfileSaving(false);
+    }
+  }
+
+  async function saveProviderKey() {
+    if (!provider || !providerKey.trim()) return;
+    setProviderKeySaving(true);
+    setError(null);
+    try {
+      await getBackend().setProviderKey(provider.id, providerKey);
+      setProviderKey("");
+      setProviderKeyPresent(true);
+      const rows = await getBackend().listProviders();
+      setProvider(rows.find((row) => row.id === provider.id) ?? provider);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setProviderKeySaving(false);
+    }
+  }
+
+  async function removeProviderKey() {
+    if (!provider) return;
+    setProviderKeySaving(true);
+    setError(null);
+    try {
+      await getBackend().deleteProviderKey(provider.id);
+      setProviderKeyPresent(false);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setProviderKeySaving(false);
     }
   }
 
@@ -481,6 +517,31 @@ export function SettingsPanel({
                 >
                   Change provider
                 </Button>
+                {provider?.method === "API key" ? (
+                  <div className="mt-2 w-full">
+                    <label className="mb-1 block text-[11px] text-muted-foreground">
+                      API key {providerKeyPresent ? "configured" : "not configured"}
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="password"
+                        value={providerKey}
+                        onChange={(event) => setProviderKey(event.target.value)}
+                        placeholder={providerKeyPresent ? "Replace key" : "Paste API key"}
+                        autoComplete="off"
+                        className="min-w-0 flex-1 rounded-md border border-border/80 bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      />
+                      <Button type="button" size="sm" disabled={!providerKey.trim() || providerKeySaving} onClick={() => void saveProviderKey()}>
+                        {providerKeySaving ? "Saving…" : "Save"}
+                      </Button>
+                    </div>
+                    {providerKeyPresent ? (
+                      <Button type="button" size="sm" variant="ghost" disabled={providerKeySaving} onClick={() => void removeProviderKey()}>
+                        Remove key
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">

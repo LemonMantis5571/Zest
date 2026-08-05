@@ -561,6 +561,8 @@ impl Thread {
         name: &str,
         summary: &str,
         is_error: bool,
+        path: Option<&str>,
+        diff: Option<&str>,
         metadata: Option<crate::tools::ToolMetadata>,
     ) {
         self.ensure_assistant(message_id);
@@ -570,6 +572,12 @@ impl Thread {
                     tool.status = if is_error { "error" } else { "done" }.into();
                     tool.summary = Some(summary.to_string());
                     tool.approval_id = None;
+                    if let Some(path) = path {
+                        tool.path = Some(path.to_string());
+                    }
+                    if let Some(diff) = diff {
+                        tool.diff = Some(diff.to_string());
+                    }
                     if metadata.is_some() {
                         tool.metadata = metadata;
                     }
@@ -581,8 +589,8 @@ impl Thread {
                         status: if is_error { "error" } else { "done" }.into(),
                         summary: Some(summary.to_string()),
                         approval_id: None,
-                        path: None,
-                        diff: None,
+                        path: path.map(str::to_string),
+                        diff: diff.map(str::to_string),
                         metadata,
                     });
                 }
@@ -947,6 +955,8 @@ mod characterization {
             "write_file",
             "wrote src/main.rs",
             false,
+            None,
+            None,
             None,
         );
         match &thread.messages[1] {

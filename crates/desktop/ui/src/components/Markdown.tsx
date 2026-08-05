@@ -1,7 +1,8 @@
 import type { Components } from "react-markdown";
-import { memo, useMemo, type ReactNode } from "react";
+import { isValidElement, memo, useMemo, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { ArrowUpRightIcon, Globe2Icon } from "lucide-react";
 
 import { CodeBlock } from "@/components/CodeBlock";
 import { MermaidBlock } from "@/components/MermaidBlock";
@@ -21,11 +22,59 @@ function codeText(children: ReactNode): string {
   return String(children);
 }
 
+type LinkElement = {
+  props?: { href?: string; children?: ReactNode };
+};
+
+function standaloneLink(children: ReactNode): { href: string; label: ReactNode } | null {
+  const child = Array.isArray(children) && children.length === 1 ? children[0] : children;
+  if (!isValidElement(child)) return null;
+  const props = (child as unknown as LinkElement).props;
+  const href = props?.href?.trim();
+  if (!href || !/^https?:\/\//i.test(href)) return null;
+  return { href, label: props?.children ?? href };
+}
+
+function LinkPreview({ href, label }: { href: string; label: ReactNode }) {
+  let host = href;
+  try {
+    host = new URL(href).hostname.replace(/^www\./, "");
+  } catch {
+    // Keep the raw URL when a compatible renderer gives us an unusual URL.
+  }
+
+  return (
+    <div className="mb-3 flex max-w-[500px] items-center gap-3 rounded-xl border border-border/80 bg-card/45 px-3.5 py-3 shadow-[0_1px_2px_rgb(0_0_0/12%)] last:mb-0">
+      <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground">
+        <Globe2Icon className="size-4" aria-hidden />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-semibold text-foreground">{label}</div>
+        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{host} · Opened in Browser</div>
+      </div>
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex shrink-0 items-center gap-1 rounded-md bg-secondary px-2.5 py-1.5 text-xs font-semibold text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      >
+        Open
+        <ArrowUpRightIcon className="size-3" aria-hidden />
+      </a>
+    </div>
+  );
+}
+
 function componentsFor(streaming: boolean): Components {
   return {
-  p: ({ children }) => (
-    <p className="mb-3 last:mb-0 leading-[1.65]">{children}</p>
-  ),
+  p: ({ children }) => {
+    const link = standaloneLink(children);
+    return link ? (
+      <LinkPreview href={link.href} label={link.label} />
+    ) : (
+      <p className="mb-3 last:mb-0 leading-[1.65]">{children}</p>
+    );
+  },
   strong: ({ children }) => (
     <strong className="font-semibold text-foreground">{children}</strong>
   ),
@@ -92,19 +141,22 @@ function componentsFor(streaming: boolean): Components {
   },
   hr: () => <hr className="my-4 border-border/70" />,
   table: ({ children }) => (
-    <div className="mb-3 overflow-x-auto last:mb-0">
-      <table className="w-full border-collapse text-left text-[13px]">
+    <div className="mb-4 overflow-x-auto rounded-xl border border-border/80 bg-card/30 shadow-[0_1px_2px_rgb(0_0_0/10%)] last:mb-0">
+      <table className="min-w-full border-separate border-spacing-0 text-left text-[13px]">
         {children}
       </table>
     </div>
   ),
+  thead: ({ children }) => <thead className="bg-secondary/80">{children}</thead>,
+  tbody: ({ children }) => <tbody className="divide-y divide-border/60">{children}</tbody>,
+  tr: ({ children }) => <tr className="transition-colors hover:bg-accent/25">{children}</tr>,
   th: ({ children }) => (
-    <th className="border-b border-border px-2 py-1.5 font-medium text-foreground">
+    <th className="border-b border-border px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-muted-foreground first:rounded-tl-xl last:rounded-tr-xl">
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className="border-b border-border/60 px-2 py-1.5 text-muted-foreground">
+    <td className="px-3 py-2.5 align-top text-muted-foreground first:text-foreground">
       {children}
     </td>
   ),

@@ -19,9 +19,9 @@ type Props = {
 /**
  * One line standing in for a stretch of finished tool calls.
  *
- * Collapsed by default, but never silently: a failure inside the run is stated
- * on the summary line, because a fold that hides an error is worse than the
- * wall of rows it replaced.
+ * Inspection-only runs collapse by default, but edit-containing runs stay open
+ * so their diffs remain immediately reviewable. Failures are always stated on
+ * the summary line because a fold that hides an error is worse than the rows.
  */
 export function ToolRunGroup({
   tools,
@@ -29,8 +29,10 @@ export function ToolRunGroup({
   onResolveApproval,
   onOpenDiff,
 }: Props) {
-  const [open, setOpen] = useState(false);
   const hasChanges = summary.added > 0 || summary.removed > 0;
+  // Completed edits contain the user's most important review surface. Keep
+  // those cards visible; inspection-only runs can still collapse to one line.
+  const [open, setOpen] = useState(hasChanges);
 
   if (open) {
     return (

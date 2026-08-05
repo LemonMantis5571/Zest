@@ -112,6 +112,7 @@ impl Provider for ScriptedProvider {
                     output_tokens: self.usage_out,
                     ..Default::default()
                 },
+                usage_available: true,
                 limits: None,
             });
         }
@@ -125,6 +126,7 @@ impl Provider for ScriptedProvider {
                 output_tokens: self.usage_out,
                 ..Default::default()
             },
+            usage_available: true,
             limits: None,
         })
     }
@@ -203,6 +205,7 @@ fn fallback_reasons_surface_exhausted_provider() {
             content: vec![],
             stop_reason: None,
             usage: Usage::default(),
+            usage_available: true,
             limits: Some(RateLimitSnapshot {
                 requests_remaining: Some(0),
                 ..Default::default()

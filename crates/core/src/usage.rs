@@ -226,10 +226,12 @@ impl Ledger {
         }
         entry.last_seen = now;
         entry.requests += 1;
-        entry.input_tokens += u64::from(completion.usage.input_tokens);
-        entry.output_tokens += u64::from(completion.usage.output_tokens);
-        entry.cache_write_tokens += u64::from(completion.usage.cache_creation_input_tokens);
-        entry.cache_read_tokens += u64::from(completion.usage.cache_read_input_tokens);
+        if completion.usage_available {
+            entry.input_tokens += u64::from(completion.usage.input_tokens);
+            entry.output_tokens += u64::from(completion.usage.output_tokens);
+            entry.cache_write_tokens += u64::from(completion.usage.cache_creation_input_tokens);
+            entry.cache_read_tokens += u64::from(completion.usage.cache_read_input_tokens);
+        }
 
         // Only overwrite when the provider actually reported something, so a
         // gateway turn doesn't erase a real reading from a native one.
@@ -240,10 +242,12 @@ impl Ledger {
 
         let day = self.daily.entry(day_key(now)).or_default();
         day.requests += 1;
-        day.input_tokens += u64::from(completion.usage.input_tokens);
-        day.output_tokens += u64::from(completion.usage.output_tokens);
-        day.cache_write_tokens += u64::from(completion.usage.cache_creation_input_tokens);
-        day.cache_read_tokens += u64::from(completion.usage.cache_read_input_tokens);
+        if completion.usage_available {
+            day.input_tokens += u64::from(completion.usage.input_tokens);
+            day.output_tokens += u64::from(completion.usage.output_tokens);
+            day.cache_write_tokens += u64::from(completion.usage.cache_creation_input_tokens);
+            day.cache_read_tokens += u64::from(completion.usage.cache_read_input_tokens);
+        }
         self.trim_daily();
 
         let _ = self.save();
@@ -433,6 +437,7 @@ mod tests {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
+            usage_available: true,
             limits,
         }
     }
@@ -687,6 +692,7 @@ mod daily_tests {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
+            usage_available: true,
             limits: None,
         }
     }

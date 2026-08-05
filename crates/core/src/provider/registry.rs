@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::anthropic::AnthropicProvider;
+use super::openai_compatible::OpenAiCompatibleProvider;
 use super::{catalogue_for_provider, Provider};
 use crate::config::{Config, ProviderConfig};
 
@@ -110,6 +111,33 @@ fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provid
             // Codex reasoning — keep them on for the codex gateway path.
             if id == "codex" {
                 provider = provider.with_extensions(true);
+            }
+            Ok(Arc::new(provider))
+        }
+        ProviderConfig::OpenaiCompatible {
+            base_url,
+            model,
+            models,
+            efforts,
+            credential,
+            api_key_env,
+        } => {
+            let key = credential
+                .as_deref()
+                .map(crate::credentials::get)
+                .transpose()
+                .map_err(|e| format!("could not read credential: {e}"))?
+                .flatten()
+                .or_else(|| api_key_env.as_deref().and_then(read_key))
+                .unwrap_or_default();
+            let mut provider =
+                OpenAiCompatibleProvider::new(id.to_string(), key, base_url.clone(), model.clone())
+                    .map_err(|e| format!("could not build client: {e}"))?
+                    .with_models(catalogue_for_provider(id, model, models, efforts));
+            if credential.is_some() || api_key_env.is_some() {
+                provider = provider.with_key_requirement();
+            } else {
+                provider = provider.without_key_requirement();
             }
             Ok(Arc::new(provider))
         }

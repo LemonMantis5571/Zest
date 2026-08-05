@@ -9,7 +9,6 @@ import {
   XIcon,
 } from "lucide-react";
 
-import { ApprovalStrip } from "@/components/ApprovalStrip";
 import {
   ChatHistorySidebar,
   readSidebarOpen,
@@ -59,10 +58,9 @@ import type {
   ProviderRow,
   SessionInfo,
   SessionWarning,
-  ToolPart,
   UserProfile,
 } from "@/lib/types";
-import { cn, scrollBehavior } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
 function shortRoot(root: string): string {
   const cleaned = root.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
@@ -125,19 +123,6 @@ type Props = {
   onProfileChange: (profile: UserProfile) => void;
   optionsDisabled?: boolean;
 };
-
-function collectAwaitingApprovals(messages: ChatMessage[]): ToolPart[] {
-  const out: ToolPart[] = [];
-  for (const msg of messages) {
-    if (msg.role !== "assistant") continue;
-    for (const tool of msg.tools) {
-      if (tool.status === "awaiting_approval" && tool.approvalId) {
-        out.push(tool);
-      }
-    }
-  }
-  return out;
-}
 
 function focusComposer() {
   const el = document.getElementById(
@@ -221,7 +206,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   return (
     <MessageScrollerItem messageId={msg.id} scrollAnchor={isLast}>
       <Message align="start">
-        <MessageContent className="max-w-full gap-2.5">
+        <MessageContent className="w-full max-w-full gap-2.5">
           <div className="text-[11px] font-medium tracking-wide text-muted-foreground/80">
             Zest
           </div>
@@ -430,10 +415,6 @@ export function ChatScreen({
   );
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = shortRoot(session.root);
-  const awaitingApprovals = useMemo(
-    () => collectAwaitingApprovals(messages),
-    [messages]
-  );
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
 
   // A bump means "open the User section". Zero is the initial value, so the
@@ -452,11 +433,6 @@ export function ChatScreen({
   function setSidebar(next: boolean) {
     setSidebarOpen(next);
     writeSidebarOpen(next);
-  }
-
-  function scrollToTool(toolId: string) {
-    const el = document.querySelector(`[data-tool-id="${toolId}"]`);
-    el?.scrollIntoView({ behavior: scrollBehavior(), block: "center" });
   }
 
   // Escape stays hand-written and is not rebindable: it means "dismiss what is
@@ -695,15 +671,7 @@ export function ChatScreen({
             onOpenFolder={onOpenFolder}
             onRemoveAttachment={onRemoveAttachment}
             onPasteImages={onPasteImages}
-            aboveComposer={
-              awaitingApprovals.length > 0 ? (
-                <ApprovalStrip
-                  tools={awaitingApprovals}
-                  onResolveApproval={onResolveApproval}
-                  onFocusTool={scrollToTool}
-                />
-              ) : null
-            }
+            aboveComposer={null}
           />
         </div>
       </div>
