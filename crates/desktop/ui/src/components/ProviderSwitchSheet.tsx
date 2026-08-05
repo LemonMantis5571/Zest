@@ -140,7 +140,7 @@ export function ProviderSwitchSheet({
                     >
                       Set key
                     </Button>
-                  ) : (
+                  ) : row.canConnect ? (
                     <Button
                       type="button"
                       size="sm"
@@ -150,6 +150,10 @@ export function ProviderSwitchSheet({
                     >
                       Connect
                     </Button>
+                  ) : (
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      Configure in Settings
+                    </span>
                   )}
                 </div>
               </li>

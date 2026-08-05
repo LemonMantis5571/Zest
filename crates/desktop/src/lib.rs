@@ -1,6 +1,6 @@
 //! Desktop front-end: provider picker + chat session.
 //!
-//! Connect is a native shell over vendor OAuth (no token exchange in Zest).
+//! Codex Connect is a native shell over vendor OAuth (no token exchange in Zest).
 //! Chat drives the same `Agent` loop as the CLI, streaming events into the UI.
 //! Thread projection is persisted under `<workspace>/.zest/threads/`.
 
@@ -43,8 +43,20 @@ use attachments::{
 use context_meter::{estimate_context, ContextUsageView};
 use session::{Session, SessionController, SessionError};
 
-/// Providers shown in the launch picker. BYOK stays terminal-only for now.
-const PICKER_IDS: &[&str] = &["codex", "claude", "antigravity"];
+/// Providers shown in the desktop launch picker.
+///
+/// Claude Code and Gemini CLI are external workers. Their sessions are owned
+/// by their CLIs and are configured under Settings → External workers rather
+/// than presented as Zest sign-in choices.
+const PICKER_IDS: &[&str] = &["codex"];
+
+/// Sign-in flows Zest can launch from the desktop. Keep this narrower than the
+/// core auth catalogue: vendor CLI workers authenticate in their own tools.
+const DESKTOP_CONNECT_IDS: &[&str] = &["codex"];
+
+fn desktop_can_start_login(provider_id: &str) -> bool {
+    DESKTOP_CONNECT_IDS.contains(&provider_id) && can_start_login(provider_id)
+}
 
 /// Turn-scoped pending approval waiters (not persisted).
 struct ApprovalHub {
@@ -386,7 +398,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         // Both halves are required: a signed-in provider with no config cannot
         // serve a turn, and a configured provider with no sign-in cannot either.
         selectable: slot.status.selectable() && configured,
-        can_connect: can_start_login(slot.id),
+        can_connect: desktop_can_start_login(slot.id),
         configured,
         default_model: descriptor.default_model,
         models: descriptor
@@ -1202,10 +1214,10 @@ async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), S
     prove_provider_serves(&config, &id)
         .await
         .map_err(|failure| {
-            if failure.needs_reconnect() {
+            if failure.needs_reconnect() && desktop_can_start_login(&id) {
                 format!("{label} needs to be reconnected. Try again.")
             } else {
-                failure.user_message()
+                failure.user_message_for_provider(&id)
             }
         })
 }
@@ -1228,6 +1240,13 @@ impl ProbeFailure {
         match self {
             Self::Setup(message) => message.clone(),
             Self::Turn(err) => format_turn_error(err),
+        }
+    }
+
+    fn user_message_for_provider(&self, provider_id: &str) -> String {
+        match self {
+            Self::Setup(message) => message.clone(),
+            Self::Turn(err) => format_turn_error_for_provider(err, provider_id),
         }
     }
 
@@ -1308,6 +1327,18 @@ fn local_gateway_url(config: &Config, id: &str) -> Option<String> {
 
 #[tauri::command]
 fn start_login(state: State<'_, AppState>, id: String) -> Result<LoginStarted, String> {
+    if !desktop_can_start_login(&id) {
+        return Err(match id.as_str() {
+            "claude" => {
+                "Claude Code sign-in is managed by the Claude Code CLI. Run `claude login`, then enable Claude Code under Settings → External workers.".into()
+            }
+            "antigravity" => {
+                "Gemini sign-in is managed by the Gemini CLI. Sign in there, then enable Gemini CLI under Settings → External workers.".into()
+            }
+            _ => "This provider has no sign-in flow managed by Zest. Configure it in Settings.".into(),
+        });
+    }
+
     let mut active = state
         .login
         .lock()
@@ -2908,9 +2939,12 @@ async fn send_message(
                 thread_id: thread_id.clone(),
                 turn_id: turn_id.clone(),
                 message_id: assistant_message_id.clone(),
-                message: format_turn_error(e),
+                message: format_turn_error_for_provider(e, &session.provider_id),
                 // Only for failures that signing in again actually fixes.
-                reconnect_provider: e.is_auth_problem().then(|| session.provider_id.clone()),
+                reconnect_provider: e
+                    .is_auth_problem()
+                    .then(|| session.provider_id.clone())
+                    .filter(|id| desktop_can_start_login(id)),
             }
         }
     };
@@ -3887,6 +3921,23 @@ fn format_turn_error(err: &HarnessError) -> String {
     "The provider could not complete the request. Try again.".into()
 }
 
+fn format_turn_error_for_provider(err: &HarnessError, provider_id: &str) -> String {
+    if err.is_auth_problem() && !desktop_can_start_login(provider_id) {
+        return match provider_id {
+            "claude" => {
+                "Claude Code could not authenticate this request. Sign in with the Claude Code CLI, then try again.".into()
+            }
+            "antigravity" => {
+                "Gemini could not authenticate this request. Sign in with the Gemini CLI, then try again.".into()
+            }
+            _ => {
+                "The provider could not authenticate this request. Check its API key or CLI sign-in, then try again.".into()
+            }
+        };
+    }
+    format_turn_error(err)
+}
+
 /// Wire label for approval / chat-event payloads (snake_case string).
 fn tool_risk_wire(risk: ToolRisk) -> &'static str {
     match risk {
@@ -3935,6 +3986,27 @@ mod tests {
         let message = failure.user_message();
         assert_eq!(
             message,
+            "This provider needs you to sign in again. Reconnect, then send your message again."
+        );
+    }
+
+    #[test]
+    fn cli_worker_auth_failures_point_back_to_the_cli() {
+        let failure = HarnessError::Api {
+            status: 401,
+            body: r#"{"error":{"message":"authentication failed"}}"#.into(),
+        };
+
+        assert_eq!(
+            format_turn_error_for_provider(&failure, "claude"),
+            "Claude Code could not authenticate this request. Sign in with the Claude Code CLI, then try again."
+        );
+        assert_eq!(
+            format_turn_error_for_provider(&failure, "antigravity"),
+            "Gemini could not authenticate this request. Sign in with the Gemini CLI, then try again."
+        );
+        assert_eq!(
+            format_turn_error_for_provider(&failure, "codex"),
             "This provider needs you to sign in again. Reconnect, then send your message again."
         );
     }
@@ -4281,6 +4353,15 @@ mod characterization {
             view.detail,
             "Signed in. Configure this provider in Settings."
         );
+        assert!(!view.can_connect);
+    }
+
+    #[test]
+    fn desktop_uses_cli_auth_for_claude_and_gemini_workers() {
+        assert_eq!(PICKER_IDS, &["codex"]);
+        assert!(desktop_can_start_login("codex"));
+        assert!(!desktop_can_start_login("claude"));
+        assert!(!desktop_can_start_login("antigravity"));
     }
 
     #[test]

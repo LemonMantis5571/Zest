@@ -5,7 +5,8 @@
 **Zest** is a multi-provider orchestration harness for coding agents, written in Rust.
 
 It routes each task to the model that suits it across separately-authenticated providers — Gemini
-via an Antigravity login, Claude via a Claude login, GPT via a Codex login — and keeps an account of
+and Claude work can run through already-authenticated external CLIs, while GPT uses the Codex
+login — and keeps an account of
 what each provider has left. Around that sits a coding agent: reads and edits a codebase, runs
 commands, asks before doing anything irreversible.
 

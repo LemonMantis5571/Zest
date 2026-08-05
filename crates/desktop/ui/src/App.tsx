@@ -761,7 +761,10 @@ export default function App() {
         setSessionWarning(null);
       })
       .catch((err: unknown) => {
-        const offerReconnect = shouldOfferProviderReconnect(err);
+        // Claude Code and Gemini CLI own their sessions. Only providers that
+        // expose a Zest-managed sign-in may offer a desktop reconnect action.
+        const offerReconnect =
+          providerId === "codex" && shouldOfferProviderReconnect(err);
         if (offerReconnect) markProviderVerifyFailed(providerId);
         setSessionWarning({
           providerId,
@@ -784,7 +787,7 @@ export default function App() {
         // Setup failures (for example, a new folder without a provider config)
         // are not authentication failures. Marking every start error as a
         // failed verification made the picker incorrectly say "Reconnect".
-        if (shouldOfferProviderReconnect(err)) {
+        if (providerId === "codex" && shouldOfferProviderReconnect(err)) {
           markProviderVerifyFailed(providerId);
         }
         throw err;
@@ -843,7 +846,7 @@ export default function App() {
         if (ready) {
           setSelectedId(ready.id);
           try {
-            // startSession probes gateway providers; catch here so a dead Claude
+            // startSession prepares gateway providers; catch here so a dead Codex
             // session lands on the picker with Connect instead of a chat error.
             await enterChat(ready.id);
             markStartup("session-ready");
@@ -996,7 +999,7 @@ export default function App() {
    *  failure, which knows exactly which account the gateway rejected. */
   async function reconnectProvider(only?: string) {
     const providerId = only ?? session?.provider ?? selectedId;
-    if (!providerId || backend.mode === "fixture") return;
+    if (!providerId || providerId !== "codex" || backend.mode === "fixture") return;
     setPickerError(null);
     try {
       const started = await backend.startLogin(providerId);
