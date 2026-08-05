@@ -70,9 +70,10 @@ pub use prompt::{
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
-    catalogue_for_provider, catalogue_from_lists, descriptor_for_picker_id, descriptor_from_config,
-    normalize_effort, probe, Completion, ModelSpec, Provider, ProviderDescriptor,
-    RateLimitSnapshot, StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    catalogue_for_provider, catalogue_from_lists, catalogue_without_efforts,
+    descriptor_for_picker_id, descriptor_from_config, normalize_effort, probe, Completion,
+    ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, StreamEvent, TurnRequest,
+    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use reading_diff::{
     abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,

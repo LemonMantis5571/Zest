@@ -131,8 +131,9 @@ pub enum ProviderConfig {
         /// Optional allow-list. Empty means only `model` is accepted.
         #[serde(default)]
         models: Vec<String>,
-        /// Optional effort allow-list. Empty means the standard effort set is
-        /// exposed to the picker, although the wire adapter ignores effort.
+        /// Reserved for future provider-specific effort support. The v1
+        /// OpenAI-compatible adapter ignores this field and does not expose an
+        /// effort selector until a wire mapping is implemented.
         #[serde(default)]
         efforts: Vec<String>,
         /// OS credential-manager account name. Defaults to the provider id.

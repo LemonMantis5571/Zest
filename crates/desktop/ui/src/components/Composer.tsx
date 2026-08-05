@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { IconSwap } from "@/components/ui/icon-swap";
 import {
   chipLabel,
+  effortsForModel,
   modelLabel,
   type EffortId,
   type ModelCapability,
@@ -95,6 +96,7 @@ export function Composer({
   onPasteImages,
   aboveComposer,
 }: Props) {
+  const supportsEffort = effortsForModel(models, model).length > 0;
   const ref = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -359,7 +361,7 @@ export function Composer({
                 />
               ) : (
                 <span className="truncate px-2 py-1 text-xs text-muted-foreground">
-                  {chipLabel(model, effort)}
+                  {supportsEffort ? chipLabel(model, effort) : modelLabel(model)}
                 </span>
               )}
             </div>

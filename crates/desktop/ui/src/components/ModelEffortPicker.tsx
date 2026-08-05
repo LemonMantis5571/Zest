@@ -5,6 +5,7 @@ import {
   DEFAULT_EFFORT,
   chipLabel,
   effortsForModel,
+  modelLabel,
   modelOptionsFromCapabilities,
   type EffortId,
   type ModelCapability,
@@ -42,6 +43,7 @@ export function ModelEffortPicker({
   const labelId = useId();
   const modelOptions = modelOptionsFromCapabilities(models);
   const effortOptions = effortsForModel(models, model);
+  const supportsEffort = effortOptions.length > 0;
   const resetModel = defaultModel ?? modelOptions[0]?.id ?? model;
 
   useEffect(() => {
@@ -92,7 +94,7 @@ export function ModelEffortPicker({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? labelId : undefined}
-        title="Model and reasoning effort"
+        title={supportsEffort ? "Model and reasoning effort" : "Model"}
         className={cn(
           "inline-flex max-w-[260px] cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none transition-colors",
           "hover:bg-secondary hover:text-foreground",
@@ -102,7 +104,7 @@ export function ModelEffortPicker({
         )}
         onClick={() => setOpen((value) => !value)}
       >
-        <span className="truncate">{chipLabel(model, effort)}</span>
+        <span className="truncate">{supportsEffort ? chipLabel(model, effort) : modelLabel(model)}</span>
         <ChevronDownIcon className="size-2.5 shrink-0 opacity-70" />
       </button>
 
@@ -139,33 +141,37 @@ export function ModelEffortPicker({
             })}
           </div>
 
-          <div className="my-1 h-px bg-border" />
+          {supportsEffort ? (
+            <>
+              <div className="my-1 h-px bg-border" />
 
-          <div className="px-1.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Effort
-          </div>
-          <div role="listbox" aria-label="Effort" className="flex flex-col">
-            {effortOptions.map((item) => {
-              const selected = item.id === effort;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="option"
-                  aria-selected={selected}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-none",
-                    "hover:bg-accent hover:text-accent-foreground",
-                    selected && "bg-accent/70"
-                  )}
-                  onClick={() => applyEffort(item.id)}
-                >
-                  <span className="flex-1 truncate">{item.label}</span>
-                  {selected ? <CheckIcon className="size-3.5 shrink-0" /> : null}
-                </button>
-              );
-            })}
-          </div>
+              <div className="px-1.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Effort
+              </div>
+              <div role="listbox" aria-label="Effort" className="flex flex-col">
+                {effortOptions.map((item) => {
+                  const selected = item.id === effort;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-none",
+                        "hover:bg-accent hover:text-accent-foreground",
+                        selected && "bg-accent/70"
+                      )}
+                      onClick={() => applyEffort(item.id)}
+                    >
+                      <span className="flex-1 truncate">{item.label}</span>
+                      {selected ? <CheckIcon className="size-3.5 shrink-0" /> : null}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          ) : null}
 
           <div className="my-1 h-px bg-border" />
 
