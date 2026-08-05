@@ -119,12 +119,12 @@ export function DiffViewer({ target, onClose }: Props) {
         </header>
         {view === "reading" && reading ? (
           <div className="flex shrink-0 items-center gap-2 border-b border-border/50 px-4 py-1.5 text-[11px] text-muted-foreground">
-            <span>Display-only review view</span>
+            <span>Simplified view</span>
             {hiddenCount > 0 ? (
               <span>· {hiddenCount} import lines hidden</span>
             ) : null}
             {foldedCount > 0 ? (
-              <span>· {foldedCount} context lines folded</span>
+              <span>· {foldedCount} unchanged lines folded</span>
             ) : null}
           </div>
         ) : null}

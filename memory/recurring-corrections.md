@@ -4,6 +4,10 @@ Track corrections that apply across the whole workspace.
 
 ## Corrections
 
+- **User-facing copy** — describe the user's outcome and next action, not Zest's
+  implementation. Do not expose workers, chat shells, local gateway ports, script paths,
+  cache internals, or raw debugging details in the UI; keep only technical information users
+  need to configure or recover their work.
 - **The gateway decision is closed** — Zest bundles the pinned CLIProxyAPI executable as a Tauri
   sidecar and does not implement native subscription OAuth. Do not restate this as an open
   single-binary decision. Revisit only for documented native OAuth/API access, API-key billing, or

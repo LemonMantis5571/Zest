@@ -238,7 +238,7 @@ pub fn detect_claude() -> AuthStatus {
     match well_formed_json(&dir.join(".credentials.json")) {
         Some(true) => AuthStatus::Ready { account: None },
         _ => AuthStatus::Unknown {
-            reason: "Claude is installed but stores credentials outside a readable file".into(),
+            reason: "Zest could not verify this sign-in.".into(),
         },
     }
 }
@@ -314,7 +314,7 @@ pub fn detect_antigravity() -> AuthStatus {
 
     if gemini.join("antigravity").is_dir() {
         return AuthStatus::Unknown {
-            reason: "Antigravity is installed but its session is not in a readable file".into(),
+            reason: "Zest could not verify this sign-in.".into(),
         };
     }
 

@@ -26,7 +26,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <div className="max-w-md rounded-xl border border-[#2a2c31] bg-[#141516] p-5">
             <h1 className="m-0 mb-2 text-lg font-semibold">Something broke</h1>
             <p className="m-0 mb-4 text-sm text-[#8a8f98]">
-              {this.state.error.message || "Unknown UI error"}
+              Zest could not display this screen. Try again or restart the app.
             </p>
             <button
               type="button"

@@ -266,8 +266,8 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
             account.clone().unwrap_or_else(|| slot.method.to_string()),
         ),
         AuthStatus::Unknown { reason } => {
-            let detail = if reason.contains("outside a readable file") {
-                "Installed — session stored outside a readable file".into()
+            let detail = if reason.contains("could not verify this sign-in") {
+                "Zest could not verify this sign-in.".into()
             } else {
                 format!("Installed — {reason}")
             };
@@ -279,7 +279,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
             if fix.starts_with("Connect") {
                 fix.clone()
             } else {
-                format!("Run: {fix}")
+                "Sign in to continue".into()
             },
         ),
         AuthStatus::Unconfigured => (
@@ -301,17 +301,14 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     let (status_kind, status_label, detail) = if configured {
         (status_kind, status_label, detail)
     } else {
-        let where_to = zest_core::user_config_path()
-            .map(|p| display_path(p.as_path()))
-            .unwrap_or_else(|| "~/.zest/zest.toml".to_string());
         (
             "unconfigured".to_string(),
             "Not configured".to_string(),
             match slot.status {
                 AuthStatus::Ready { .. } => {
-                    format!("Signed in, but no provider entry — add one to {where_to}")
+                    "Signed in. Configure this provider in Settings.".into()
                 }
-                _ => format!("No provider entry in zest.toml or {where_to}"),
+                _ => "Configure this provider in Settings.".into(),
             },
         )
     };
@@ -360,7 +357,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         Some(AuthStatus::Unconfigured) | None => (
             "unconfigured",
             "Not configured",
-            "Set an API key in Settings".to_string(),
+            "Add an API key in Settings".to_string(),
         ),
     };
     ProviderView {
@@ -755,12 +752,10 @@ fn set_provider_key(state: State<'_, AppState>, id: String, key: String) -> Resu
         ..
     }) = config.providers.get(&id)
     else {
-        return Err(format!(
-            "provider `{id}` is not an OpenAI-compatible provider"
-        ));
+        return Err(format!("This provider does not accept an API key."));
     };
     if credential.is_none() && api_key_env.is_some() {
-        return Err("this provider is configured for environment authentication".into());
+        return Err("This provider gets its API key from an environment variable.".into());
     }
     zest_core::credentials::set(credential.as_deref().unwrap_or(&id), &key)
 }
@@ -770,9 +765,7 @@ fn delete_provider_key(state: State<'_, AppState>, id: String) -> Result<(), Str
     let config = load_workspace_config(&state);
     let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
     else {
-        return Err(format!(
-            "provider `{id}` is not an OpenAI-compatible provider"
-        ));
+        return Err(format!("This provider does not accept an API key."));
     };
     zest_core::credentials::delete(credential.as_deref().unwrap_or(&id))
 }
@@ -782,9 +775,7 @@ fn provider_key_present(state: State<'_, AppState>, id: String) -> Result<bool, 
     let config = load_workspace_config(&state);
     let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
     else {
-        return Err(format!(
-            "provider `{id}` is not an OpenAI-compatible provider"
-        ));
+        return Err(format!("This provider does not accept an API key."));
     };
     zest_core::credentials::present(credential.as_deref().unwrap_or(&id))
 }
@@ -917,14 +908,10 @@ async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), S
     prove_provider_serves(&config, &id)
         .await
         .map_err(|failure| {
-            let detail = failure.user_message();
             if failure.needs_reconnect() {
-                format!(
-                    "{label} needs Connect again — the gateway has a session file but \
-cannot use it yet.\n\n{detail}"
-                )
+                format!("{label} needs to be reconnected. Try again.")
             } else {
-                detail
+                failure.user_message()
             }
         })
 }
@@ -977,10 +964,10 @@ async fn ensure_gateway_ready(config: &Config, id: &str) -> Result<(), ProbeFail
     // Its being down is the ordinary state after a reboot, not a user error, and
     // Zest launches this same binary to sign in — so it can launch it to serve.
     if let Some(base_url) = local_gateway_url(config, id) {
-        if let GatewayState::Unavailable(reason) = ensure_gateway_running(&base_url).await {
-            return Err(ProbeFailure::Setup(format!(
-                "The model gateway is installed but did not come up.\n\n{reason}"
-            )));
+        if let GatewayState::Unavailable(_reason) = ensure_gateway_running(&base_url).await {
+            return Err(ProbeFailure::Setup(
+                "Zest could not start this provider. Try again.".into(),
+            ));
         }
     }
     Ok(())
@@ -995,19 +982,17 @@ async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
     let (registry, skipped) = ProviderRegistry::from_config(config);
 
     let provider = registry.get(id).ok_or_else(|| {
-        ProbeFailure::Setup(
-            skipped
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| format!("{id} could not be loaded: {}", s.reason))
-                .unwrap_or_else(|| format!("provider `{id}` is not configured")),
-        )
+        ProbeFailure::Setup(if skipped.iter().any(|s| s.id == id) {
+            "Could not load this provider. Check its configuration and try again.".into()
+        } else {
+            "Configure this provider before continuing.".into()
+        })
     })?;
 
     if matches!(provider.auth_status(), AuthStatus::Unconfigured) {
-        return Err(ProbeFailure::Setup(format!(
-            "{id} is not configured with a usable API key"
-        )));
+        return Err(ProbeFailure::Setup(
+            "Add a valid API key for this provider before continuing.".into(),
+        ));
     }
 
     let model = provider.default_model().to_string();
@@ -1067,7 +1052,7 @@ fn login_status(state: State<'_, AppState>) -> Result<LoginStatus, String> {
         });
     };
 
-    let Some(status) = process
+    let Some(_status) = process
         .try_wait()
         .map_err(|e| format!("could not inspect the sign-in process: {e}"))?
     else {
@@ -1077,11 +1062,7 @@ fn login_status(state: State<'_, AppState>) -> Result<LoginStatus, String> {
         });
     };
 
-    let detail = if let Some(code) = status.code() {
-        format!("The sign-in helper exited with code {code} before credentials were detected.")
-    } else {
-        "The sign-in helper was terminated before credentials were detected.".into()
-    };
+    let detail = "The sign-in did not finish. Try again.".to_string();
     *active = None;
     Ok(LoginStatus {
         state: "exited".into(),
@@ -1239,7 +1220,7 @@ fn resolve_thread(
                     .map_err(|e| e.to_string())?;
                 return Ok((thread, loaded.warning));
             }
-            Err(ThreadLoadError::Corrupt { detail, .. }) => {
+            Err(ThreadLoadError::Corrupt { .. }) => {
                 let thread = store
                     .create_for_provider(provider_id)
                     .map_err(|e| e.to_string())?;
@@ -1247,7 +1228,10 @@ fn resolve_thread(
                 let _ = state.save(root);
                 return Ok((
                     thread,
-                    Some(format!("history not saved: {detail}; started a new thread")),
+                    Some(
+                        "Chat history could not be restored, so a new conversation was started."
+                            .into(),
+                    ),
                 ));
             }
             Err(ThreadLoadError::ProviderMismatch { .. })
@@ -1963,7 +1947,7 @@ fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
             persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             Ok(session_info_from(
                 session,
-                Some("forked from the previous conversation".into()),
+                Some("A new conversation was created from this one.".into()),
             ))
         })
         .map_err(map_session_err)
@@ -1999,7 +1983,7 @@ fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<Se
             persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             Ok(session_info_from(
                 session,
-                Some("conversation rewound; workspace files were left unchanged".into()),
+                Some("Conversation restored. Your files were not changed.".into()),
             ))
         })
         .map_err(map_session_err)
@@ -2204,9 +2188,10 @@ async fn send_message(
         command: command.clone(),
     };
     apply_event_to_thread(&mut session.thread, &assistant_start);
-    if let Err(e) = worker
+    if worker
         .save_and_wait(session.thread.clone(), PersistPriority::Immediate)
         .await
+        .is_err()
     {
         let _ = app.emit(
             "chat-event",
@@ -2214,7 +2199,7 @@ async fn send_message(
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
-                message: format!("history not saved: {e}"),
+                message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
             },
         );
     }
@@ -2301,12 +2286,12 @@ async fn send_message(
                 // Surfaced as a warning rather than swallowed: the model chip
                 // shows what was *requested*, so without this the transcript
                 // would silently attribute a turn to the wrong model.
-                StreamEvent::ModelSubstituted { requested, served } => ChatEvent::Warning {
+                StreamEvent::ModelSubstituted { served, .. } => ChatEvent::Warning {
                     session_id: session_id.clone(),
                     thread_id: thread_id.clone(),
                     turn_id: Some(turn_id.clone()),
                     message: format!(
-                        "This turn was served by `{served}`, not the `{requested}` you selected."
+                        "The selected model was unavailable, so this response used `{served}` instead."
                     ),
                 },
             };
@@ -2317,14 +2302,14 @@ async fn send_message(
                 // Schedule the checkpoint, then clone for the worker — Immediate
                 // for tools/approvals/terminal; Delta coalesces text/thinking.
                 let snapshot = thread.clone();
-                if let Err(e) = worker.enqueue(snapshot, priority) {
+                if worker.enqueue(snapshot, priority).is_err() {
                     let _ = app.emit(
                         "chat-event",
                         ChatEvent::Warning {
                             session_id: session_id.clone(),
                             thread_id: thread_id.clone(),
                             turn_id: Some(turn_id.clone()),
-                            message: format!("history not saved: {e}"),
+                            message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
                         },
                     );
                 }
@@ -2409,9 +2394,10 @@ async fn send_message(
         }
     };
     apply_event_to_thread(&mut session.thread, &final_event);
-    if let Err(e) = worker
+    if worker
         .save_and_wait(session.thread.clone(), PersistPriority::Immediate)
         .await
+        .is_err()
     {
         let _ = app.emit(
             "chat-event",
@@ -2419,17 +2405,17 @@ async fn send_message(
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
                 turn_id: Some(turn_id.clone()),
-                message: format!("history not saved: {e}"),
+                message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
             },
         );
-    } else if let Err(e) = worker.flush().await {
+    } else if worker.flush().await.is_err() {
         let _ = app.emit(
             "chat-event",
             ChatEvent::Warning {
                 session_id,
                 thread_id,
                 turn_id: Some(turn_id),
-                message: format!("history not saved: {e}"),
+                message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
             },
         );
     }
@@ -3248,49 +3234,16 @@ fn normalize_effort(effort: &str) -> String {
 /// User-facing turn errors. Connection refused to the local gateway is the
 /// usual alpha failure mode and should not look like a missing system prompt.
 fn format_turn_error(err: &HarnessError) -> String {
-    match err {
-        // Asked as a question, not matched as a variant. Connect failures are
-        // retried, so by the time one is formatted it is wrapped in `Exhausted`
-        // — matching `Http` directly made this branch unreachable and sent every
-        // dead-gateway turn to the auth arm below.
-        _ if err.is_unreachable() => {
-            format!(
-                "Can't reach the model gateway (usually CLIProxyAPI on http://127.0.0.1:8317). \
-Zest tried to start it and it still isn't answering — check scripts/start-gateway.ps1.\n\n{err}"
-            )
-        }
-        _ if err.is_context_limit() => {
-            format!(
-                "The model context limit was reached. Open Context usage and compact the conversation, then resend.\n\n{}",
-                api_error_message(err).unwrap_or_else(|| err.to_string())
-            )
-        }
-        // Lead with what to do. The raw envelope still follows, because the
-        // detail in it ("cooldown", a provider id) is what makes an unusual
-        // failure diagnosable — but it should not be the first thing read.
-        _ if err.is_auth_problem() => {
-            format!(
-                "That account needs signing in again — the gateway is holding \
-credentials it can't currently use. Reconnect below, then resend.\n\n{}",
-                api_error_message(err).unwrap_or_else(|| err.to_string())
-            )
-        }
-        _ => err.to_string(),
+    if err.is_unreachable() {
+        return "Zest could not reach the provider. Try reconnecting, then send your message again.".into();
     }
-}
-
-/// Pull `error.message` out of an API error envelope.
-///
-/// Returns `None` when the body is not the shape we expect, so the caller falls
-/// back to the raw text rather than swallowing an error it failed to parse.
-fn api_error_message(err: &HarnessError) -> Option<String> {
-    // `root()` so an exhausted retry still yields the envelope underneath it.
-    let HarnessError::Api { status, body } = err.root() else {
-        return None;
-    };
-    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
-    let message = parsed.get("error")?.get("message")?.as_str()?;
-    Some(format!("{status}: {message}"))
+    if err.is_context_limit() {
+        return "This conversation is too long for the selected model. Compact it from Context usage, then send again.".into();
+    }
+    if err.is_auth_problem() {
+        return "This provider needs you to sign in again. Reconnect, then send your message again.".into();
+    }
+    "The provider could not complete the request. Try again.".into()
 }
 
 /// Wire label for approval / chat-event payloads (snake_case string).
@@ -3319,11 +3272,11 @@ mod tests {
     /// that cannot start a process.
     #[test]
     fn a_setup_failure_never_asks_for_a_new_sign_in() {
-        let failure = ProbeFailure::Setup("The model gateway did not come up".into());
+        let failure = ProbeFailure::Setup("Zest could not start this provider. Try again.".into());
         assert!(!failure.needs_reconnect());
         assert_eq!(
             failure.user_message(),
-            "The model gateway did not come up",
+            "Zest could not start this provider. Try again.",
             "a setup message is shown as written"
         );
     }
@@ -3339,9 +3292,10 @@ mod tests {
         }));
         assert!(failure.needs_reconnect());
         let message = failure.user_message();
-        assert!(message.contains("needs signing in again"), "{message}");
-        // The provider's own wording survives, because the body stayed parseable.
-        assert!(message.contains("auth_unavailable"), "{message}");
+        assert_eq!(
+            message,
+            "This provider needs you to sign in again. Reconnect, then send your message again."
+        );
     }
 
     /// Opening a chat must not be gated on a credential check.
@@ -3353,7 +3307,7 @@ mod tests {
     #[test]
     fn opening_a_chat_cannot_fail_for_a_credential_reason() {
         // The only failure `ensure_gateway_ready` constructs.
-        let blocked = ProbeFailure::Setup("The model gateway did not come up".into());
+        let blocked = ProbeFailure::Setup("Zest could not start this provider. Try again.".into());
         assert!(!blocked.needs_reconnect());
 
         // A native provider has no local gateway, so there is nothing to wait for
@@ -3619,8 +3573,7 @@ mod characterization {
         assert!(!destination.providers.contains_key("claude"));
     }
 
-    /// The reported failure: the picker offered Claude as ready because a CLI
-    /// session existed, then Continue died with "not configured".
+    /// A detected sign-in without provider configuration must still be setup-only.
     #[test]
     fn a_signed_in_provider_with_no_config_is_not_selectable() {
         let config = config_with(&["codex"]);
@@ -3633,10 +3586,10 @@ mod characterization {
         assert!(!view.configured);
         assert_eq!(view.status_kind, "unconfigured");
         assert_eq!(view.status_label, "Not configured");
-        // The row has to say what to do, since the green "Signed in" it used to
-        // show sent the user looking at their Claude login instead.
-        assert!(view.detail.contains("Signed in, but"), "{}", view.detail);
-        assert!(view.detail.contains("zest.toml"), "{}", view.detail);
+        assert_eq!(
+            view.detail,
+            "Signed in. Configure this provider in Settings."
+        );
     }
 
     #[test]

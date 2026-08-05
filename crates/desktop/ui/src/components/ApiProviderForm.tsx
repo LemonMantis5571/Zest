@@ -109,7 +109,7 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
             setKey("");
             await onDone(id.trim());
           })
-          .catch((err) => setError(String(err)))
+          .catch(() => setError("Could not save this provider. Check the details and try again."))
           .finally(() => setSaving(false));
       }}
     >
@@ -122,7 +122,7 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
             {preset === "custom" ? "Add API provider" : `Connect ${PRESETS[preset].label}`}
           </div>
           <div className="text-[11px] text-muted-foreground">
-            Bring-your-own-key — stored in the OS credential manager
+            Use your own API key. It stays in your operating system's secure storage.
           </div>
         </div>
       </div>
@@ -153,7 +153,7 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
 
       {preset === "custom" ? (
         <div className="mb-3 space-y-2.5">
-          <Field label="Provider id" hint="Lowercase id used in zest.toml and routing.">
+          <Field label="Provider id" hint="A short name used to identify this provider.">
             <input
               value={id}
               onChange={(e) => setId(e.target.value)}
@@ -209,12 +209,12 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
             ) : null}
           </div>
           <p className="m-0 pt-1 text-[10px] text-muted-foreground/80">
-            Switch to Custom to edit endpoint or model names.
+            Switch to Custom to change the endpoint or model names.
           </p>
         </dl>
       )}
 
-      <Field label={preset === "custom" ? "API key" : `${PRESETS[preset].label} API key`} hint="Never written to zest.toml — only the OS keychain.">
+      <Field label={preset === "custom" ? "API key" : `${PRESETS[preset].label} API key`} hint="Your key is never saved in zest.toml.">
         <input
           value={key}
           onChange={(e) => setKey(e.target.value)}
