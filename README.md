@@ -337,6 +337,12 @@ workspace = "isolated"
 Zest never performs their sign-in, embeds their SDK, or attaches MCP servers.
 The worker executable must already be authenticated and available on the PATH.
 
+Settings keeps external-worker accounting separate from Zest usage. A Claude Code
+or Gemini CLI/ACP worker counts as a run even when it reports no token data. When
+the worker supplies token, context, or cost figures, Zest shows them as reported
+values; it never fills missing fields with zero and never presents them as the
+parent provider's spend.
+
 ### Chat history (by project)
 
 ### Workbench & recovery

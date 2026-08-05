@@ -277,6 +277,7 @@ export function createFixtureBackend(): DesktopBackend {
             headroom: { kind: "not_reported", label: "Not reported" },
           },
         ],
+        externalWorkers: [],
       };
     },
     async setProviderKey() {

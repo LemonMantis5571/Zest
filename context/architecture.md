@@ -130,6 +130,11 @@ is worse than no number. Separately, Antigravity/Gemini can return `429 RESOURCE
 `memory/recurring-corrections.md` / CLIProxyAPI#4696) — do not trust that status alone when
 attributing exhaustion.
 
+External worker usage is a separate ledger projection. Each completed ACP/headless invocation is
+counted, while token, context, and cost fields remain optional because the worker may not report
+them. Reported values are kept under the worker id and are never merged into parent-provider spend
+or the provider's plan balance.
+
 ## Integrations
 
 - **Anthropic Messages API** — `https://api.anthropic.com/v1/messages`, `anthropic-version: 2023-06-01`.
