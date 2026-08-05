@@ -521,25 +521,38 @@ impl Agent {
         let mut gated: Vec<(usize, PreparedToolCall)> = Vec::new();
         let mut question: Option<(usize, PreparedToolCall)> = None;
         for (index, call) in calls.iter().enumerate() {
-            match self.tools.prepare(&call.name, call.input.clone()) {
-                Ok(prepared) if call.name == ASK_USER_TOOL => {
-                    if question.is_some() {
-                        slots[index] = Some(ToolCallOutcome::failed(
-                            "ask_user accepts one question at a time",
-                            ToolRisk::Read,
-                        ));
-                    } else {
-                        question = Some((index, prepared));
-                    }
-                }
-                Ok(prepared) if prepared.risk.requires_approval() => gated.push((index, prepared)),
-                Ok(prepared) => auto.push((index, prepared)),
+            let prepared = match self.tools.prepare(&call.name, call.input.clone()) {
+                Ok(prepared) => prepared,
                 Err(message) => {
                     slots[index] = Some(ToolCallOutcome::failed(
                         format!("cannot prepare `{}`: {message}", call.name),
                         ToolRisk::Read,
                     ));
+                    continue;
                 }
+            };
+
+            if let Some(metadata) = prepared.metadata.clone() {
+                on_event(StreamEvent::ToolCallUpdate {
+                    name: &call.name,
+                    id: &call.id,
+                    metadata,
+                });
+            }
+
+            if call.name == ASK_USER_TOOL {
+                if question.is_some() {
+                    slots[index] = Some(ToolCallOutcome::failed(
+                        "ask_user accepts one question at a time",
+                        ToolRisk::Read,
+                    ));
+                } else {
+                    question = Some((index, prepared));
+                }
+            } else if prepared.risk.requires_approval() {
+                gated.push((index, prepared));
+            } else {
+                auto.push((index, prepared));
             }
         }
 

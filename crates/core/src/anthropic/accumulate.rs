@@ -219,6 +219,7 @@ mod tests {
                 StreamEvent::Text(t) => seen.push(format!("text:{t}")),
                 StreamEvent::Thinking(t) => seen.push(format!("thinking:{t}")),
                 StreamEvent::ToolCallStart { name, .. } => seen.push(format!("tool:{name}")),
+                StreamEvent::ToolCallUpdate { .. } => {}
                 StreamEvent::ApprovalNeeded { tool_name, .. } => {
                     seen.push(format!("approval:{tool_name}"))
                 }

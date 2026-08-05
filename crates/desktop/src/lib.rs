@@ -702,6 +702,14 @@ enum ChatEvent {
         name: String,
         id: String,
     },
+    ToolCallUpdate {
+        session_id: String,
+        thread_id: String,
+        turn_id: String,
+        message_id: String,
+        id: String,
+        metadata: ToolMetaView,
+    },
     ToolCallResult {
         session_id: String,
         thread_id: String,
@@ -1826,6 +1834,7 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
             id,
             ..
         } => thread.apply_tool_start(message_id, id, name),
+        ChatEvent::ToolCallUpdate { .. } => {}
         ChatEvent::ToolCallResult {
             message_id,
             name,
@@ -2947,6 +2956,16 @@ async fn send_message(
                     name: name.to_string(),
                     id: id.to_string(),
                 },
+                StreamEvent::ToolCallUpdate { name: _, id, metadata } => {
+                    ChatEvent::ToolCallUpdate {
+                        session_id: session_id.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        message_id: assistant_message_id.clone(),
+                        id: id.to_string(),
+                        metadata: ToolMetaView::from(metadata),
+                    }
+                }
                 StreamEvent::ToolCallResult {
                     name,
                     id,
