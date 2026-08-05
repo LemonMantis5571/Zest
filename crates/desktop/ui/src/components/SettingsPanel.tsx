@@ -63,6 +63,24 @@ function formatAge(secs: number) {
   return `${Math.floor(secs / 3600)}h`;
 }
 
+function externalTokenSummary(row: UsageSnapshot["externalWorkers"][number]) {
+  if (row.reportedTokenTotal == null) return "Tokens not reported";
+  const coverage =
+    row.tokenReports < row.invocations
+      ? ` · ${row.tokenReports}/${row.invocations} runs reported`
+      : "";
+  return `${row.reportedTokenTotal.toLocaleString()} tokens reported${coverage}`;
+}
+
+function externalContextSummary(row: UsageSnapshot["externalWorkers"][number]) {
+  if (row.contextUsed == null && row.contextSize == null) return "Context not reported";
+  if (row.contextUsed != null && row.contextSize != null) {
+    return `Context ${row.contextUsed.toLocaleString()} / ${row.contextSize.toLocaleString()}`;
+  }
+  const value = row.contextUsed ?? row.contextSize;
+  return value == null ? "Context not reported" : `Context ${value.toLocaleString()} reported`;
+}
+
 function SettingsSection({
   title,
   hint,
@@ -732,12 +750,12 @@ export function SettingsPanel({
             title="Usage"
             icon={ChartColumnIcon}
             hint={
-              usage?.providers.length
-                ? `${usage.providers.length} account${usage.providers.length === 1 ? "" : "s"}`
+              usage && (usage.providers.length || usage.externalWorkers.length)
+                ? `${usage.providers.length + usage.externalWorkers.length} source${usage.providers.length + usage.externalWorkers.length === 1 ? "" : "s"}`
                 : "Nothing used yet"
             }
           >
-            {usage?.providers.length ? (
+            {usage && (usage.providers.length || usage.externalWorkers.length) ? (
               <div className="space-y-2">
                 {usage.providers.map((row) => (
                   <div
@@ -774,6 +792,42 @@ export function SettingsPanel({
                     </div>
                   </div>
                 ))}
+                {usage.externalWorkers.length ? (
+                  <div className="pt-2">
+                    <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      External workers
+                    </div>
+                    <div className="space-y-2">
+                      {usage.externalWorkers.map((row) => (
+                        <div
+                          key={row.workerId}
+                          className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5"
+                        >
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-sm font-medium">{row.workerId}</span>
+                            <span className="text-[11px] tabular-nums text-muted-foreground">
+                              {row.invocations} {row.invocations === 1 ? "run" : "runs"}
+                            </span>
+                          </div>
+                          <div className="mt-1.5 space-y-1 text-[11px] text-muted-foreground">
+                            <div>{externalTokenSummary(row)}</div>
+                            <div>{externalContextSummary(row)}</div>
+                            {row.lastCost ? (
+                              <div>
+                                Last reported cost: {row.lastCost.amount} {row.lastCost.currency}
+                              </div>
+                            ) : (
+                              <div>Cost not reported</div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                      External worker figures come from the worker and are separate from Zest usage.
+                    </p>
+                  </div>
+                ) : null}
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   Zest usage only — this does not show your provider plan balance.
                 </p>

@@ -1,4 +1,4 @@
-//! Per-provider usage accounting.
+//! Per-provider and external-worker usage accounting.
 //!
 //! Two numbers live here and they must never be merged, because they answer
 //! different questions and have different reliability:
@@ -166,6 +166,185 @@ impl ProviderUsage {
     }
 }
 
+/// Usage a CLI/ACP worker volunteered for one delegated run.
+///
+/// External workers own their own authentication and billing, so these values
+/// must never be folded into Zest's provider ledger. Every field is optional on
+/// purpose: a worker can report context size without token counts, or report
+/// nothing at all. `None` means unavailable; it is not zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalUsageReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ExternalCost>,
+}
+
+impl ExternalUsageReport {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.thought_tokens.is_none()
+            && self.cached_read_tokens.is_none()
+            && self.cached_write_tokens.is_none()
+            && self.context_used.is_none()
+            && self.context_size.is_none()
+            && self.cost.is_none()
+    }
+
+    pub fn has_tokens(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.thought_tokens.is_some()
+            || self.cached_read_tokens.is_some()
+            || self.cached_write_tokens.is_some()
+    }
+
+    /// Merge later stream updates over earlier ones. ACP commonly sends
+    /// context/cost updates before the final response, while headless CLIs may
+    /// put token usage only on their final result envelope.
+    pub fn merge(&mut self, newer: &Self) {
+        if newer.input_tokens.is_some() {
+            self.input_tokens = newer.input_tokens;
+        }
+        if newer.output_tokens.is_some() {
+            self.output_tokens = newer.output_tokens;
+        }
+        if newer.thought_tokens.is_some() {
+            self.thought_tokens = newer.thought_tokens;
+        }
+        if newer.cached_read_tokens.is_some() {
+            self.cached_read_tokens = newer.cached_read_tokens;
+        }
+        if newer.cached_write_tokens.is_some() {
+            self.cached_write_tokens = newer.cached_write_tokens;
+        }
+        if newer.context_used.is_some() {
+            self.context_used = newer.context_used;
+        }
+        if newer.context_size.is_some() {
+            self.context_size = newer.context_size;
+        }
+        if newer.cost.is_some() {
+            self.cost = newer.cost.clone();
+        }
+    }
+}
+
+/// A reported worker cost kept as text so the ledger never rounds or invents a
+/// currency. Providers may use different units and decimal precision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalCost {
+    pub amount: String,
+    pub currency: String,
+}
+
+/// Lifetime accounting for one configured external worker.
+///
+/// Token fields are cumulative only across runs that reported that field. The
+/// report count makes partial coverage visible instead of presenting an exact
+/// looking total when some worker runs were silent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExternalWorkerUsage {
+    pub invocations: u64,
+    #[serde(default)]
+    pub usage_reports: u64,
+    #[serde(default)]
+    pub token_reports: u64,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub thought_tokens: Option<u64>,
+    #[serde(default)]
+    pub cached_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cached_write_tokens: Option<u64>,
+    /// The most recent context reading. Context is a live window, not a
+    /// lifetime total, so summing it would be misleading.
+    #[serde(default)]
+    pub context_used: Option<u64>,
+    #[serde(default)]
+    pub context_size: Option<u64>,
+    /// The most recent cost reported for a run. Current workers create a fresh
+    /// session per delegation, so this is a per-run figure, not an account
+    /// balance or subscription total.
+    #[serde(default)]
+    pub last_cost: Option<ExternalCost>,
+    /// Unix seconds. Zero means never used.
+    #[serde(default)]
+    pub first_seen: u64,
+    #[serde(default)]
+    pub last_seen: u64,
+}
+
+impl ExternalWorkerUsage {
+    fn add_optional(total: &mut Option<u64>, value: Option<u64>) {
+        if let Some(value) = value {
+            *total = Some(total.unwrap_or(0).saturating_add(value));
+        }
+    }
+
+    fn record(&mut self, report: Option<&ExternalUsageReport>, now: u64) {
+        if self.first_seen == 0 {
+            self.first_seen = now;
+        }
+        self.last_seen = now;
+        self.invocations = self.invocations.saturating_add(1);
+
+        let Some(report) = report.filter(|report| !report.is_empty()) else {
+            return;
+        };
+        self.usage_reports = self.usage_reports.saturating_add(1);
+        if report.has_tokens() {
+            self.token_reports = self.token_reports.saturating_add(1);
+        }
+        Self::add_optional(&mut self.input_tokens, report.input_tokens);
+        Self::add_optional(&mut self.output_tokens, report.output_tokens);
+        Self::add_optional(&mut self.thought_tokens, report.thought_tokens);
+        Self::add_optional(&mut self.cached_read_tokens, report.cached_read_tokens);
+        Self::add_optional(&mut self.cached_write_tokens, report.cached_write_tokens);
+        if report.context_used.is_some() {
+            self.context_used = report.context_used;
+        }
+        if report.context_size.is_some() {
+            self.context_size = report.context_size;
+        }
+        if report.cost.is_some() {
+            self.last_cost = report.cost.clone();
+        }
+    }
+
+    pub fn reported_token_total(&self) -> Option<u64> {
+        let values = [
+            self.input_tokens,
+            self.output_tokens,
+            self.thought_tokens,
+            self.cached_read_tokens,
+            self.cached_write_tokens,
+        ];
+        values
+            .iter()
+            .flatten()
+            .copied()
+            .reduce(|total, value| total.saturating_add(value))
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Ledger {
     #[serde(default)]
@@ -177,6 +356,10 @@ pub struct Ledger {
     /// worse than an honest gap.
     #[serde(default)]
     daily: BTreeMap<String, DayUsage>,
+    /// Usage reported by external CLI/ACP workers. Kept separate from
+    /// provider spend because those workers own their own accounts.
+    #[serde(default)]
+    external_workers: BTreeMap<String, ExternalWorkerUsage>,
     /// Where to persist. Not serialized — it is where the file is, not part of it.
     #[serde(skip)]
     path: Option<PathBuf>,
@@ -253,6 +436,18 @@ impl Ledger {
         let _ = self.save();
     }
 
+    /// Record one completed external-worker invocation without pretending that
+    /// the parent provider paid for it. A missing report is still a real run;
+    /// only the token/context/cost fields remain unavailable.
+    pub fn record_external(&mut self, worker_id: &str, report: Option<&ExternalUsageReport>) {
+        let now = now_secs();
+        self.external_workers
+            .entry(worker_id.to_string())
+            .or_default()
+            .record(report, now);
+        let _ = self.save();
+    }
+
     /// Drop the oldest buckets past the retention window.
     ///
     /// Keys are ISO dates, so `BTreeMap` order is chronological and the oldest
@@ -299,6 +494,7 @@ impl Ledger {
         let reloaded = Self::load_from(path);
         self.providers = reloaded.providers;
         self.daily = reloaded.daily;
+        self.external_workers = reloaded.external_workers;
     }
 
     pub fn get(&self, provider_id: &str) -> Option<&ProviderUsage> {
@@ -310,8 +506,13 @@ impl Ledger {
         self.providers.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Every external worker with at least one completed invocation.
+    pub fn external_entries(&self) -> impl Iterator<Item = (&str, &ExternalWorkerUsage)> {
+        self.external_workers.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty()
+        self.providers.is_empty() && self.external_workers.is_empty()
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -325,8 +526,14 @@ impl Ledger {
             .iter()
             .map(|(id, usage)| ProviderUsageView::from_entry(id, usage))
             .collect();
+        let external_workers = self
+            .external_workers
+            .iter()
+            .map(|(id, usage)| ExternalWorkerUsageView::from_entry(id, usage))
+            .collect();
         UsageSnapshot {
             providers,
+            external_workers,
             path: self.path.as_ref().map(|p| p.display().to_string()),
         }
     }
@@ -337,6 +544,8 @@ impl Ledger {
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
     pub providers: Vec<ProviderUsageView>,
+    #[serde(default)]
+    pub external_workers: Vec<ExternalWorkerUsageView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
@@ -411,6 +620,46 @@ impl ProviderUsageView {
             provider_id: provider_id.to_string(),
             measured,
             headroom,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalWorkerUsageView {
+    pub worker_id: String,
+    pub invocations: u64,
+    pub usage_reports: u64,
+    pub token_reports: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub thought_tokens: Option<u64>,
+    pub cached_read_tokens: Option<u64>,
+    pub cached_write_tokens: Option<u64>,
+    pub reported_token_total: Option<u64>,
+    pub context_used: Option<u64>,
+    pub context_size: Option<u64>,
+    pub last_cost: Option<ExternalCost>,
+    pub last_seen: u64,
+}
+
+impl ExternalWorkerUsageView {
+    fn from_entry(worker_id: &str, usage: &ExternalWorkerUsage) -> Self {
+        Self {
+            worker_id: worker_id.to_string(),
+            invocations: usage.invocations,
+            usage_reports: usage.usage_reports,
+            token_reports: usage.token_reports,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            thought_tokens: usage.thought_tokens,
+            cached_read_tokens: usage.cached_read_tokens,
+            cached_write_tokens: usage.cached_write_tokens,
+            reported_token_total: usage.reported_token_total(),
+            context_used: usage.context_used,
+            context_size: usage.context_size,
+            last_cost: usage.last_cost.clone(),
+            last_seen: usage.last_seen,
         }
     }
 }
@@ -579,6 +828,53 @@ mod tests {
             HeadroomView::NotReported { label } => assert_eq!(label, "Not reported"),
             other => panic!("expected not reported, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn external_usage_keeps_silent_runs_and_reported_tokens_distinct() {
+        let mut ledger = Ledger::default();
+        let report = ExternalUsageReport {
+            input_tokens: Some(120),
+            output_tokens: Some(30),
+            context_used: Some(800),
+            context_size: Some(16_000),
+            cost: Some(ExternalCost {
+                amount: "0.0042".into(),
+                currency: "USD".into(),
+            }),
+            ..Default::default()
+        };
+
+        ledger.record_external("claude", Some(&report));
+        ledger.record_external("claude", None);
+
+        let usage = ledger.external_entries().next().expect("worker usage").1;
+        assert_eq!(usage.invocations, 2);
+        assert_eq!(usage.usage_reports, 1);
+        assert_eq!(usage.token_reports, 1);
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.output_tokens, Some(30));
+        assert_eq!(usage.reported_token_total(), Some(150));
+        assert_eq!(usage.context_used, Some(800));
+        assert_eq!(usage.last_cost.as_ref().unwrap().amount, "0.0042");
+
+        let worker = ledger
+            .snapshot()
+            .external_workers
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(worker.invocations, 2);
+        assert_eq!(worker.token_reports, 1);
+        assert_eq!(worker.reported_token_total, Some(150));
+    }
+
+    #[test]
+    fn old_ledgers_load_without_external_worker_data() {
+        let raw = r#"{"providers":{},"daily":{}}"#;
+        let ledger: Ledger = serde_json::from_str(raw).unwrap();
+        assert!(ledger.external_entries().next().is_none());
+        assert!(ledger.snapshot().external_workers.is_empty());
     }
 }
 

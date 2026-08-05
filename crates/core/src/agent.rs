@@ -372,6 +372,18 @@ impl Agent {
                         if outcome.risk == ToolRisk::Sensitive {
                             turn_sensitive.push(call.id.clone());
                         }
+                        if let Some(crate::tools::ToolMetadata::Delegation {
+                            provider_id,
+                            usage,
+                            ..
+                        }) = outcome.metadata.as_ref()
+                        {
+                            if let Some(ledger) = &self.ledger {
+                                if let Ok(mut ledger) = ledger.lock() {
+                                    ledger.record_external(provider_id, usage.as_ref());
+                                }
+                            }
+                        }
                         let summary = if outcome.risk == ToolRisk::Sensitive {
                             "sensitive content (hidden)".to_string()
                         } else if let Some(label) =

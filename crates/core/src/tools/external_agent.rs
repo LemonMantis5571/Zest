@@ -34,6 +34,7 @@ use super::sensitive::is_sensitive_path;
 use super::Tool;
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
+use crate::usage::{ExternalCost, ExternalUsageReport};
 
 pub const EXTERNAL_AGENT_TOOL: &str = "delegate_external";
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
@@ -74,9 +75,21 @@ struct ExternalAgentRun {
     events: Vec<ExternalAgentEvent>,
     malformed_lines: usize,
     diff: String,
+    usage: Option<ExternalUsageReport>,
 }
 
 impl ExternalAgentRun {
+    fn merge_usage(&mut self, report: ExternalUsageReport) {
+        if report.is_empty() {
+            return;
+        }
+        if let Some(existing) = &mut self.usage {
+            existing.merge(&report);
+        } else {
+            self.usage = Some(report);
+        }
+    }
+
     fn text(&self) -> String {
         let mut text = String::new();
         for event in &self.events {
@@ -279,6 +292,7 @@ impl ExternalAgent {
                 provider_id: agent_id.to_string(),
                 model,
                 diff: (!run.diff.trim().is_empty()).then(|| run.diff.clone()),
+                usage: run.usage,
             },
         ))
     }
@@ -679,6 +693,9 @@ async fn run_headless(stdout: ChildStdout) -> Result<ExternalAgentRun, String> {
 }
 
 fn absorb_headless_value(value: &Value, run: &mut ExternalAgentRun) {
+    if let Some(report) = external_usage_from_value(value) {
+        run.merge_usage(report);
+    }
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
         "error" => {
@@ -757,6 +774,194 @@ fn absorb_headless_value(value: &Value, run: &mut ExternalAgentRun) {
             }
         }
     }
+}
+
+fn external_usage_from_value(value: &Value) -> Option<ExternalUsageReport> {
+    let mut report = ExternalUsageReport::default();
+    merge_usage_object(value, &mut report, is_usage_update(value));
+    for key in [
+        "usage",
+        "usageMetadata",
+        "usage_metadata",
+        "metrics",
+        "stats",
+        "message",
+        "response",
+        "result",
+    ] {
+        if let Some(nested) = value.get(key) {
+            merge_usage_object(nested, &mut report, false);
+            for usage_key in ["usage", "usageMetadata", "usage_metadata"] {
+                if let Some(usage) = nested.get(usage_key) {
+                    merge_usage_object(usage, &mut report, false);
+                }
+            }
+        }
+    }
+    if let Some(context) = value
+        .get("context")
+        .or_else(|| value.get("context_usage"))
+        .or_else(|| value.get("contextUsage"))
+    {
+        merge_usage_object(context, &mut report, true);
+    }
+    (!report.is_empty()).then_some(report)
+}
+
+fn is_usage_update(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("usage_update")
+        || value.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+}
+
+fn merge_usage_object(
+    value: &Value,
+    report: &mut ExternalUsageReport,
+    allow_short_context_keys: bool,
+) {
+    report.input_tokens = report.input_tokens.or_else(|| {
+        number_from_keys(
+            value,
+            &[
+                "input_tokens",
+                "inputTokens",
+                "prompt_tokens",
+                "promptTokens",
+                "promptTokenCount",
+            ],
+        )
+    });
+    report.output_tokens = report.output_tokens.or_else(|| {
+        number_from_keys(
+            value,
+            &[
+                "output_tokens",
+                "outputTokens",
+                "completion_tokens",
+                "completionTokens",
+                "candidatesTokenCount",
+            ],
+        )
+    });
+    report.thought_tokens = report.thought_tokens.or_else(|| {
+        number_from_keys(
+            value,
+            &["thought_tokens", "thoughtTokens", "thoughtsTokenCount"],
+        )
+    });
+    report.cached_read_tokens = report.cached_read_tokens.or_else(|| {
+        number_from_keys(
+            value,
+            &[
+                "cache_read_input_tokens",
+                "cacheReadInputTokens",
+                "cached_content_token_count",
+                "cachedContentTokenCount",
+            ],
+        )
+    });
+    report.cached_write_tokens = report.cached_write_tokens.or_else(|| {
+        number_from_keys(
+            value,
+            &[
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+                "cache_write_tokens",
+                "cacheWriteTokens",
+            ],
+        )
+    });
+    report.context_used = report.context_used.or_else(|| {
+        number_from_keys(
+            value,
+            &[
+                "context_used",
+                "contextUsed",
+                "context_tokens_used",
+                "contextTokensUsed",
+            ],
+        )
+        .or_else(|| {
+            allow_short_context_keys
+                .then(|| number_from_keys(value, &["used"]))
+                .flatten()
+        })
+    });
+    report.context_size = report.context_size.or_else(|| {
+        number_from_keys(
+            value,
+            &[
+                "context_size",
+                "contextSize",
+                "context_window",
+                "contextWindow",
+                "max_context_tokens",
+            ],
+        )
+        .or_else(|| {
+            allow_short_context_keys
+                .then(|| number_from_keys(value, &["size"]))
+                .flatten()
+        })
+    });
+    if report.cost.is_none() {
+        report.cost = parse_cost(value);
+    }
+}
+
+fn number_from_keys(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(value_as_u64))
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+}
+
+fn parse_cost(value: &Value) -> Option<ExternalCost> {
+    for key in ["total_cost_usd", "totalCostUsd"] {
+        if let Some(amount) = value.get(key).and_then(scalar_string) {
+            return Some(ExternalCost {
+                amount,
+                currency: "USD".into(),
+            });
+        }
+    }
+    let root_currency = ["currency", "currencyCode"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(scalar_string));
+    for key in ["cost", "total_cost", "totalCost"] {
+        let Some(raw) = value.get(key) else {
+            continue;
+        };
+        if let Some(object) = raw.as_object() {
+            let amount = object
+                .get("amount")
+                .or_else(|| object.get("value"))
+                .and_then(scalar_string);
+            let currency = object
+                .get("currency")
+                .or_else(|| object.get("currencyCode"))
+                .and_then(scalar_string)
+                .or_else(|| root_currency.clone());
+            if let (Some(amount), Some(currency)) = (amount, currency) {
+                return Some(ExternalCost { amount, currency });
+            }
+        } else if let (Some(amount), Some(currency)) = (scalar_string(raw), root_currency.clone()) {
+            return Some(ExternalCost { amount, currency });
+        }
+    }
+    None
+}
+
+fn scalar_string(value: &Value) -> Option<String> {
+    let text = value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_number().map(ToString::to_string))?;
+    let text = text.trim();
+    (!text.is_empty() && text.chars().count() <= 64).then(|| text.to_string())
 }
 
 fn text_value(value: Option<&Value>) -> Option<String> {
@@ -854,7 +1059,11 @@ async fn run_acp(
         }),
     )
     .await?;
-    wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session).await?;
+    let prompt_result =
+        wait_for_response(&mut reader, &mut stdin, next_id, &mut run, &mut session).await?;
+    if let Some(report) = external_usage_from_value(&prompt_result) {
+        run.merge_usage(report);
+    }
     session.shutdown();
     run.events.push(ExternalAgentEvent::Done);
     Ok(run)
@@ -1279,6 +1488,9 @@ fn absorb_acp_update(value: &Value, run: &mut ExternalAgentRun) {
     let Some(update) = update else {
         return;
     };
+    if let Some(report) = external_usage_from_value(update) {
+        run.merge_usage(report);
+    }
     match update
         .get("sessionUpdate")
         .and_then(Value::as_str)
@@ -1880,6 +2092,94 @@ mod tests {
     }
 
     #[test]
+    fn extracts_claude_style_final_usage_without_inventing_missing_fields() {
+        let mut run = ExternalAgentRun::default();
+        absorb_headless_value(
+            &json!({
+                "type":"result",
+                "response":"done",
+                "usage":{"input_tokens":120,"output_tokens":30}
+            }),
+            &mut run,
+        );
+        let usage = run.usage.expect("reported usage");
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.output_tokens, Some(30));
+        assert_eq!(usage.cached_read_tokens, None);
+    }
+
+    #[test]
+    fn extracts_gemini_usage_metadata_and_merges_stream_updates() {
+        let mut run = ExternalAgentRun::default();
+        absorb_headless_value(
+            &json!({
+                "type":"message",
+                "role":"assistant",
+                "content":"done",
+                "usageMetadata":{
+                    "promptTokenCount":90,
+                    "candidatesTokenCount":18,
+                    "thoughtsTokenCount":12,
+                    "cachedContentTokenCount":4
+                }
+            }),
+            &mut run,
+        );
+        absorb_headless_value(
+            &json!({
+                "type":"result",
+                "usage":{"output_tokens":20},
+                "currency":"USD",
+                "cost": {"amount":"0.01"}
+            }),
+            &mut run,
+        );
+        let usage = run.usage.expect("merged usage");
+        assert_eq!(usage.input_tokens, Some(90));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.thought_tokens, Some(12));
+        assert_eq!(usage.cached_read_tokens, Some(4));
+        assert_eq!(usage.cost.unwrap().currency, "USD");
+    }
+
+    #[test]
+    fn extracts_usage_nested_in_claude_message_and_result_cost() {
+        let message = external_usage_from_value(&json!({
+            "type":"assistant",
+            "message":{"usage":{"input_tokens":44,"output_tokens":9}}
+        }))
+        .expect("message usage");
+        assert_eq!(message.input_tokens, Some(44));
+        assert_eq!(message.output_tokens, Some(9));
+
+        let result = external_usage_from_value(&json!({
+            "type":"result",
+            "total_cost_usd":0.003
+        }))
+        .expect("result cost");
+        assert_eq!(result.cost.unwrap().currency, "USD");
+    }
+
+    #[test]
+    fn extracts_acp_context_usage_update() {
+        let report = external_usage_from_value(&json!({
+            "sessionUpdate":"usage_update",
+            "used":4096,
+            "size":32768,
+            "cost":{"amount":0.02,"currency":"USD"}
+        }))
+        .expect("ACP report");
+        assert_eq!(report.context_used, Some(4096));
+        assert_eq!(report.context_size, Some(32768));
+        assert_eq!(report.cost.unwrap().amount, "0.02");
+    }
+
+    #[test]
+    fn empty_worker_envelope_does_not_become_zero_usage() {
+        assert!(external_usage_from_value(&json!({"type":"result","response":"done"})).is_none());
+    }
+
+    #[test]
     fn malformed_lines_are_visible_when_no_structured_answer_exists() {
         let mut run = ExternalAgentRun::default();
         run.malformed_lines = 2;
@@ -2001,6 +2301,8 @@ mod tests {
         let run = run_current(temp.path(), &config, "ACP task").await.unwrap();
         assert_eq!(run.text(), "acp ok");
         assert!(run.errors().is_empty());
+        assert_eq!(run.usage.as_ref().unwrap().context_used, Some(22));
+        assert_eq!(run.usage.as_ref().unwrap().context_size, Some(1000));
         assert_eq!(
             std::fs::read_to_string(temp.path().join("output.txt")).unwrap(),
             "created"

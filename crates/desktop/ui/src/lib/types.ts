@@ -236,7 +236,30 @@ export type ProviderUsageView = {
 
 export type UsageSnapshot = {
   providers: ProviderUsageView[];
+  externalWorkers: ExternalWorkerUsageView[];
   path?: string | null;
+};
+
+export type ExternalCost = {
+  amount: string;
+  currency: string;
+};
+
+export type ExternalWorkerUsageView = {
+  workerId: string;
+  invocations: number;
+  usageReports: number;
+  tokenReports: number;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  thoughtTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
+  reportedTokenTotal?: number | null;
+  contextUsed?: number | null;
+  contextSize?: number | null;
+  lastCost?: ExternalCost | null;
+  lastSeen: number;
 };
 
 /**
