@@ -215,7 +215,7 @@ Commands: `bash`. Network: `web_search` (DuckDuckGo HTML; no API key). Skills:
 Zest can delegate a self-contained task to a locally installed coding agent
 without embedding that agent's SDK or MCP server. Add an `[agents.<id>]` entry
 to `zest.toml` with `mode = "headless"` for JSONL CLI output or `mode = "acp"`
-for ACP JSON-RPC over stdio. Claude Code can use `--print
+for ACP JSON-RPC over stdio. Claude Code can use `--print --verbose
 --output-format stream-json --strict-mcp-config` with its normal CLI login;
 Gemini CLI can use `--acp` or `-p` with `--output-format stream-json`.
 In the desktop app, Settings → External workers enables the Claude Code and
@@ -236,6 +236,7 @@ mode = "headless"
 command = "claude"
 args = [
   "--print",
+  "--verbose",
   "--output-format", "stream-json",
   "--strict-mcp-config",
   "{prompt}",
@@ -321,6 +322,7 @@ mode = "headless"
 command = "claude"
 args = [
   "--print",
+  "--verbose",
   "--output-format", "stream-json",
   "--strict-mcp-config",
   "{prompt}",

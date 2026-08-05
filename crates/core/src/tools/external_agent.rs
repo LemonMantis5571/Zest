@@ -645,6 +645,42 @@ fn expanded_args(config: &ExternalAgentConfig, prompt: &str) -> Vec<String> {
     if config.mode == ExternalAgentMode::Headless && !has_prompt {
         args.push(prompt.to_string());
     }
+    normalize_claude_stream_args(config, args)
+}
+
+/// Claude Code requires `--verbose` when its headless JSONL stream is selected.
+/// Add it at launch time for older project configs that were written before
+/// Claude enforced that requirement; refreshed presets also persist the flag.
+fn normalize_claude_stream_args(
+    config: &ExternalAgentConfig,
+    mut args: Vec<String>,
+) -> Vec<String> {
+    if config.mode != ExternalAgentMode::Headless
+        || !Path::new(&config.command)
+            .file_stem()
+            .is_some_and(|stem| stem.eq_ignore_ascii_case("claude"))
+        || args.iter().any(|arg| arg == "--verbose")
+    {
+        return args;
+    }
+
+    let format_index = args.iter().enumerate().find_map(|(index, arg)| {
+        if arg == "--output-format=stream-json" {
+            Some(index)
+        } else if arg == "--output-format"
+            && args
+                .get(index + 1)
+                .is_some_and(|value| value == "stream-json")
+        {
+            Some(index)
+        } else {
+            None
+        }
+    });
+
+    if let Some(index) = format_index {
+        args.insert(index, "--verbose".into());
+    }
     args
 }
 
@@ -2082,6 +2118,44 @@ mod tests {
         config.args = vec!["--acp".into()];
         assert_eq!(expanded_args(&config, "task"), vec!["--acp"]);
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn adds_verbose_for_legacy_claude_stream_config() {
+        let config = ExternalAgentConfig {
+            mode: ExternalAgentMode::Headless,
+            command: "claude".into(),
+            args: vec![
+                "--print".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "{prompt}".into(),
+            ],
+            model: None,
+            workspace: ExternalWorkspace::Current,
+            timeout_secs: 30,
+        };
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec![
+                "--print",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "task"
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_non_claude_stream_configs_unchanged() {
+        let mut config = config(ExternalAgentMode::Headless);
+        config.command = "other-agent".into();
+        config.args = vec!["--output-format=stream-json".into()];
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec!["--output-format=stream-json", "task"]
+        );
     }
 
     #[test]
