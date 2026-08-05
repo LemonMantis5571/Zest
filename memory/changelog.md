@@ -2,6 +2,14 @@
 
 Track notable changes here.
 
+## 2026-08-05 — Internal provider routing removed in favor of ACP
+
+The parent conversation now stays on its selected provider. Delegated work uses
+`delegate_external` with configured ACP or headless CLI workers under `[agents.*]`; the desktop
+labels and config surface this as ACP workers. The old routing editor, internal `delegate` tool,
+dual-provider doctor path, and route metadata are gone. Existing `[routing]` configuration is
+accepted only for startup compatibility, with a warning that legacy delegation rules are ignored.
+
 ## 2026-08-04 — Deleting an open chat no longer recreates it
 
 Deleting the active chat now leaves an unsaved in-memory draft instead of immediately writing

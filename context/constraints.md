@@ -7,7 +7,7 @@
   desktop installer.
 - **Provider access stays behind `Provider`.** The bundled gateway translates subscription-backed
   providers today. A documented native client may replace one provider later without changing the
-  router, but Zest does not build its own monolithic OAuth gateway.
+  agent loop, but Zest does not build its own monolithic OAuth gateway.
 - **One installer, zero manual runtime setup.** Zest provisions, secures and supervises the bundled
   sidecar. A hand-installed CLIProxyAPI remains an explicit override.
 - **Windows is the primary development platform.** MSVC toolchain, `rustls` rather than OpenSSL to

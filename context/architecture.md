@@ -21,7 +21,7 @@ crates/core/     zest-core
   tools/         Tool trait + ToolRegistry (sensitive-path gates, bounded I/O)
                  read: list_dir, glob, grep, read_file (offset/limit), web_search
                  write: write_file, edit_file (+ Approver); exec: bash (allowlist)
-                 skill: read_skill; multi: delegate
+                 skill: read_skill; external: delegate_external
   prompt.rs      DEFAULT_SYSTEM + compose_system_with_docs + env_context
   agent.rs       transactional loop, concurrent ungated tools, sequential gated
                  ones; ledger-before-late-cancel; multimodal send
@@ -63,7 +63,7 @@ One turn:
 The single-user-message rule for tool results is not cosmetic: splitting results across messages
 trains the model out of making parallel tool calls.
 
-## Provider layer, router, usage ledger
+## Provider layer, ACP workers, usage ledger
 
 The part that makes Zest worth building. All of it is now written and unit-tested; none of it has
 served a live turn, because no provider has ever been reachable with a working credential.
@@ -73,13 +73,13 @@ served a live turn, because no provider has ever been reachable with a working c
           │
           ▼
     ┌───────────┐   policy    ┌──────────────┐
-    │  Router   │────────────▶│ Usage ledger │  (can this provider still serve it?)
+    │  Parent provider       │────────────▶│ Usage ledger │  (what Zest spent)
     └─────┬─────┘             └──────────────┘
           │ picks provider + model
           ▼
     ┌──────────────────── Provider (trait) ────────────────────┐
-    │  Anthropic API      Codex/Claude subscriptions   Antigravity │
-    │  native API key     via bundled gateway          via gateway │
+    │  Anthropic API      Codex subscriptions        OpenAI-compatible │
+    │  native API key     via bundled gateway        hosted or local  │
     └──────────────────────────────────────────────────────────┘
           │ streams back
           ▼
@@ -97,24 +97,23 @@ The callback is `&mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send)` rather than p
 explicit `for<'a>` is required because inside an `async_trait` method an elided lifetime binds
 instead of staying higher-ranked.
 
-**Auth detection** (`auth.rs`). Zest performs no OAuth. Vendor CLIs / the local gateway already
-sign in and write credentials; Zest reads whether that happened. `AuthStatus` distinguishes
-`NotLoggedIn` from `Unknown` — Claude and Antigravity keep credentials somewhere unreadable on
-Windows, and reporting those as logged-out would push the user to re-authenticate for nothing.
-The desktop **Connect** button calls `start_login` / `resolve_login`: silent spawn (no console on
-Windows), system browser for ChatGPT/Claude, then re-detect. Subscription OAuth runs through the
-same bundled CLIProxyAPI binary and generated config that serve chat. A hand-installed gateway with
-its own config keeps precedence.
+**Auth detection** (`auth.rs`). Zest performs no OAuth itself. Vendor CLIs, the local gateway, and
+API-key providers own their credentials; Zest reads only whether a usable setup exists.
+`AuthStatus` distinguishes `NotLoggedIn` from `Unknown` — Claude and Antigravity can keep
+credentials somewhere unreadable on Windows, and reporting those as logged-out would push the user
+to re-authenticate for nothing. The desktop **Connect** button is limited to the Zest-managed Codex
+flow; Claude Code and Gemini CLI sign in through their own tools before an ACP worker is enabled.
+A hand-installed gateway with its own config keeps precedence.
 
 Crucially, *how* a provider is reached is an implementation detail behind the trait. Anthropic is
 native today. Codex and Antigravity can be reached through CLIProxyAPI to get working quickly, then
-swapped to native clients later without the router noticing.
+swapped to native clients later without the agent loop noticing.
 
-**Router + delegated workers (v1).** The parent conversation stays pinned to the provider chosen at
-session start. Multi-provider routing runs only through the `delegate` tool: the worker is resolved
-by `Router` against `[routing]` rules / default / fallback, with exhaustion reasons surfaced in the
-tool result. `RuntimeBuilder` registers `delegate` when more than one provider loads. Automatic
-per-turn routing is deferred. See `memory/decisions.md`.
+**ACP workers.** The parent conversation stays pinned to the provider chosen at session start.
+Bounded delegation runs through `delegate_external`, which invokes an explicitly configured
+`[agents.*]` ACP or headless CLI worker. The worker is isolated, approval-gated, and returns an
+answer or diff for review. There is no automatic per-turn routing and no Zest-to-Zest delegate
+tool; `[default]` selects only the parent provider.
 
 **ModelSpec.** Each `Provider` owns a catalogue (`ModelSpec` / `ProviderDescriptor`). Gateway
 config may list `models` and `efforts`; when `models` is omitted, only the configured default is
