@@ -19,6 +19,6 @@
 | Anthropic extensions | Request fields only Anthropic understands: `thinking`, `output_config.effort` | Dropped automatically when pointed at a non-Anthropic gateway |
 | Sidecar | A second process shipped alongside and supervised by the app | CLIProxyAPI is the approved sidecar; users still receive one installer |
 | Known workspace | A project folder the desktop has opened and remembered for the Projects sidebar | `~/.zest/known-workspaces.json` (MRU). Threads stay under each project's `.zest/threads/` |
-| Context meter | UI estimate of how full the model context window is | Prefers last-turn `input_tokens`; else char/4 estimate. Compaction not shipped |
+| Context meter | UI estimate of how full the model context window is | Prefers last-turn `input_tokens`; else char/4 estimate. Completed turns trigger automatic compaction at 80% |
 | LimeBot | The author's separate Python personal-assistant project | Design ancestor, not a dependency |
 | Agentic Lemon | The author's scaffolder that generated this documentation structure | `AGENTS.md`, `context/`, `memory/`, `skills/` |

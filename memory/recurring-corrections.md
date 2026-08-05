@@ -10,6 +10,8 @@ Track corrections that apply across the whole workspace.
   need to configure or recover their work.
 - **Visual language** — keep Zest UI chrome near-black/charcoal with lavender and neutral
   status accents; do not introduce green as a product accent.
+- **Context handling** — compaction is automatic after the threshold; do not expose manual
+  compact buttons or tell users to compact from the UI when context limits are reached.
 - **The gateway decision is closed** — Zest bundles the pinned CLIProxyAPI executable as a Tauri
   sidecar and does not implement native subscription OAuth. Do not restate this as an open
   single-binary decision. Revisit only for documented native OAuth/API access, API-key billing, or

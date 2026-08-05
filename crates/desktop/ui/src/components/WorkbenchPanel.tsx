@@ -7,7 +7,6 @@ import {
   ListTreeIcon,
   PanelRightCloseIcon,
   RefreshCwIcon,
-  SparklesIcon,
   TriangleAlertIcon,
   WrenchIcon,
   XCircleIcon,
@@ -27,7 +26,6 @@ type Props = {
   onClose: () => void;
   onFork: () => Promise<void>;
   onRewind: (checkpointId: string) => Promise<void>;
-  onCompact: () => Promise<void>;
   onJump: (messageId: string) => void;
 };
 
@@ -68,7 +66,6 @@ export function WorkbenchPanel({
   onClose,
   onFork,
   onRewind,
-  onCompact,
   onJump,
 }: Props) {
   const [tab, setTab] = useState<Tab>("activity");
@@ -164,13 +161,13 @@ export function WorkbenchPanel({
                 <span
                   className={cn(
                     "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-medium",
-                    sending
+                    sending || compacting
                       ? "bg-primary/12 text-primary"
                       : "bg-secondary text-muted-foreground"
                   )}
                 >
-                  <span className={cn("size-1.5 rounded-full", sending ? "bg-primary" : "bg-muted-foreground")} />
-                  {sending ? "Working" : "Ready"}
+                  <span className={cn("size-1.5 rounded-full", sending || compacting ? "bg-primary" : "bg-muted-foreground")} />
+                  {sending ? "Working" : compacting ? "Compacting" : "Ready"}
                 </span>
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
@@ -234,10 +231,6 @@ export function WorkbenchPanel({
                 <Button type="button" variant="outline" size="sm" disabled={sending || busyAction !== null} onClick={() => void runFork()}>
                   <GitForkIcon data-icon="inline-start" />
                   Create separate conversation
-                </Button>
-                <Button type="button" variant="outline" size="sm" disabled={compacting || sending || messages.length < 4} onClick={() => void onCompact()}>
-                  <SparklesIcon data-icon="inline-start" />
-                  {compacting ? "Compacting…" : "Compact context"}
                 </Button>
               </div>
               {session.checkpoints.length ? (

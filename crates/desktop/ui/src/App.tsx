@@ -213,7 +213,7 @@ function formatInvokeError(err: unknown): string {
     return "This provider needs to be connected before continuing.";
   }
   if (raw.includes("context") || raw.includes("token limit") || raw.includes("too long")) {
-    return "This conversation is too long for the selected model. Compact it and try again.";
+    return "This conversation is too long for the selected model. Start a new conversation or shorten the request.";
   }
   if (raw.includes("permission") || raw.includes("access denied")) {
     return "Zest does not have permission to complete that action.";
@@ -1070,35 +1070,6 @@ export default function App() {
     }
   }
 
-  async function onCompactContext() {
-    if (sendingRef.current || compacting || compactionInFlightRef.current) return;
-    compactionInFlightRef.current = true;
-    setCompacting(true);
-    try {
-      await backend.compactContext();
-      const info = await backend.sessionInfo();
-      if (info && info.sessionId === sessionIdRef.current) {
-        setSession((current) =>
-          current ? { ...current, checkpoints: info.checkpoints } : current
-        );
-      }
-      toast.add({
-        type: "success",
-        title: "Conversation compacted",
-        description: "You can restore the conversation from before compaction.",
-      });
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not compact context",
-        description: formatInvokeError(err),
-      });
-    } finally {
-      compactionInFlightRef.current = false;
-      setCompacting(false);
-    }
-  }
-
   async function onLoadThread(id: string) {
     if (!id || id === session?.threadId) return;
     try {
@@ -1585,7 +1556,6 @@ export default function App() {
             onNewChat={onNewChat}
             onForkThread={onForkThread}
             onRewindThread={onRewindThread}
-            onCompactContext={onCompactContext}
             compacting={compacting}
             onDeleteThread={onDeleteThread}
             onOpenProjectChat={onOpenProjectChat}
