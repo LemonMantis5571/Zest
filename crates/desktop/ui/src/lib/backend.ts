@@ -96,6 +96,7 @@ export type DesktopBackend = {
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
   cancelTurn(): Promise<void>;
   resolveApproval(approvalId: string, decision: ApprovalChoice): Promise<void>;
+  resolveQuestion(questionId: string, answer: string): Promise<void>;
   setApprovalMode(mode: ApprovalMode): Promise<string>;
   approvalMode(): Promise<string>;
   verifyProvider(id: string): Promise<void>;
@@ -179,6 +180,8 @@ export function createTauriBackend(): DesktopBackend {
     cancelTurn: () => tauriApi.cancelTurn(),
     resolveApproval: (approvalId, decision) =>
       tauriApi.resolveApproval(approvalId, decision),
+    resolveQuestion: (questionId, answer) =>
+      tauriApi.resolveQuestion(questionId, answer),
     setApprovalMode: (mode) => tauriApi.setApprovalMode(mode),
     approvalMode: () => tauriApi.approvalMode(),
     verifyProvider: (id) => tauriApi.verifyProvider(id),
@@ -488,6 +491,9 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async resolveApproval() {
       throw new Error("fixture: no pending approvals");
+    },
+    async resolveQuestion() {
+      throw new Error("fixture: no pending questions");
     },
     async setApprovalMode(mode: ApprovalMode) {
       return mode;

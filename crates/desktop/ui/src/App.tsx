@@ -610,6 +610,10 @@ export default function App() {
       }
     }
 
+    if (event.kind === "question_needed") {
+      void showAttention("Input needed", event.prompt, "warning");
+    }
+
     if (event.kind === "done") {
       const startedAt = turnStartedAtRef.current;
       if (startedAt != null && isLongTurn(Date.now() - startedAt)) {
@@ -1288,9 +1292,10 @@ export default function App() {
     }
   }
 
-  async function onSend() {
-    const text = draft.trim();
-    const pending = attachmentsRef.current;
+  async function onSend(textOverride?: string) {
+    const directAnswer = textOverride !== undefined;
+    const text = (textOverride ?? draft).trim();
+    const pending = directAnswer ? [] : attachmentsRef.current;
     const hasOk = pending.some(
       (a) =>
         a.status === "done" &&
@@ -1303,12 +1308,14 @@ export default function App() {
       .filter((a) => a.status === "done")
       .map((a) => ({ name: a.name, kind: a.kind }));
     pendingUserAttachmentsRef.current = chips.length > 0 ? chips : null;
-    setDraft("");
-    setAttachments([]);
-    if (session?.threadId) {
-      saveDraft(session.threadId, "");
+    if (!directAnswer) {
+      setDraft("");
+      setAttachments([]);
+      if (session?.threadId) {
+        saveDraft(session.threadId, "");
+      }
     }
-    await submitTurn(text, pending, { restoreDraftOnFailure: true });
+    await submitTurn(text, pending, { restoreDraftOnFailure: !directAnswer });
   }
 
   /**
@@ -1441,6 +1448,19 @@ export default function App() {
       toast.add({
         type: "error",
         title: allow ? "Could not allow tool" : "Could not deny tool",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
+  }
+
+  async function onResolveQuestion(questionId: string, answer: string) {
+    try {
+      await backend.resolveQuestion(questionId, answer);
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not send answer",
         description: formatInvokeError(err),
       });
       throw err;
@@ -1615,6 +1635,7 @@ export default function App() {
             onModelChange={onModelChange}
             onEffortChange={onEffortChange}
             onResolveApproval={onResolveApproval}
+            onResolveQuestion={onResolveQuestion}
             onReconnectProvider={(providerId) => {
               // Same path as the picker Connect: spawns the vendor/gateway
               // login and shows the waiting screen until it resolves.
