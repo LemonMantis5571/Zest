@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { CheckIcon, FolderOpenIcon } from "lucide-react";
+import { CheckIcon, FolderOpenIcon, PlusIcon } from "lucide-react";
 
+import { ApiProviderForm } from "@/components/ApiProviderForm";
 import { AuthShell } from "@/components/AuthShell";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
@@ -45,6 +46,7 @@ export function ProviderPicker({
   const [apiKey, setApiKey] = useState("");
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
+  const [addingApiProvider, setAddingApiProvider] = useState(false);
   const selected = providers.find((p) => p.id === selectedId) ?? null;
   const selectedNeedsConnect =
     selected != null && recentVerifyFailed(selected.id);
@@ -171,6 +173,37 @@ export function ProviderPicker({
       </ul>
 
       {error ? <p className="mt-3 text-xs text-destructive">{error}</p> : null}
+
+      {/*
+        Without this the picker is a dead end for anyone who has no CLI sign-in:
+        adding a key-based provider was only reachable from the in-chat "Change
+        provider" sheet, which needs a working provider to reach. Someone whose
+        Codex account is refused could not get in at all.
+      */}
+      {addingApiProvider ? (
+        <div className="mt-4 overflow-hidden rounded-lg border border-border/70">
+          <ApiProviderForm
+            onCancel={() => setAddingApiProvider(false)}
+            onDone={async (id) => {
+              await onRefresh();
+              setAddingApiProvider(false);
+              onSelect(id);
+            }}
+          />
+        </div>
+      ) : (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3 w-full"
+          disabled={continuing}
+          onClick={() => setAddingApiProvider(true)}
+        >
+          <PlusIcon className="size-3.5" />
+          Add a provider with an API key
+        </Button>
+      )}
 
       {selected?.method === "API key" ? (
         <div className="mt-4 rounded-lg border border-border/70 bg-card/40 p-3">
