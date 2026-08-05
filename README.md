@@ -425,8 +425,8 @@ the OS credential manager and is never returned to the UI or written to the conf
 [providers.deepseek]
 kind = "openai_compatible"
 base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
-models = ["deepseek-chat", "deepseek-reasoner"]
+model = "deepseek-v4-flash"
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 credential = "deepseek"
 ```
 

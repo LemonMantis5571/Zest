@@ -481,8 +481,8 @@ model = "gpt-5.3-codex"
 [providers.deepseek]
 kind = "openai_compatible"
 base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
-models = ["deepseek-chat", "deepseek-reasoner"]
+model = "deepseek-v4-flash"
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 credential = "deepseek"
 "#,
         )
@@ -495,7 +495,7 @@ credential = "deepseek"
                 ..
             } => {
                 assert_eq!(base_url, "https://api.deepseek.com");
-                assert_eq!(model, "deepseek-chat");
+                assert_eq!(model, "deepseek-v4-flash");
                 assert_eq!(credential.as_deref(), Some("deepseek"));
             }
             other => panic!("expected OpenAI-compatible provider, got {other:?}"),
