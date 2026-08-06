@@ -407,6 +407,7 @@ struct ExternalAgentView {
     status_label: String,
     detail: String,
     configured: bool,
+    mcp_allowed: bool,
     /// Presets can be enabled or removed from Settings. Other entries remain
     /// visible as read-only rows so manual configuration is discoverable.
     preset: bool,
@@ -1020,6 +1021,7 @@ fn external_agent_view(
         status_label,
         detail,
         configured,
+        mcp_allowed: config.is_some_and(|agent| agent.allow_mcp),
         preset,
     }
 }
@@ -1095,16 +1097,52 @@ fn set_external_agent(state: State<'_, AppState>, id: String, enabled: bool) -> 
     Ok(())
 }
 
-fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
-    let Some(preset) = zest_core::config_edit::external_agent_preset(id) else {
-        return false;
+#[tauri::command]
+fn set_external_agent_mcp(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let id = id.trim();
+    let Some(preset) = zest_core::config_edit::external_agent_preset_with_mcp(id, enabled) else {
+        return Err(
+            "MCP pass-through is available for the built-in Claude Code and Gemini CLI workers."
+                .into(),
+        );
     };
-    let matches_current = agent.mode == preset.mode
-        && agent.command == preset.command
-        && agent.args == preset.args
-        && agent.model == preset.model
-        && agent.workspace == preset.workspace
-        && agent.timeout_secs == preset.timeout_secs;
+    let _edit_guard = state
+        .config_edit
+        .lock()
+        .map_err(|_| "settings are busy; try again".to_string())?;
+    let current = load_workspace_config(&state);
+    let Some(existing) = current.agents.get(id) else {
+        return Err("Enable this worker before allowing its MCP servers.".into());
+    };
+    if !external_agent_matches_preset(id, existing) {
+        return Err(format!(
+            "{id} is customized in zest.toml; edit or remove that entry there first"
+        ));
+    }
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::upsert_external_agent(&path, &preset)?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
+    let matches_current = [false, true].into_iter().any(|allow_mcp| {
+        let Some(preset) = zest_core::config_edit::external_agent_preset_with_mcp(id, allow_mcp)
+        else {
+            return false;
+        };
+        agent.mode == preset.mode
+            && agent.command == preset.command
+            && agent.args == preset.args
+            && agent.allow_mcp == preset.allow_mcp
+            && agent.model == preset.model
+            && agent.workspace == preset.workspace
+            && agent.timeout_secs == preset.timeout_secs
+    });
     matches_current || legacy_claude_preset_matches(id, agent)
 }
 
@@ -1112,6 +1150,7 @@ fn legacy_claude_preset_matches(id: &str, agent: &zest_core::ExternalAgentConfig
     if id != "claude"
         || agent.mode != ExternalAgentMode::Headless
         || agent.command != "claude"
+        || agent.allow_mcp
         || agent.model.is_some()
         || agent.workspace != ExternalWorkspace::Isolated
         || agent.timeout_secs != 900
@@ -4230,6 +4269,22 @@ timeout_secs = 900
             &config.agents["claude"]
         ));
     }
+
+    #[test]
+    fn mcp_enabled_worker_remains_a_built_in_preset() {
+        let preset = zest_core::config_edit::external_agent_preset_with_mcp("claude", true)
+            .expect("Claude MCP preset");
+        let raw = format!(
+            "[agents.claude]\nmode = \"headless\"\ncommand = \"claude\"\nargs = {:?}\nallow_mcp = true\nworkspace = \"isolated\"\ntimeout_secs = 900\n",
+            preset.args
+        );
+        let config = Config::parse(&raw).unwrap();
+
+        assert!(external_agent_matches_preset(
+            "claude",
+            &config.agents["claude"]
+        ));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -4263,6 +4318,7 @@ pub fn run() {
             refresh_providers,
             list_external_agents,
             set_external_agent,
+            set_external_agent_mcp,
             check_external_agent,
             set_provider_key,
             delete_provider_key,

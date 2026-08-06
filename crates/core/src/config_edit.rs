@@ -22,6 +22,7 @@ pub struct ExternalAgentInput {
     pub mode: ExternalAgentMode,
     pub command: String,
     pub args: Vec<String>,
+    pub allow_mcp: bool,
     pub model: Option<String>,
     pub workspace: ExternalWorkspace,
     pub timeout_secs: u64,
@@ -31,21 +32,31 @@ pub struct ExternalAgentInput {
 /// configuration templates only: no login command or credential is run by the
 /// setup UI.
 pub fn external_agent_preset(id: &str) -> Option<ExternalAgentInput> {
+    external_agent_preset_with_mcp(id, false)
+}
+
+pub fn external_agent_preset_with_mcp(id: &str, allow_mcp: bool) -> Option<ExternalAgentInput> {
     match id {
         "claude" => Some(ExternalAgentInput {
             id: id.to_string(),
             mode: ExternalAgentMode::Headless,
             command: "claude".into(),
-            args: vec![
-                "--print".into(),
-                "--verbose".into(),
-                "--permission-mode".into(),
-                "acceptEdits".into(),
-                "--output-format".into(),
-                "stream-json".into(),
-                "--strict-mcp-config".into(),
-                "{prompt}".into(),
-            ],
+            args: {
+                let mut args = vec![
+                    "--print".into(),
+                    "--verbose".into(),
+                    "--permission-mode".into(),
+                    "acceptEdits".into(),
+                    "--output-format".into(),
+                    "stream-json".into(),
+                ];
+                if !allow_mcp {
+                    args.push("--strict-mcp-config".into());
+                }
+                args.push("{prompt}".into());
+                args
+            },
+            allow_mcp,
             model: None,
             workspace: ExternalWorkspace::Isolated,
             timeout_secs: 900,
@@ -54,7 +65,14 @@ pub fn external_agent_preset(id: &str) -> Option<ExternalAgentInput> {
             id: id.to_string(),
             mode: ExternalAgentMode::Acp,
             command: "gemini".into(),
-            args: vec!["--acp".into()],
+            args: {
+                let mut args = vec!["--acp".into()];
+                if !allow_mcp {
+                    args.extend(["--allowed-mcp-server-names".into(), "".into()]);
+                }
+                args
+            },
+            allow_mcp,
             model: None,
             workspace: ExternalWorkspace::Isolated,
             timeout_secs: 900,
@@ -183,6 +201,7 @@ pub fn upsert_external_agent(path: &Path, input: &ExternalAgentInput) -> Result<
     } else {
         agent["args"] = toml_edit::value(args);
     }
+    agent["allow_mcp"] = toml_edit::value(input.allow_mcp);
 
     if let Some(model) = input
         .model
@@ -288,6 +307,7 @@ mod tests {
         assert!(raw.contains("--verbose"));
         assert!(raw.contains("acceptEdits"));
         assert!(raw.contains("--strict-mcp-config"));
+        assert!(raw.contains("allow_mcp = false"));
         let config = Config::parse(&raw).unwrap();
         assert_eq!(config.agents["claude"].mode, ExternalAgentMode::Headless);
 
@@ -306,5 +326,19 @@ mod tests {
         input.args.push("{prompt}".into());
         let error = upsert_external_agent(&path, &input).unwrap_err();
         assert!(error.contains("over stdio"));
+    }
+
+    #[test]
+    fn mcp_enabled_presets_use_the_cli_owned_configuration() {
+        let claude = external_agent_preset_with_mcp("claude", true).unwrap();
+        assert!(claude.allow_mcp);
+        assert!(!claude.args.iter().any(|arg| arg == "--strict-mcp-config"));
+
+        let gemini = external_agent_preset_with_mcp("gemini", true).unwrap();
+        assert!(gemini.allow_mcp);
+        assert!(!gemini
+            .args
+            .iter()
+            .any(|arg| arg == "--allowed-mcp-server-names"));
     }
 }

@@ -31,8 +31,8 @@ Zest does not perform automatic provider routing or run a second internal delega
    `scripts/verify.ps1`. Run `cargo run -p zest -- doctor --live` only with a working
    gateway/login; it is manual and spends quota.
 2. **ACP worker UX** — configure external workers in the desktop, make delegation status and
-   approvals clear, and keep worker output reviewable without making workers look like parent
-   providers.
+   approvals clear, keep worker output reviewable without making workers look like parent
+   providers, and make CLI-owned MCP explicitly opt-in.
 3. **Provider setup** — maintain the provider picker, API-key setup, model capability controls,
    and OpenAI-compatible/DeepSeek configuration without reintroducing routing rules.
 4. **Compaction and sandboxing** — keep context management honest, then harden the OS-backed

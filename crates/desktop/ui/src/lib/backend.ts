@@ -48,6 +48,7 @@ export type DesktopBackend = {
   listProviders(): Promise<ProviderRow[]>;
   listExternalAgents(): Promise<ExternalAgentRow[]>;
   setExternalAgent(id: string, enabled: boolean): Promise<void>;
+  setExternalAgentMcp(id: string, enabled: boolean): Promise<void>;
   checkExternalAgent(id: string): Promise<ExternalAgentCheck>;
   setProviderKey(id: string, key: string): Promise<void>;
   deleteProviderKey(id: string): Promise<void>;
@@ -150,6 +151,7 @@ export function createTauriBackend(): DesktopBackend {
     listProviders: () => tauriApi.listProviders(),
     listExternalAgents: () => tauriApi.listExternalAgents(),
     setExternalAgent: (id, enabled) => tauriApi.setExternalAgent(id, enabled),
+    setExternalAgentMcp: (id, enabled) => tauriApi.setExternalAgentMcp(id, enabled),
     checkExternalAgent: (id) => tauriApi.checkExternalAgent(id),
     setProviderKey: (id, key) => tauriApi.setProviderKey(id, key),
     deleteProviderKey: (id) => tauriApi.deleteProviderKey(id),
@@ -211,6 +213,7 @@ export function createFixtureBackend(): DesktopBackend {
   let workspace = ".";
   let fixturePinned = false;
   const enabledExternalAgents = new Set<string>();
+  const fixtureMcpAgents = new Set<string>();
 
   return {
     mode: "fixture",
@@ -227,6 +230,7 @@ export function createFixtureBackend(): DesktopBackend {
             ? "Uses your Claude Code CLI session."
             : "Enable this worker in the desktop app.",
           configured: enabledExternalAgents.has("claude"),
+          mcpAllowed: enabledExternalAgents.has("claude") && fixtureMcpAgents.has("claude"),
           preset: true,
         },
         {
@@ -240,13 +244,21 @@ export function createFixtureBackend(): DesktopBackend {
             ? "Uses your Gemini CLI session."
             : "Enable this worker in the desktop app.",
           configured: enabledExternalAgents.has("gemini"),
+          mcpAllowed: enabledExternalAgents.has("gemini") && fixtureMcpAgents.has("gemini"),
           preset: true,
         },
       ];
     },
     async setExternalAgent(id, enabled) {
       if (enabled) enabledExternalAgents.add(id);
-      else enabledExternalAgents.delete(id);
+      else {
+        enabledExternalAgents.delete(id);
+        fixtureMcpAgents.delete(id);
+      }
+    },
+    async setExternalAgentMcp(id, enabled) {
+      if (enabled) fixtureMcpAgents.add(id);
+      else fixtureMcpAgents.delete(id);
     },
     async checkExternalAgent() {
       return {

@@ -113,7 +113,11 @@ swapped to native clients later without the agent loop noticing.
 Bounded delegation runs through `delegate_external`, which invokes an explicitly configured
 `[agents.*]` ACP or headless CLI worker. The worker is isolated, approval-gated, and returns an
 answer or diff for review. There is no automatic per-turn routing and no Zest-to-Zest delegate
-tool; `[default]` selects only the parent provider.
+tool; `[default]` selects only the parent provider. `allow_mcp = true` is an explicit pass-through
+for the worker's own MCP configuration. It is disabled by default: Claude receives
+`--strict-mcp-config`, and Gemini receives an empty MCP allowlist. Zest preserves the worker's MCP
+environment after removing Zest's own provider credentials, but does not inspect or individually
+approve MCP calls; native Zest MCP remains a later design.
 
 **ModelSpec.** Each `Provider` owns a catalogue (`ModelSpec` / `ProviderDescriptor`). Gateway
 config may list `models` and `efforts`; when `models` is omitted, only the configured default is
