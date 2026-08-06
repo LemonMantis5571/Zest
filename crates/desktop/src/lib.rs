@@ -10,7 +10,7 @@ mod session;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -826,13 +826,24 @@ enum ChatEvent {
 struct DesktopError {
     code: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 fn desktop_err(code: &str, message: impl Into<String>) -> String {
+    desktop_err_with_details(code, message, None)
+}
+
+fn desktop_err_with_details(
+    code: &str,
+    message: impl Into<String>,
+    details: Option<serde_json::Value>,
+) -> String {
     let message = message.into();
     serde_json::to_string(&DesktopError {
         code: code.into(),
         message: message.clone(),
+        details,
     })
     .unwrap_or(message)
 }
@@ -1421,6 +1432,52 @@ fn configure_api_provider(
     Ok(())
 }
 
+/// Open the project-local configuration in the user's default editor.
+///
+/// Provider ownership is deliberately configured in `zest.toml`; this keeps
+/// the recovery dialog from silently changing a project's provider table.
+#[tauri::command]
+fn open_project_config(root: String) -> Result<(), String> {
+    let root = canonicalize_dir(PathBuf::from(root.trim()))?;
+    let path = root.join(zest_core::config::CONFIG_FILE);
+    if !path.is_file() {
+        return Err(
+            "This project has no zest.toml yet. Add the provider to its project configuration first."
+                .into(),
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        StdCommand::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("could not open project configuration: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        StdCommand::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("could not open project configuration: {e}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        StdCommand::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("could not open project configuration: {e}"))?;
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = path;
+        return Err("opening project configuration is not supported on this platform".into());
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn usage_snapshot() -> UsageSnapshot {
     Ledger::load().snapshot()
@@ -1835,11 +1892,16 @@ fn resolve_thread(
     root: &std::path::Path,
     store: &ThreadStore,
     provider_id: &str,
+    config: &Config,
+    allow_unowned: bool,
 ) -> Result<ResolvedThread, String> {
     let state = ProjectSessionState::load(root, provider_id);
     if let Some(id) = state.get(provider_id).thread_id {
         match store.load_for_provider(&id, provider_id) {
             Ok(loaded) => {
+                if loaded.thread.provider_id.is_none() && !allow_unowned {
+                    return Err(thread_provider_unknown_error(config, &loaded.thread.id));
+                }
                 let mut thread = loaded.thread;
                 // Pin missing owner once; never rewrite a different owner.
                 thread
@@ -2119,10 +2181,11 @@ async fn start_session_inner(
     let (mut thread, load_warning, thread_created) = match thread_override {
         Some((thread, warning)) => (thread, warning, false),
         None => {
-            let resolved = resolve_thread(&root, &store, &id)?;
+            let resolved = resolve_thread(&root, &store, &id, &config, false)?;
             (resolved.thread, resolved.warning, resolved.created)
         }
     };
+    let claiming_legacy_thread = thread.provider_id.is_none();
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
 
     let approver: Arc<dyn Approver> = Arc::new(HubApprover {
@@ -2165,6 +2228,18 @@ async fn start_session_inner(
     let runtime_warnings = runtime.warnings.clone();
     let mut agent = runtime.agent;
     agent.messages = thread.agent_messages.clone();
+
+    // A legacy thread is claimed only after the target provider has built a
+    // usable runtime. Reopening it later must use this explicit owner rather
+    // than guessing from the currently selected provider again.
+    if claiming_legacy_thread {
+        if let Err(error) = store.save(&thread) {
+            if thread_created {
+                let _ = store.delete(&thread.id);
+            }
+            return Err(error.to_string());
+        }
+    }
 
     if let Err(error) = persist_provider_model_effort(&root, &id, &runtime.model, &runtime.effort) {
         if thread_created {
@@ -2458,27 +2533,121 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
     Ok(out)
 }
 
-/// Pick the provider that can serve a project chat.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversationProviderChoice {
+    id: String,
+    label: String,
+    model: String,
+}
+
+fn configured_provider_choices(config: &Config) -> Vec<ConversationProviderChoice> {
+    config
+        .providers
+        .keys()
+        .filter_map(|id| {
+            let view = configured_provider_view(id, config);
+            view.selectable.then_some(ConversationProviderChoice {
+                id: id.clone(),
+                label: view.label,
+                model: view.default_model,
+            })
+        })
+        .collect()
+}
+
+fn provider_label_for_config(config: &Config, provider_id: &str) -> String {
+    if config.providers.contains_key(provider_id) {
+        configured_provider_view(provider_id, config).label
+    } else {
+        title_case_id(provider_id)
+    }
+}
+
+fn thread_provider_unknown_error(config: &Config, thread_id: &str) -> String {
+    desktop_err_with_details(
+        "thread_provider_unknown",
+        "This chat has no provider owner. Choose one before reopening it.",
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "availableProviders": configured_provider_choices(config),
+        })),
+    )
+}
+
+fn provider_unavailable_error(
+    config: &Config,
+    provider_id: &str,
+    thread_id: Option<&str>,
+) -> String {
+    let label = provider_label_for_config(config, provider_id);
+    let configured = config.providers.contains_key(provider_id);
+    let message = if configured {
+        format!("{label} is not ready for this project.")
+    } else {
+        format!("{label} is not configured for this project.")
+    };
+    desktop_err_with_details(
+        "provider_unavailable",
+        message,
+        Some(serde_json::json!({
+            "threadId": thread_id,
+            "providerId": provider_id,
+            "providerLabel": label,
+            "configured": configured,
+            "availableProviders": configured_provider_choices(config),
+        })),
+    )
+}
+
+fn provider_is_selectable(config: &Config, provider_id: &str) -> bool {
+    config.providers.contains_key(provider_id)
+        && configured_provider_view(provider_id, config).selectable
+}
+
+/// Pick the provider that can serve a project chat without crossing a thread's
+/// ownership boundary.
 ///
-/// A project `zest.toml` intentionally replaces the user config. That means
-/// the provider used by the current project may not exist in the project being
-/// opened. Keep the current provider when possible; otherwise follow the
-/// project's explicit default (or its only provider) instead of making an
-/// otherwise valid project impossible to open.
+/// `thread_provider` distinguishes three cases: no thread was requested,
+/// a saved thread has an owner, or a legacy saved thread has no owner. Only
+/// the first case may use the project's default/only-provider convenience.
 fn select_project_provider(
     config: &Config,
     requested_provider: &str,
-    thread_provider: Option<&str>,
+    thread_provider: Option<Option<&str>>,
+    explicit_provider: Option<&str>,
+    thread_id: Option<&str>,
 ) -> Result<String, String> {
-    if let Some(owner) = thread_provider {
+    if let Some(Some(owner)) = thread_provider {
+        if let Some(chosen) = explicit_provider {
+            if chosen != owner {
+                return Err(desktop_err(
+                    "thread_provider_mismatch",
+                    format!(
+                        "This chat belongs to {}, not {}. Open a copy to use another provider.",
+                        provider_label_for_config(config, owner),
+                        provider_label_for_config(config, chosen),
+                    ),
+                ));
+            }
+        }
         if config.providers.contains_key(owner) {
             return Ok(owner.to_string());
         }
-        return Err(desktop_err(
-            "provider_unavailable",
-            format!(
-                "This conversation uses `{owner}`, but that provider is not configured for this project."
-            ),
+        return Err(provider_unavailable_error(config, owner, thread_id));
+    }
+
+    if let Some(chosen) = explicit_provider {
+        if config.providers.contains_key(chosen) {
+            return Ok(chosen.to_string());
+        }
+        return Err(provider_unavailable_error(config, chosen, thread_id));
+    }
+
+    if matches!(thread_provider, Some(None)) {
+        return Err(thread_provider_unknown_error(
+            config,
+            thread_id.unwrap_or("unknown"),
         ));
     }
 
@@ -2534,13 +2703,13 @@ model = "gpt-5.6-terra"
         .unwrap();
 
         assert_eq!(
-            select_project_provider(&config, "codex", None).unwrap(),
+            select_project_provider(&config, "codex", None, None, None).unwrap(),
             "codex"
         );
     }
 
     #[test]
-    fn falls_back_to_project_default_when_requested_provider_is_missing() {
+    fn keeps_default_for_new_project_chats_when_requested_provider_is_missing() {
         let config = Config::parse(
             r#"
 [providers.codex]
@@ -2555,7 +2724,7 @@ provider = "codex"
         .unwrap();
 
         assert_eq!(
-            select_project_provider(&config, "deepseek", None).unwrap(),
+            select_project_provider(&config, "deepseek", None, None, None).unwrap(),
             "codex"
         );
     }
@@ -2572,9 +2741,45 @@ model = "gpt-5.6-terra"
         )
         .unwrap();
 
-        let error = select_project_provider(&config, "codex", Some("deepseek"))
-            .expect_err("a thread owner is a hard boundary");
+        let error = select_project_provider(
+            &config,
+            "codex",
+            Some(Some("deepseek")),
+            None,
+            Some("thread-1"),
+        )
+        .expect_err("a thread owner is a hard boundary");
         assert!(error.contains("not configured for this project"));
+    }
+
+    #[test]
+    fn legacy_thread_requires_an_explicit_owner() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-terra"
+"#,
+        )
+        .unwrap();
+
+        let error =
+            select_project_provider(&config, "codex", Some(None), None, Some("thread-legacy"))
+                .expect_err("legacy threads must not inherit the current provider");
+        assert!(error.contains("thread_provider_unknown"));
+
+        assert_eq!(
+            select_project_provider(
+                &config,
+                "codex",
+                Some(None),
+                Some("codex"),
+                Some("thread-legacy"),
+            )
+            .unwrap(),
+            "codex"
+        );
     }
 }
 
@@ -2639,6 +2844,8 @@ async fn open_project_chat(
     root: String,
     thread_id: Option<String>,
     new_thread: Option<bool>,
+    provider_id: Option<String>,
+    copy_thread: Option<bool>,
 ) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
 
@@ -2659,14 +2866,53 @@ async fn open_project_chat(
         .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty());
-    let thread_provider = if let Some(tid) = thread_id {
-        let store = open_store(&root)?;
-        store.load(tid).map_err(|e| e.to_string())?.provider_id
+    let explicit_provider = provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let new_thread = new_thread.unwrap_or(false);
+    let copy_thread = copy_thread.unwrap_or(false);
+    let target_store = open_store(&root)?;
+    let loaded_target = if !new_thread {
+        thread_id
+            .map(|tid| target_store.load_typed(tid).map_err(|e| e.to_string()))
+            .transpose()?
     } else {
         None
     };
-    let provider_id =
-        select_project_provider(&config, &requested_provider, thread_provider.as_deref())?;
+    let thread_provider = loaded_target
+        .as_ref()
+        .map(|loaded| loaded.thread.provider_id.as_deref());
+    let copying_to_another_provider =
+        copy_thread && explicit_provider.is_some() && loaded_target.is_some();
+    let selection_thread_provider = if copying_to_another_provider {
+        None
+    } else {
+        thread_provider
+    };
+    let provider_id = select_project_provider(
+        &config,
+        &requested_provider,
+        selection_thread_provider,
+        explicit_provider,
+        loaded_target
+            .as_ref()
+            .map(|loaded| loaded.thread.id.as_str()),
+    )?;
+
+    // A saved chat must not fall through to the generic session-start error
+    // when its owner is configured but currently unavailable. Return the same
+    // recovery payload used for a missing project entry so the user can either
+    // configure the original provider or open a copy with a ready one.
+    if loaded_target.is_some() && !provider_is_selectable(&config, &provider_id) {
+        return Err(provider_unavailable_error(
+            &config,
+            &provider_id,
+            loaded_target
+                .as_ref()
+                .map(|loaded| loaded.thread.id.as_str()),
+        ));
+    }
 
     // Preflight the complete target before changing the active workspace. The
     // thread override lets start_session build the runtime without writing
@@ -2674,21 +2920,35 @@ async fn open_project_chat(
     let target_state_path = ProjectSessionState::path(&root);
     let previous_target_state = std::fs::read(&target_state_path).ok();
     let previous_last_provider = snapshot_last_provider();
-    let target_store = open_store(&root)?;
     let mut created_thread_id: Option<String> = None;
-    let target_thread = if new_thread.unwrap_or(false) {
+    let target_thread = if new_thread {
         let thread = target_store
             .create_for_provider(&provider_id)
             .map_err(|e| e.to_string())?;
         created_thread_id = Some(thread.id.clone());
         Some((thread, None))
-    } else if let Some(tid) = thread_id {
-        let loaded = target_store
-            .load_for_provider(tid, &provider_id)
-            .map_err(|e| e.to_string())?;
-        Some((loaded.thread, loaded.warning))
+    } else if let Some(loaded) = loaded_target {
+        let warning = loaded.warning;
+        let source = loaded.thread;
+        let thread = if copying_to_another_provider {
+            target_store
+                .fork_for_provider(&source, &provider_id, None)
+                .map_err(|e| e.to_string())?
+        } else {
+            source
+        };
+        if copying_to_another_provider {
+            created_thread_id = Some(thread.id.clone());
+        }
+        Some((thread, warning))
     } else {
-        let resolved = resolve_thread(&root, &target_store, &provider_id)?;
+        let resolved = resolve_thread(
+            &root,
+            &target_store,
+            &provider_id,
+            &config,
+            explicit_provider.is_some(),
+        )?;
         if resolved.created {
             created_thread_id = Some(resolved.thread.id.clone());
         }
@@ -2719,18 +2979,7 @@ async fn open_project_chat(
         }
     }
 
-    let mut info = result?;
-    if provider_id != requested_provider {
-        let switched = format!(
-            "{requested_provider} is not configured for this project, so Zest opened it with {}.",
-            info.label
-        );
-        info.warning = Some(match info.warning.take() {
-            Some(existing) => format!("{switched} {existing}"),
-            None => switched,
-        });
-    }
-    Ok(info)
+    result
 }
 
 #[tauri::command]
@@ -2739,6 +2988,13 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
     state.approvals.clear();
     state.questions.clear();
 
+    let root = state
+        .sessions
+        .session_info_snapshot(|session| session.root.clone())
+        .map_err(map_session_err)?
+        .ok_or_else(|| desktop_err("no_session", "open a project before opening a chat"))?;
+    let config = config_for_session(&state, &root)?;
+
     state
         .sessions
         .with_session_mut(|session| -> Result<SessionInfo, String> {
@@ -2746,6 +3002,9 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
             let loaded = store
                 .load_for_provider(&id, &session.provider_id)
                 .map_err(|e| e.to_string())?;
+            if loaded.thread.provider_id.is_none() {
+                return Err(thread_provider_unknown_error(&config, &loaded.thread.id));
+            }
             session.agent.clear_messages();
             session.agent.messages = loaded.thread.agent_messages.clone();
             session.thread_id = loaded.thread.id.clone();
@@ -4391,6 +4650,7 @@ pub fn run() {
             delete_provider_key,
             provider_key_present,
             configure_api_provider,
+            open_project_config,
             usage_snapshot,
             profile_stats,
             set_local_offset,

@@ -30,12 +30,12 @@ type Props = {
   sending: boolean;
   onOpenChange: (open: boolean) => void;
   onNewChat: () => void;
-  onLoadThread: (id: string) => void;
-  onSwitchProvider: (providerId: string) => Promise<void>;
   onOpenProjectChat: (options: {
     root: string;
     threadId?: string;
     newThread?: boolean;
+    providerId?: string;
+    copyThread?: boolean;
   }) => Promise<void>;
   onForkThread: () => Promise<void>;
   onDeleteThread: (id: string, projectPath: string) => Promise<void>;
@@ -131,8 +131,6 @@ export function ChatHistorySidebar({
   sending,
   onOpenChange,
   onNewChat,
-  onLoadThread,
-  onSwitchProvider,
   onOpenProjectChat,
   onForkThread,
   onDeleteThread,
@@ -270,16 +268,9 @@ export function ChatHistorySidebar({
   }
 
   async function openThread(project: ProjectChats, thread: ThreadSummary) {
-    if (project.active) {
-      if (thread.providerId && thread.providerId !== activeProviderId) {
-        await onSwitchProvider(thread.providerId);
-      }
-      onLoadThread(thread.id);
-      return;
-    }
-    // The backend resolves the target project's thread owner. Switching the
-    // current project first would mutate the wrong session if the target then
-    // rejects the provider or cannot be opened.
+    // Route every thread open through the project-aware backend. This preserves
+    // provider ownership and lets legacy or unavailable chats show recovery
+    // actions instead of silently switching providers.
     await onOpenProjectChat({
       root: project.path,
       threadId: thread.id,
@@ -324,7 +315,7 @@ export function ChatHistorySidebar({
           <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
           {owner ? (
             <span
-              title={`This chat belongs to ${owner}. Switch to ${owner} to reopen it.`}
+              title={`This chat belongs to ${owner}. Zest will keep the original provider or let you open a copy.`}
               className="shrink-0 rounded-sm bg-white/[0.06] px-1 py-px font-mono text-[9px] tracking-tight text-muted-foreground"
             >
               {owner}
