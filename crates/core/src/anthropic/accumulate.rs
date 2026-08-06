@@ -230,6 +230,7 @@ mod tests {
                 StreamEvent::ModelSubstituted { served, .. } => {
                     seen.push(format!("substituted:{served}"))
                 }
+                StreamEvent::ResumeHandle(_) => {}
             };
             for payload in parser.feed(sse.as_bytes()) {
                 let ev: Value = serde_json::from_str(&payload).expect("valid event json");

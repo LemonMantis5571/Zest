@@ -62,6 +62,12 @@ export type DesktopBackend = {
     credential: string;
     key: string;
   }): Promise<void>;
+  configureAnthropicProvider(input: {
+    id: string;
+    model: string;
+    credential: string;
+    key: string;
+  }): Promise<void>;
   openProjectConfig(root: string): Promise<void>;
   usageSnapshot(): Promise<UsageSnapshot>;
   profileStats(): Promise<ProfileStats>;
@@ -162,6 +168,7 @@ export function createTauriBackend(): DesktopBackend {
     deleteProviderKey: (id) => tauriApi.deleteProviderKey(id),
     providerKeyPresent: (id) => tauriApi.providerKeyPresent(id),
     configureApiProvider: (input) => tauriApi.configureApiProvider(input),
+    configureAnthropicProvider: (input) => tauriApi.configureAnthropicProvider(input),
     openProjectConfig: (root) => tauriApi.openProjectConfig(root),
     usageSnapshot: () => tauriApi.usageSnapshot(),
     profileStats: () => tauriApi.profileStats(),
@@ -342,6 +349,9 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async configureApiProvider() {
       notAvailable("configureApiProvider");
+    },
+    async configureAnthropicProvider() {
+      notAvailable("configureAnthropicProvider");
     },
     async openProjectConfig() {
       notAvailable("openProjectConfig");
