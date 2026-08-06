@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.png" alt="Zest Logo" width="128" height="128" />
+<img src="./assets/logo.png" alt="Zest Logo" width="128" height="128" />
 
 # Zest Harness
 
@@ -13,6 +13,18 @@ Zest gives coding AI models a focused, secure execution workspace on your machin
 </div>
 
 ---
+
+## See Zest in action
+
+<p align="center">
+  <video controls preload="metadata" poster="./assets/zest-showcase-poster.jpg" width="720">
+    <source src="./assets/zest-showcase.mp4" type="video/mp4" />
+  </video>
+</p>
+
+If your Markdown viewer does not show the inline player, [watch or download the CLI showcase video](./assets/zest-showcase.mp4), or click the preview below.
+
+[![Watch the Zest CLI showcase](./assets/zest-showcase-poster.jpg)](./assets/zest-showcase.mp4)
 
 ## Why Zest Harness?
 
