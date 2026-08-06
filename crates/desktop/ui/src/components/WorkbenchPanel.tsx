@@ -201,7 +201,7 @@ export function WorkbenchPanel({
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
         tabIndex={-1}
-        className="pointer-events-auto relative z-10 flex h-full max-h-[720px] w-[min(360px,calc(100%_-_24px))] min-w-0 flex-col overflow-hidden rounded-2xl border border-border/80 bg-background/95 text-foreground shadow-2xl backdrop-blur-xl outline-none"
+        className="pointer-events-auto relative z-10 flex h-full max-h-[720px] w-[min(360px,calc(100%_-_24px))] min-w-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-card text-card-foreground outline-none"
       >
       <header className="flex shrink-0 items-center justify-between border-b border-border/60 px-3 py-2.5">
         <div>
@@ -283,7 +283,7 @@ export function WorkbenchPanel({
       >
         {tab === "activity" ? (
           <div className="flex flex-col gap-2.5">
-            <section className="rounded-xl border border-border/70 bg-background/30 p-2.5">
+            <section className="border-b border-border/60 pb-3">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -316,7 +316,7 @@ export function WorkbenchPanel({
             </section>
 
             {subagents.length ? (
-              <section>
+              <section className="border-b border-border/60 pb-2.5">
                 <div className="mb-1.5 flex items-center justify-between px-1">
                   <h2 className="m-0 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                     <BotIcon className="size-3.5" aria-hidden="true" />
@@ -329,7 +329,7 @@ export function WorkbenchPanel({
                     <button
                       type="button"
                       key={subagent.id}
-                      className="flex w-full items-center gap-2 rounded-lg border border-border/60 bg-background/25 px-2.5 py-2 text-left transition-colors hover:bg-secondary/60"
+                      className="group flex w-full items-center gap-2 border-b border-border/60 px-1 py-2 text-left transition-colors last:border-b-0 hover:bg-secondary/40"
                       onClick={() => onJump(subagent.messageId)}
                       aria-label={`${subagent.label}, ${subagentStatus(subagent.status)}`}
                     >
@@ -349,7 +349,7 @@ export function WorkbenchPanel({
               </section>
             ) : null}
 
-            <section className="rounded-xl border border-border/70 bg-background/30 p-2.5">
+            <section className="border-b border-border/60 pb-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -380,7 +380,7 @@ export function WorkbenchPanel({
                 </Button>
               </div>
               {review ? (
-                <div className="mt-3 space-y-2 text-[11px]">
+                <div className="mt-3 flex flex-col gap-2 text-[11px]">
                   <div className="flex items-center justify-between gap-3 rounded-md bg-secondary/50 px-2 py-1.5">
                     <span className="text-muted-foreground">Patch check</span>
                     <span
@@ -401,11 +401,11 @@ export function WorkbenchPanel({
                     </span>
                   </div>
                   {review.changedFiles.length > 0 ? (
-                    <div className="space-y-1 rounded-md bg-secondary/50 px-2 py-1.5">
+                    <div className="flex flex-col gap-1 rounded-md bg-secondary/50 px-2 py-1.5">
                       <div className="text-muted-foreground">
                         Changed files ({review.changedFileCount})
                       </div>
-                      <ul className="space-y-0.5 font-mono text-[10px] text-foreground/80">
+                      <ul className="flex flex-col gap-0.5 font-mono text-[10px] text-foreground/80">
                         {review.changedFiles.slice(0, 5).map((file) => (
                           <li key={file} className="truncate" title={file}>
                             {file}
@@ -440,7 +440,7 @@ export function WorkbenchPanel({
                     <button
                       type="button"
                       key={task.id}
-                      className="flex w-full items-start gap-2 rounded-lg border border-border/60 bg-background/25 px-2.5 py-2 text-left transition-colors hover:bg-secondary/60"
+                      className="group flex w-full items-start gap-2 border-b border-border/60 px-1 py-2 text-left transition-colors last:border-b-0 hover:bg-secondary/40"
                       onClick={() => onJump(task.messageId)}
                     >
                       <span className="mt-0.5 shrink-0" aria-hidden="true">{statusIcon(task.status)}</span>
