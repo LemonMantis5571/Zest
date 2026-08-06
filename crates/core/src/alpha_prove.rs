@@ -1,4 +1,4 @@
-//! Deterministic fake-provider proofs for the stable Windows alpha.
+//! Deterministic fake-provider proofs for the Windows beta.
 //!
 //! These tests cover the provider-pinned agent loop, selected model, tool
 //! round-trip, ledger attribution, and thread restoration without spending
