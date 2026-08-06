@@ -259,6 +259,44 @@ pub struct TurnRequest {
     pub cancel: Option<crate::cancel::CancelToken>,
 }
 
+/// Whether a provider can continue a durable stream after the process that
+/// started it has gone away. Existing providers default to unsupported until
+/// their wire protocol exposes a real, non-secret resume mechanism.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeSupport {
+    #[default]
+    Unsupported,
+    ProviderManaged,
+}
+
+/// Provider-owned, non-secret cursor for a durable stream.
+///
+/// Providers must never place credentials or bearer material in this record.
+/// It is persisted with the run so a future resume implementation can identify
+/// the provider-side stream without changing the thread transcript format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeHandle {
+    pub provider_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl ResumeHandle {
+    pub fn new(provider_run_id: impl Into<String>) -> Self {
+        Self {
+            provider_run_id: provider_run_id.into(),
+            cursor: None,
+        }
+    }
+
+    pub fn with_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+}
+
 /// Incremental output, for rendering. Everything here is also present in the
 /// final `Completion` — a front-end that ignores these still gets a correct turn.
 #[derive(Debug)]
@@ -308,6 +346,9 @@ pub enum StreamEvent<'a> {
         requested: String,
         served: String,
     },
+    /// Provider checkpoint for a future durable-resume implementation. This is
+    /// persistence metadata, not user-visible chat content.
+    ResumeHandle(ResumeHandle),
     /// A gated tool is waiting on the user (write/exec). Owned strings so the
     /// preview can outlive the tool-call stack frame.
     ApprovalNeeded {
@@ -449,6 +490,27 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Whether this provider can resume a stream after a process restart.
+    fn resume_support(&self) -> ResumeSupport {
+        ResumeSupport::Unsupported
+    }
+
+    /// Continue a provider-owned stream from a durable handle.
+    ///
+    /// The default keeps current providers safe and explicit: a provider must
+    /// opt in only after its protocol can prove that the handle is sufficient.
+    async fn resume_turn(
+        &self,
+        _req: &TurnRequest,
+        _handle: &ResumeHandle,
+        _on_event: &mut (dyn for<'a> FnMut(StreamEvent<'a>) + Send),
+    ) -> Result<Completion> {
+        Err(crate::error::HarnessError::Other(format!(
+            "provider `{}` does not support durable stream resume",
+            self.id()
+        )))
+    }
+
     /// The callback must be `Send`: provider futures are `Send` so that delegated
     /// sub-agents can run concurrently on the tokio runtime.
     async fn stream_turn(
@@ -502,5 +564,19 @@ mod tests {
         );
         assert_eq!(cat.len(), 2);
         assert!(cat.iter().all(|model| model.efforts.is_empty()));
+    }
+
+    #[test]
+    fn durable_resume_defaults_to_unsupported_and_handles_are_serializable() {
+        assert_eq!(ResumeSupport::default(), ResumeSupport::Unsupported);
+
+        let handle = ResumeHandle::new("provider-run-1").with_cursor("event-9");
+        let encoded = serde_json::to_value(&handle).unwrap();
+        assert_eq!(encoded["providerRunId"], "provider-run-1");
+        assert_eq!(encoded["cursor"], "event-9");
+        assert_eq!(
+            serde_json::from_value::<ResumeHandle>(encoded).unwrap(),
+            handle
+        );
     }
 }
