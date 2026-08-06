@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 use tokio::process::Command;
 use tokio::sync::oneshot;
@@ -27,13 +28,13 @@ use zest_core::{
     descriptor_from_config, detect_all, display_path, ensure_gateway_running, env_context,
     load_custom_system, load_project_docs, new_id, probe, save_custom_system,
     start_login as core_start_login, truncate_chars, uses_gateway_auth, ApprovalDecision,
-    ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts, Config,
-    ExternalAgentMode, ExternalWorkspace, GatewayState, HarnessError, Ledger, LoginProcess,
-    PersistPriority, PersistWorker, ProfileStats, ProjectSessionState, ProviderConfig,
-    ProviderRegistry, ProviderSlot, QuestionRequest, Questioner, RuntimeBuilder, SkillSet,
-    SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError,
-    ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION,
+    ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts,
+    ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace, GatewayState, HarnessError,
+    Ledger, LoginProcess, PersistPriority, PersistWorker, ProfileStats, ProjectSessionState,
+    ProviderConfig, ProviderRegistry, ProviderSlot, QuestionRequest, Questioner, RecoverableRun,
+    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint,
+    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
+    DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -369,6 +370,29 @@ impl From<ThreadCheckpoint> for ThreadCheckpointView {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "TurnRecovery.ts", rename_all = "camelCase")
+)]
+struct TurnRecoveryView {
+    /// Lifecycle identity is useful for diagnostics and future provider resume,
+    /// but the UI only needs the message id to prefill a retry.
+    run_id: String,
+    user_message_id: String,
+}
+
+impl From<&RecoverableRun> for TurnRecoveryView {
+    fn from(recovery: &RecoverableRun) -> Self {
+        Self {
+            run_id: recovery.run_id.clone(),
+            user_message_id: recovery.user_message_id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -583,7 +607,13 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
 
 fn provider_method(config: &ProviderConfig) -> &'static str {
     match config {
-        ProviderConfig::Anthropic { .. } => "Environment key",
+        ProviderConfig::Anthropic { credential, .. } => {
+            if credential.is_some() {
+                "API key"
+            } else {
+                "Environment key"
+            }
+        }
         ProviderConfig::Gateway { .. } => "Gateway",
         ProviderConfig::OpenaiCompatible {
             credential,
@@ -671,6 +701,9 @@ struct SessionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    recovery: Option<TurnRecoveryView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -938,6 +971,12 @@ fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
         .filter(|s| PICKER_IDS.contains(&s.id))
         .map(|s| provider_view_from_slot(s, &config))
         .collect();
+
+    append_configured_direct_provider_views(&mut rows, &config);
+    rows
+}
+
+fn append_configured_direct_provider_views(rows: &mut Vec<ProviderView>, config: &Config) {
     let existing: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
     for (id, entry) in &config.providers {
         if existing.contains(id)
@@ -948,9 +987,8 @@ fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
         {
             continue;
         }
-        rows.push(configured_provider_view(id, &config));
+        rows.push(configured_provider_view(id, config));
     }
-    rows
 }
 
 #[tauri::command]
@@ -1365,38 +1403,61 @@ fn scrub_external_environment(command: &mut Command) {
 #[tauri::command]
 fn set_provider_key(state: State<'_, AppState>, id: String, key: String) -> Result<(), String> {
     let config = load_workspace_config(&state);
-    let Some(ProviderConfig::OpenaiCompatible {
-        credential,
-        api_key_env,
-        ..
-    }) = config.providers.get(&id)
-    else {
-        return Err("This provider does not accept an API key.".to_string());
+    let credential = match config.providers.get(&id) {
+        Some(ProviderConfig::Anthropic {
+            credential: Some(credential),
+            ..
+        })
+        | Some(ProviderConfig::OpenaiCompatible {
+            credential: Some(credential),
+            ..
+        }) => credential,
+        Some(ProviderConfig::Anthropic { .. }) | Some(ProviderConfig::OpenaiCompatible { .. }) => {
+            return Err("This provider gets its API key from an environment variable.".into())
+        }
+        Some(_) => return Err("This provider does not accept an API key.".to_string()),
+        None => return Err("This provider does not accept an API key.".to_string()),
     };
-    if credential.is_none() && api_key_env.is_some() {
-        return Err("This provider gets its API key from an environment variable.".into());
+    if key.trim().is_empty() {
+        return Err("API key cannot be empty".into());
     }
-    zest_core::credentials::set(credential.as_deref().unwrap_or(&id), &key)
+    zest_core::credentials::set(credential, &key)
 }
 
 #[tauri::command]
 fn delete_provider_key(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let config = load_workspace_config(&state);
-    let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
-    else {
-        return Err("This provider does not accept an API key.".to_string());
+    let credential = match config.providers.get(&id) {
+        Some(ProviderConfig::Anthropic {
+            credential: Some(credential),
+            ..
+        })
+        | Some(ProviderConfig::OpenaiCompatible {
+            credential: Some(credential),
+            ..
+        }) => credential,
+        Some(_) => return Err("This provider does not accept an API key.".to_string()),
+        None => return Err("This provider does not accept an API key.".to_string()),
     };
-    zest_core::credentials::delete(credential.as_deref().unwrap_or(&id))
+    zest_core::credentials::delete(credential)
 }
 
 #[tauri::command]
 fn provider_key_present(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     let config = load_workspace_config(&state);
-    let Some(ProviderConfig::OpenaiCompatible { credential, .. }) = config.providers.get(&id)
-    else {
-        return Err("This provider does not accept an API key.".to_string());
+    let credential = match config.providers.get(&id) {
+        Some(ProviderConfig::Anthropic {
+            credential: Some(credential),
+            ..
+        })
+        | Some(ProviderConfig::OpenaiCompatible {
+            credential: Some(credential),
+            ..
+        }) => credential,
+        Some(_) => return Err("This provider does not accept an API key.".to_string()),
+        None => return Err("This provider does not accept an API key.".to_string()),
     };
-    zest_core::credentials::present(credential.as_deref().unwrap_or(&id))
+    zest_core::credentials::present(credential)
 }
 
 #[tauri::command]
@@ -1424,6 +1485,35 @@ fn configure_api_provider(
             base_url,
             model,
             models,
+            credential: credential.clone(),
+        },
+    )?;
+    zest_core::credentials::set(credential.trim(), key.trim())?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn configure_anthropic_provider(
+    state: State<'_, AppState>,
+    id: String,
+    model: String,
+    credential: String,
+    key: String,
+) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("API key is required".into());
+    }
+    let _edit_guard = state
+        .config_edit
+        .lock()
+        .map_err(|_| "settings are busy; try again".to_string())?;
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::add_anthropic_provider(
+        &path,
+        &zest_core::config_edit::AnthropicProviderInput {
+            id: id.clone(),
+            model,
             credential: credential.clone(),
         },
     )?;
@@ -1869,6 +1959,43 @@ fn open_store(root: &std::path::Path) -> Result<ThreadStore, String> {
     ThreadStore::open(root).map_err(|e| e.to_string())
 }
 
+/// Load the transcript together with its lifecycle projection, then close any
+/// turn the current provider cannot resume after a process restart. The thread
+/// snapshot returned here is the one the session should render and restore into
+/// the agent; the warning keeps the recovery visible without exposing storage
+/// details to the UI.
+fn recover_chat_on_load(
+    root: &std::path::Path,
+    store: &ThreadStore,
+    thread_id: &str,
+    warning_already_present: bool,
+) -> Result<(Thread, Option<String>, Option<RecoverableRun>), String> {
+    let persistence = ChatPersistence::open(root).map_err(|error| error.to_string())?;
+    let reconstructed = persistence
+        .reconstruct_chat(store, thread_id)
+        .map_err(|error| error.to_string())?;
+    let recoverable_run = reconstructed.recoverable_run.clone();
+    let had_unfinished_state =
+        reconstructed.active_run.is_some() || !reconstructed.pending_interrupts.is_empty();
+    let reconciliation = persistence
+        .reconcile_after_restart(thread_id)
+        .map_err(|error| error.to_string())?;
+    let recovery_warning = if !(warning_already_present || reconstructed.thread_warning.is_some())
+        && (had_unfinished_state
+            || reconciliation.aborted_runs > 0
+            || reconciliation.cancelled_interrupts > 0)
+    {
+        Some(
+            "A previous turn was interrupted and closed safely. Its message is ready to resend."
+                .into(),
+        )
+    } else {
+        None
+    };
+
+    Ok((reconstructed.thread, recovery_warning, recoverable_run))
+}
+
 fn ensure_persist(state: &AppState, root: &std::path::Path) -> Result<PersistWorker, String> {
     let mut guard = state
         .persist
@@ -2004,6 +2131,7 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
             .collect(),
         messages: session.thread.messages.clone(),
         warning,
+        recovery: session.recovery.as_ref().map(TurnRecoveryView::from),
     }
 }
 
@@ -2186,6 +2314,24 @@ async fn start_session_inner(
         }
     };
     let claiming_legacy_thread = thread.provider_id.is_none();
+    let (recovery_warning, recovery) = match recover_chat_on_load(
+        &root,
+        &store,
+        &thread.id,
+        load_warning.is_some(),
+    ) {
+        Ok((recovered_thread, warning, recovery)) => {
+            thread = recovered_thread;
+            (warning, recovery)
+        }
+        Err(_) => (
+            Some(
+                "Chat recovery state could not be checked; the saved transcript is still available."
+                    .into(),
+            ),
+            None,
+        ),
+    };
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
 
     let approver: Arc<dyn Approver> = Arc::new(HubApprover {
@@ -2274,6 +2420,7 @@ async fn start_session_inner(
         root,
         thread_id: thread_id.clone(),
         thread,
+        recovery,
         base_system: runtime.base_system,
         skills: runtime.skills,
     };
@@ -2289,6 +2436,7 @@ async fn start_session_inner(
     // A dropped preference is worth saying out loud — otherwise the picker just
     // shows a different model than last time with no explanation.
     let warning = merge_warnings(load_warning, runtime_warnings);
+    let warning = merge_warnings(warning, recovery_warning.into_iter().collect());
 
     let info = state
         .sessions
@@ -2837,6 +2985,67 @@ mod chat_summary_tests {
     }
 }
 
+#[cfg(test)]
+mod chat_recovery_tests {
+    use super::*;
+    use zest_core::RunStatus;
+
+    #[test]
+    fn stale_lifecycle_is_closed_and_reported_to_session_loader() {
+        let root = std::env::temp_dir().join(format!("zest-chat-recovery-{}", new_id("test")));
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+        thread.apply_user("user-restart", "Continue the interrupted work");
+        store.save(&thread).unwrap();
+        let persistence = ChatPersistence::open(&root).unwrap();
+        let run = persistence
+            .runs
+            .create_or_resume_for_turn(
+                "run-restart",
+                &thread.id,
+                "codex",
+                "user-restart",
+                "assistant-restart",
+            )
+            .unwrap();
+        persistence
+            .interrupts
+            .create(
+                "interrupt-restart",
+                &run.run_id,
+                &thread.id,
+                json!({ "kind": "approval" }),
+            )
+            .unwrap();
+
+        let (recovered, warning, retry) =
+            recover_chat_on_load(&root, &store, &thread.id, false).unwrap();
+        assert_eq!(recovered.id, thread.id);
+        assert_eq!(
+            warning.as_deref(),
+            Some("A previous turn was interrupted and closed safely. Its message is ready to resend.")
+        );
+        assert_eq!(
+            retry,
+            Some(RecoverableRun {
+                run_id: run.run_id.clone(),
+                user_message_id: "user-restart".into(),
+            })
+        );
+        assert_eq!(
+            persistence.runs.load(&run.run_id).unwrap().unwrap().status,
+            RunStatus::Aborted
+        );
+        assert!(persistence
+            .interrupts
+            .list_pending(&thread.id)
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 /// Switch project (and optional thread) while keeping the current provider.
 #[tauri::command]
 async fn open_project_chat(
@@ -3005,12 +3214,39 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
             if loaded.thread.provider_id.is_none() {
                 return Err(thread_provider_unknown_error(&config, &loaded.thread.id));
             }
-            session.agent.clear_messages();
-            session.agent.messages = loaded.thread.agent_messages.clone();
-            session.thread_id = loaded.thread.id.clone();
-            session.thread = loaded.thread;
+            let loaded_thread = loaded.thread;
+            let load_warning = loaded.warning;
+            let recovery_warning = match recover_chat_on_load(
+                &session.root,
+                &store,
+                &loaded_thread.id,
+                load_warning.is_some(),
+            ) {
+                Ok((recovered_thread, warning, recovery)) => {
+                    session.agent.clear_messages();
+                    session.agent.messages = recovered_thread.agent_messages.clone();
+                    session.thread_id = recovered_thread.id.clone();
+                    session.thread = recovered_thread;
+                    session.recovery = recovery;
+                    warning
+                }
+                Err(_) => {
+                    session.agent.clear_messages();
+                    session.agent.messages = loaded_thread.agent_messages.clone();
+                    session.thread_id = loaded_thread.id.clone();
+                    session.thread = loaded_thread;
+                    session.recovery = None;
+                    Some(
+                        "Chat recovery state could not be checked; the saved transcript is still available."
+                            .into(),
+                    )
+                }
+            };
             persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
-            Ok(session_info_from(session, loaded.warning))
+            Ok(session_info_from(
+                session,
+                merge_warnings(load_warning, recovery_warning.into_iter().collect()),
+            ))
         })
         .map_err(map_session_err)
         .and_then(|r| r)
@@ -3032,6 +3268,7 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
             session.agent.clear_messages();
             session.thread_id = thread.id.clone();
             session.thread = thread;
+            session.recovery = None;
             persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             Ok(session_info_from(session, None))
         })
@@ -3059,6 +3296,7 @@ fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
             session.agent.last_usage = None;
             session.thread_id = fork.id.clone();
             session.thread = fork;
+            session.recovery = None;
             persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             Ok(session_info_from(
                 session,
@@ -3095,6 +3333,7 @@ fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<Se
             session.agent.last_usage = None;
             session.thread = restored;
             session.thread_id = session.thread.id.clone();
+            session.recovery = None;
             store.save(&session.thread).map_err(|e| e.to_string())?;
             persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
             Ok(session_info_from(
@@ -3195,6 +3434,7 @@ fn delete_thread(
                 session.agent.clear_messages();
                 session.thread_id = thread.id.clone();
                 session.thread = thread;
+                session.recovery = None;
                 // Keep the active provider pointing at the draft, but do not
                 // create a history row until the user sends a message.
                 persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
@@ -3271,6 +3511,10 @@ async fn send_message(
     let multimodal = has_images(&attachments);
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
+    // A new user submission supersedes the one-time retry affordance restored
+    // from a previous process. The durable run record remains available for
+    // diagnostics, but the session no longer advertises the stale action.
+    session.recovery = None;
     state.approvals.begin_turn(&turn.turn_id);
     state.questions.begin_turn(&turn.turn_id);
 
@@ -3332,12 +3576,44 @@ async fn send_message(
             return Err(desktop_err("persistence", e));
         }
     };
+    let persistence = match ChatPersistence::open(&session.root) {
+        Ok(persistence) => persistence,
+        Err(error) => {
+            state.approvals.clear();
+            state.questions.clear();
+            let _ = state.sessions.finish_turn(&turn, session);
+            return Err(desktop_err("persistence", error.to_string()));
+        }
+    };
 
     let session_id = turn.session_id.clone();
     let thread_id = turn.thread_id.clone();
     let turn_id = turn.turn_id.clone();
     let user_message_id = new_id("user");
     let assistant_message_id = new_id("assistant");
+    let run_persisted = match persistence.runs.create_or_resume_for_turn(
+        &turn_id,
+        &thread_id,
+        &session.provider_id,
+        &user_message_id,
+        &assistant_message_id,
+    ) {
+        Ok(_) => true,
+        Err(error) => {
+            let _ = app.emit(
+                "chat-event",
+                ChatEvent::Warning {
+                    session_id: session_id.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    message: format!(
+                        "Turn lifecycle could not be saved; chat will continue without recovery metadata: {error}"
+                    ),
+                },
+            );
+            false
+        }
+    };
 
     let user_event = ChatEvent::User {
         session_id: session_id.clone(),
@@ -3384,7 +3660,17 @@ async fn send_message(
         let turn_id = turn_id.clone();
         let live_thread = live_thread.clone();
         let worker = worker.clone();
+        let persistence = persistence.clone();
         let mut on_event = move |ev: StreamEvent<'_>| {
+            let ev = match ev {
+                StreamEvent::ResumeHandle(handle) => {
+                    if run_persisted {
+                        let _ = persistence.runs.set_resume_handle(&turn_id, handle);
+                    }
+                    return;
+                }
+                other => other,
+            };
             let event = match ev {
                 StreamEvent::Text(t) => ChatEvent::TextDelta {
                     session_id: session_id.clone(),
@@ -3490,7 +3776,72 @@ async fn send_message(
                         "The selected model was unavailable, so this response used `{served}` instead."
                     ),
                 },
+                StreamEvent::ResumeHandle(_) => {
+                    unreachable!("resume handles are persisted before chat-event mapping")
+                }
             };
+
+            if run_persisted {
+                match &event {
+                    ChatEvent::ApprovalNeeded {
+                        approval_id,
+                        tool_name,
+                        tool_call_id,
+                        risk,
+                        path,
+                        summary,
+                        diff,
+                        ..
+                    } => {
+                        let result = persistence.interrupts.create(
+                            approval_id,
+                            &turn_id,
+                            &thread_id,
+                            json!({
+                                "kind": "approval",
+                                "approvalId": approval_id,
+                                "toolName": tool_name,
+                                "toolCallId": tool_call_id,
+                                "risk": risk,
+                                "path": path,
+                                "summary": summary,
+                                "diff": diff,
+                            }),
+                        );
+                        if result.is_ok() {
+                            let _ = persistence.runs.mark_interrupted(&turn_id);
+                        }
+                    }
+                    ChatEvent::QuestionNeeded {
+                        question_id,
+                        tool_call_id,
+                        prompt,
+                        choices,
+                        multiple,
+                        placeholder,
+                        ..
+                    } => {
+                        let result = persistence.interrupts.create(
+                            question_id,
+                            &turn_id,
+                            &thread_id,
+                            json!({
+                                "kind": "question",
+                                "questionId": question_id,
+                                "toolCallId": tool_call_id,
+                                "prompt": prompt,
+                                "choices": choices,
+                                "multiple": multiple,
+                                "placeholder": placeholder,
+                            }),
+                        );
+                        if result.is_ok() {
+                            let _ = persistence.runs.mark_interrupted(&turn_id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
 
             if let Ok(mut thread) = live_thread.lock() {
                 let priority = event_priority(&event);
@@ -3593,11 +3944,16 @@ async fn send_message(
         }
     };
     apply_event_to_thread(&mut session.thread, &final_event);
-    if worker
+    let history_save_failed = if worker
         .save_and_wait(session.thread.clone(), PersistPriority::Immediate)
         .await
         .is_err()
     {
+        true
+    } else {
+        worker.flush().await.is_err()
+    };
+    if history_save_failed {
         let _ = app.emit(
             "chat-event",
             ChatEvent::Warning {
@@ -3607,16 +3963,45 @@ async fn send_message(
                 message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
             },
         );
-    } else if worker.flush().await.is_err() {
-        let _ = app.emit(
-            "chat-event",
-            ChatEvent::Warning {
-                session_id,
-                thread_id,
-                turn_id: Some(turn_id),
-                message: "Chat history could not be saved. You can continue, but this turn may not be available after restarting.".into(),
-            },
-        );
+    }
+    let final_history_saved = !history_save_failed;
+
+    // Keep the ordering invariant: the transcript is durable before a
+    // successful run is marked terminal. If the transcript write failed, leave
+    // the lifecycle record failed rather than claiming a completed conversation
+    // that cannot be restored.
+    if run_persisted {
+        let lifecycle_result = if !final_history_saved {
+            let _ = persistence.interrupts.cancel_pending_by_run(&turn_id);
+            persistence
+                .runs
+                .mark_failed(&turn_id, "final transcript persistence failed")
+        } else {
+            match &result {
+                Ok(()) => persistence
+                    .runs
+                    .mark_completed(&turn_id, session.agent.last_usage.as_ref()),
+                Err(HarnessError::Cancelled) => {
+                    let _ = persistence.interrupts.cancel_pending_by_run(&turn_id);
+                    persistence.runs.mark_aborted(&turn_id)
+                }
+                Err(error) => {
+                    let _ = persistence.interrupts.cancel_pending_by_run(&turn_id);
+                    persistence.runs.mark_failed(&turn_id, error.to_string())
+                }
+            }
+        };
+        if let Err(error) = lifecycle_result {
+            let _ = app.emit(
+                "chat-event",
+                ChatEvent::Warning {
+                    session_id: session_id.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    message: format!("Turn lifecycle could not be finalized: {error}"),
+                },
+            );
+        }
     }
     let _ = app.emit("chat-event", &final_event);
 
@@ -3632,9 +4017,16 @@ async fn send_message(
 #[tauri::command]
 fn cancel_turn(state: State<'_, AppState>) -> Result<(), String> {
     // Cancel token first so in-flight select! races abort before waiters clear.
+    let active_turn = state.sessions.active_turn().map_err(map_session_err)?;
     let cancelled = state.sessions.cancel_turn().map_err(map_session_err)?;
     if !cancelled {
         return Err(desktop_err("no_turn", "no turn in progress"));
+    }
+    if let Some(turn) = active_turn {
+        if let Ok(persistence) = ChatPersistence::open(&turn.root) {
+            let _ = persistence.interrupts.cancel_pending_by_run(&turn.turn_id);
+            let _ = persistence.runs.mark_aborted(&turn.turn_id);
+        }
     }
     state.approvals.clear();
     state.questions.clear();
@@ -3655,7 +4047,25 @@ fn resolve_approval(
         "deny" => ApprovalDecision::Deny,
         other => return Err(format!("unknown approval decision `{other}`")),
     };
-    state.approvals.resolve(&approval_id, decision)
+    let persisted_decision = match decision {
+        ApprovalDecision::AllowOnce => "once",
+        ApprovalDecision::AllowSession => "session",
+        ApprovalDecision::Deny => "deny",
+    };
+    let active_turn = state.sessions.active_turn().map_err(map_session_err)?;
+    let result = state.approvals.resolve(&approval_id, decision);
+    if result.is_ok() {
+        if let Some(turn) = active_turn {
+            if let Ok(persistence) = ChatPersistence::open(&turn.root) {
+                let _ = persistence.interrupts.resolve(
+                    &approval_id,
+                    Some(json!({ "decision": persisted_decision })),
+                );
+                let _ = persistence.runs.mark_running(&turn.turn_id);
+            }
+        }
+    }
+    result
 }
 
 /// Deliver a structured questionnaire answer to the active `ask_user` tool.
@@ -3670,7 +4080,20 @@ fn resolve_question(
     if answer.is_empty() {
         return Err("answer cannot be empty".into());
     }
-    state.questions.resolve(question_id.trim(), answer)
+    let question_id = question_id.trim().to_string();
+    let active_turn = state.sessions.active_turn().map_err(map_session_err)?;
+    let result = state.questions.resolve(&question_id, answer.clone());
+    if result.is_ok() {
+        if let Some(turn) = active_turn {
+            if let Ok(persistence) = ChatPersistence::open(&turn.root) {
+                let _ = persistence
+                    .interrupts
+                    .resolve(&question_id, Some(json!({ "answer": answer })));
+                let _ = persistence.runs.mark_running(&turn.turn_id);
+            }
+        }
+    }
+    result
 }
 
 /// Switch the permission mode for the live session.
@@ -4650,6 +5073,7 @@ pub fn run() {
             delete_provider_key,
             provider_key_present,
             configure_api_provider,
+            configure_anthropic_provider,
             open_project_config,
             usage_snapshot,
             profile_stats,
@@ -4714,6 +5138,7 @@ mod export_bindings {
         ModelCapability::export_all().expect("export ModelCapability bindings");
         WorkspaceReview::export_all().expect("export WorkspaceReview bindings");
         ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
+        TurnRecoveryView::export_all().expect("export TurnRecovery bindings");
         ToolMetaView::export_all().expect("export ToolMetaView bindings");
     }
 }
@@ -4885,6 +5310,18 @@ mod characterization {
     }
 
     #[test]
+    fn a_codex_sign_in_without_parent_config_is_not_launch_ready() {
+        let config = Config::env_fallback();
+        let view =
+            provider_view_from_slot(&slot("codex", AuthStatus::Ready { account: None }), &config);
+
+        assert!(!view.selectable);
+        assert_eq!(view.status_kind, "unconfigured");
+        assert_eq!(view.status_label, "Not configured");
+        assert!(view.detail.contains("Configure this provider"));
+    }
+
+    #[test]
     fn desktop_uses_cli_auth_for_claude_and_gemini_workers() {
         assert_eq!(PICKER_IDS, &["codex"]);
         assert!(desktop_can_start_login("codex"));
@@ -4893,13 +5330,52 @@ mod characterization {
     }
 
     #[test]
+    fn configured_direct_providers_are_visible_without_a_codex_parent() {
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+credential = "anthropic"
+
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+model = "llama"
+
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-sol"
+"#,
+        )
+        .expect("valid direct-provider config");
+        let mut rows = Vec::new();
+
+        append_configured_direct_provider_views(&mut rows, &config);
+
+        let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, vec!["anthropic", "local"]);
+        assert!(rows.iter().any(|row| row.id == "local" && row.selectable));
+        assert!(rows.iter().any(|row| row.id == "anthropic"));
+    }
+
+    #[test]
     fn configured_provider_methods_match_the_secret_source() {
         assert_eq!(
             provider_method(&ProviderConfig::Anthropic {
                 api_key_env: "ANTHROPIC_API_KEY".into(),
                 model: None,
+                credential: None,
             }),
             "Environment key"
+        );
+        assert_eq!(
+            provider_method(&ProviderConfig::Anthropic {
+                api_key_env: "ANTHROPIC_API_KEY".into(),
+                model: Some("claude-opus-5".into()),
+                credential: Some("anthropic".into()),
+            }),
+            "API key"
         );
         assert_eq!(
             provider_method(&ProviderConfig::OpenaiCompatible {

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
-use zest_core::{new_id, Agent, CancelToken, SkillSet, Thread};
+use zest_core::{new_id, Agent, CancelToken, RecoverableRun, SkillSet, Thread};
 
 pub struct Session {
     pub session_id: String,
@@ -21,6 +21,10 @@ pub struct Session {
     pub root: PathBuf,
     pub thread_id: String,
     pub thread: Thread,
+    /// A previous process left a provider turn unfinished. The prompt remains
+    /// in `thread.messages`; this identity lets the UI offer a fresh retry
+    /// without claiming the provider can resume its old stream.
+    pub recovery: Option<RecoverableRun>,
     /// Front-end base prompt (before custom + skills layers).
     pub base_system: String,
     /// Shared with `read_skill` for hot-reload.
@@ -32,6 +36,7 @@ pub struct ActiveTurn {
     pub turn_id: String,
     pub session_id: String,
     pub thread_id: String,
+    pub root: PathBuf,
     pub cancel: CancelToken,
 }
 
@@ -151,6 +156,7 @@ impl SessionController {
             turn_id: new_id("turn"),
             session_id: session.session_id.clone(),
             thread_id: session.thread_id.clone(),
+            root: session.root.clone(),
             cancel: CancelToken::new(),
         };
         g.turn = Some(turn.clone());
@@ -167,6 +173,13 @@ impl SessionController {
         } else {
             Ok(false)
         }
+    }
+
+    /// Snapshot the active turn for lifecycle persistence and UI commands that
+    /// need the project root while the session body is temporarily in flight.
+    pub fn active_turn(&self) -> Result<Option<ActiveTurn>, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        Ok(g.turn.clone())
     }
 
     /// Return the session after a turn. No-ops when the live session changed
@@ -251,6 +264,7 @@ mod tests {
             root: PathBuf::from("."),
             thread_id: format!("thread-{id_suffix}"),
             thread: Thread::new(),
+            recovery: None,
             base_system: "test".into(),
             skills: Arc::new(RwLock::new(SkillSet::default())),
         }
