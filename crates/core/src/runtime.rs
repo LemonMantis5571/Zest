@@ -489,11 +489,7 @@ provider = "codex"
             .register_exec_tools(false)
             .build()
             .unwrap();
-        assert!(enabled
-            .agent
-            .tool_names()
-            .iter()
-            .any(|name| *name == "delegate_external"));
+        assert!(enabled.agent.tool_names().contains(&"delegate_external"));
         assert!(enabled
             .agent
             .system
@@ -509,11 +505,7 @@ provider = "codex"
             .register_exec_tools(false)
             .build()
             .unwrap();
-        assert!(!disabled
-            .agent
-            .tool_names()
-            .iter()
-            .any(|name| *name == "delegate_external"));
+        assert!(!disabled.agent.tool_names().contains(&"delegate_external"));
         std::env::remove_var("ZEST_EXTERNAL_RUNTIME_KEY");
     }
 

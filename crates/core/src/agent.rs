@@ -974,8 +974,10 @@ mod tests {
         }
     }
 
+    type CapabilityObservations = Arc<Mutex<Vec<(Option<String>, usize)>>>;
+
     struct CapabilityProvider {
-        seen: Arc<Mutex<Vec<(Option<String>, usize)>>>,
+        seen: CapabilityObservations,
     }
 
     #[async_trait]
