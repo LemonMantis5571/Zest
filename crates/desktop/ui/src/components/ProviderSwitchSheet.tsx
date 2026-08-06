@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { recentVerifyFailed } from "@/lib/providerVerify";
 import type { ProviderRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ApiProviderForm } from "@/components/ApiProviderForm";
+import { useDialogFocusTrap } from "@/lib/useDialogFocusTrap";
 
 type Props = {
   open: boolean;
@@ -41,11 +42,13 @@ export function ProviderSwitchSheet({
   onConnect,
   onRefresh,
 }: Props) {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [addingApiProvider, setAddingApiProvider] = useState(false);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
+  useDialogFocusTrap(open, dialogRef);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -69,9 +72,11 @@ export function ProviderSwitchSheet({
         }}
       />
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Change provider"
+        tabIndex={-1}
         className="relative z-10 w-full max-w-md overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl"
       >
         <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">

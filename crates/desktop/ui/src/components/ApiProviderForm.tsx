@@ -156,7 +156,11 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
           <Field label="Provider id" hint="A short name used to identify this provider.">
             <input
               value={id}
-              onChange={(e) => setId(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setId(next);
+                setCredential(next.trim());
+              }}
               placeholder="e.g. local-llm"
               className={inputClass}
               autoComplete="off"
@@ -183,7 +187,7 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
           </Field>
           <Field
             label="Allowed models"
-            hint="Optional. Comma-separated list; leave empty to allow any."
+            hint="Optional. Comma-separated list; leave empty to allow only the default model."
           >
             <input
               value={models}
