@@ -7,6 +7,7 @@ import {
   FolderIcon,
   FolderOpenIcon,
   GitForkIcon,
+  PinIcon,
   PlusIcon,
   SearchIcon,
   SquarePenIcon,
@@ -150,6 +151,7 @@ export function ChatHistorySidebar({
     projectPath: string;
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [pinning, setPinning] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -249,6 +251,24 @@ export function ChatHistorySidebar({
     }
   }
 
+  async function togglePinned(projectPath: string, thread: ThreadSummary) {
+    if (pinning === thread.id) return;
+    setPinning(thread.id);
+    try {
+      await getBackend().setThreadPinned(
+        thread.id,
+        projectPath,
+        !thread.pinned
+      );
+      setError(null);
+      setTick((n) => n + 1);
+    } catch {
+      setError("Could not update the pinned chat. Try again.");
+    } finally {
+      setPinning(null);
+    }
+  }
+
   async function openThread(project: ProjectChats, thread: ThreadSummary) {
     if (project.active) {
       if (thread.providerId && thread.providerId !== activeProviderId) {
@@ -293,7 +313,7 @@ export function ChatHistorySidebar({
             });
           }}
           className={cn(
-            "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-14 pl-2 text-left outline-none transition-colors",
+            "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-24 pl-2 text-left outline-none transition-colors",
             "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
             "focus-visible:ring-2 focus-visible:ring-ring/50",
             active
@@ -338,6 +358,28 @@ export function ChatHistorySidebar({
             <GitForkIcon aria-hidden="true" />
           </Button>
         ) : null}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          title={thread.pinned ? "Unpin chat" : "Pin chat"}
+          aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
+          aria-pressed={thread.pinned}
+          disabled={sending || deleting || pinning === thread.id}
+          className={cn(
+            "absolute top-1 right-14 text-muted-foreground transition-opacity",
+            "hover:bg-muted hover:text-foreground",
+            thread.pinned
+              ? "fill-current text-primary opacity-100"
+              : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100"
+          )}
+          onClick={(event) => {
+            event.stopPropagation();
+            void togglePinned(project.path, thread);
+          }}
+        >
+          <PinIcon aria-hidden="true" />
+        </Button>
         <Button
           type="button"
           variant="ghost"
@@ -523,31 +565,7 @@ export function ChatHistorySidebar({
             </p>
           ) : (
             <>
-              {recentThreads.length > 0 ? (
-                <section aria-labelledby="recent-chats-heading">
-                  <div
-                    id="recent-chats-heading"
-                    className="flex items-center gap-1.5 px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
-                  >
-                    <Clock3Icon className="size-3.5" />
-                    Recent
-                  </div>
-                  <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
-                    {recentThreads.map(({ project, thread }) =>
-                      renderThreadItem(
-                        project,
-                        thread,
-                        `recent:${project.path}:${thread.id}`
-                      )
-                    )}
-                  </ul>
-                </section>
-              ) : null}
-
-              <section
-                aria-labelledby="projects-heading"
-                className={cn(recentThreads.length > 0 && "mt-4")}
-              >
+              <section aria-labelledby="projects-heading">
                 <div
                   id="projects-heading"
                   className="flex items-center justify-between px-2 pb-1"
@@ -644,6 +662,27 @@ export function ChatHistorySidebar({
                   })}
                 </ul>
               </section>
+
+              {recentThreads.length > 0 ? (
+                <section aria-labelledby="recent-chats-heading" className="mt-4">
+                  <div
+                    id="recent-chats-heading"
+                    className="flex items-center gap-1.5 px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+                  >
+                    <Clock3Icon className="size-3.5" />
+                    Recent
+                  </div>
+                  <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
+                    {recentThreads.map(({ project, thread }) =>
+                      renderThreadItem(
+                        project,
+                        thread,
+                        `recent:${project.path}:${thread.id}`
+                      )
+                    )}
+                  </ul>
+                </section>
+              ) : null}
             </>
           )}
 

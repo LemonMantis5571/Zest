@@ -210,6 +210,8 @@ pub struct ThreadSummary {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     pub message_count: usize,
@@ -272,6 +274,9 @@ pub struct Thread {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// User-controlled sidebar pin. Missing in older thread files means false.
+    #[serde(default)]
+    pub pinned: bool,
     /// Provider that owns this conversation (parent is always pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
@@ -310,6 +315,7 @@ impl Thread {
             created_at: now,
             updated_at: now,
             title: None,
+            pinned: false,
             provider_id: None,
             wire_format: default_wire_format(),
             messages: Vec::new(),
@@ -321,6 +327,16 @@ impl Thread {
     pub fn with_provider(mut self, provider_id: impl Into<String>) -> Self {
         self.provider_id = Some(provider_id.into());
         self
+    }
+
+    /// Set the sidebar pin without changing activity order. Pinning is a
+    /// navigation preference, not conversation activity.
+    pub fn set_pinned(&mut self, pinned: bool) -> bool {
+        if self.pinned == pinned {
+            return false;
+        }
+        self.pinned = pinned;
+        true
     }
 
     /// Fill missing version / wire-format fields from older files.
@@ -435,6 +451,7 @@ impl Thread {
             created_at: self.created_at,
             updated_at: self.updated_at,
             title: self.title.clone(),
+            pinned: self.pinned,
             provider_id: self.provider_id.clone(),
             message_count: self.messages.len(),
         }
@@ -875,12 +892,22 @@ impl ThreadStore {
         fork.id = new_id("thread");
         fork.created_at = now_secs();
         fork.updated_at = fork.created_at;
+        fork.pinned = false;
         fork.title = title
             .map(str::to_string)
             .or_else(|| source.title.as_ref().map(|t| format!("Copy of {t}")));
         fork.checkpoints.clear();
         self.save(&fork)?;
         Ok(fork)
+    }
+
+    /// Update a thread's sidebar pin without changing its activity timestamp.
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<ThreadSummary> {
+        let mut thread = self.load(id)?;
+        if thread.set_pinned(pinned) {
+            self.save(&thread)?;
+        }
+        Ok(thread.summary())
     }
 
     /// Permanently remove a thread file. Missing files are success (idempotent).
@@ -1212,6 +1239,25 @@ mod characterization {
         assert!(!path.exists());
         store.delete(&thread.id).unwrap(); // idempotent
         assert!(store.delete("../outside").is_err());
+    }
+
+    #[test]
+    fn store_pin_round_trips_without_changing_activity_order() {
+        let root = scratch("pin");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = store.create_for_provider("codex").unwrap();
+        let before = thread.updated_at;
+
+        let summary = store.set_pinned(&thread.id, true).unwrap();
+        assert!(summary.pinned);
+        assert_eq!(summary.updated_at, before);
+
+        let loaded = store.load(&thread.id).unwrap();
+        assert!(loaded.pinned);
+        assert_eq!(loaded.updated_at, before);
+
+        let unpinned = store.set_pinned(&thread.id, false).unwrap();
+        assert!(!unpinned.pinned);
     }
 
     #[test]

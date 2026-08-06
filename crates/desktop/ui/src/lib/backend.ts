@@ -90,6 +90,11 @@ export type DesktopBackend = {
   rewindThread(checkpointId: string): Promise<SessionInfo>;
   compactContext(): Promise<ContextUsage>;
   deleteThread(id: string, projectPath?: string | null): Promise<SessionInfo>;
+  setThreadPinned(
+    id: string,
+    projectPath: string | null | undefined,
+    pinned: boolean
+  ): Promise<void>;
   sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
   cancelTurn(): Promise<void>;
@@ -169,6 +174,8 @@ export function createTauriBackend(): DesktopBackend {
     rewindThread: (checkpointId) => tauriApi.rewindThread(checkpointId),
     compactContext: () => tauriApi.compactContext(),
     deleteThread: (id, projectPath) => tauriApi.deleteThread(id, projectPath),
+    setThreadPinned: (id, projectPath, pinned) =>
+      tauriApi.setThreadPinned(id, projectPath, pinned),
     sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
     saveMarkdown: (suggestedName, markdown) =>
       tauriApi.saveMarkdown(suggestedName, markdown),
@@ -202,6 +209,7 @@ export function createFixtureBackend(): DesktopBackend {
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
   let workspace = ".";
+  let fixturePinned = false;
   const enabledExternalAgents = new Set<string>();
 
   return {
@@ -353,6 +361,7 @@ export function createFixtureBackend(): DesktopBackend {
       /* fixture: no child process to stop */
     },
     async startSession() {
+      fixturePinned = false;
       session = { ...FIXTURE_SESSION, messages: [] };
       return { ...session };
     },
@@ -371,6 +380,7 @@ export function createFixtureBackend(): DesktopBackend {
           createdAt: 0,
           updatedAt: Math.floor(Date.now() / 1000),
           title: "Fixture",
+          pinned: fixturePinned,
           messageCount: session.messages.length,
         },
       ];
@@ -388,6 +398,7 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async openProjectChat(options) {
       workspace = options.root;
+      if (options.newThread) fixturePinned = false;
       session = {
         ...session,
         root: workspace,
@@ -405,6 +416,7 @@ export function createFixtureBackend(): DesktopBackend {
       return { ...session };
     },
     async newThread() {
+      fixturePinned = false;
       session = {
         ...FIXTURE_SESSION,
         root: workspace,
@@ -417,6 +429,7 @@ export function createFixtureBackend(): DesktopBackend {
       return { ...session };
     },
     async forkThread() {
+      fixturePinned = false;
       session = {
         ...session,
         threadId: `fixture-${crypto.randomUUID()}`,
@@ -435,6 +448,9 @@ export function createFixtureBackend(): DesktopBackend {
         return this.newThread();
       }
       return { ...session };
+    },
+    async setThreadPinned(_id, _projectPath, pinned) {
+      fixturePinned = pinned;
     },
     async sendMessage(text: string, attachments?: AttachmentInput[]) {
       if (!chatHandler) return;
