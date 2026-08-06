@@ -14,6 +14,43 @@ Impact:
 
 ---
 
+### 2026-08-06 — Chat lifecycle state is separate from the transcript
+
+Decision: adopt the useful persistence boundary from TanStack AI without adding TanStack AI as
+Zest's live transport or runtime dependency. The thread JSON remains the authoritative transcript
+and provider wire history; project-scoped run and interrupt records separately persist turn
+lifecycle, approval/question waits, usage, and terminal outcomes.
+
+Reason: a transcript answers what the model and user said, but not whether a turn was running,
+waiting for a human, or safely closed after a restart. Keeping those concerns separate gives Zest
+an honest recovery seam while preserving its Rust-owned, local-first architecture.
+
+Impact: on session load, Zest reconstructs the transcript plus lifecycle projection and marks
+non-terminal runs aborted because the current provider trait cannot resume a durable stream yet.
+Pending waits are cancelled and the user sees a concise recovery message. Run records now retain
+the provider identity and an optional non-secret resume handle, while the provider trait defaults
+to unsupported; a capable provider can opt in later without changing thread history.
+
+---
+
+### 2026-08-06 — Direct API providers are first-class parents
+
+Decision: a configured Anthropic API or OpenAI-compatible provider may own the parent
+conversation, even when Codex is unavailable. Claude Code, Gemini CLI, and Antigravity remain
+delegation-only workers with authentication owned by their CLIs. The desktop picker must honor
+Rust's `selectable` flag, and its fallback must not auto-start a detected-but-unconfigured sign-in.
+
+Reason: a Codex subscription is not a prerequisite for Zest, but the old picker could select a
+Codex sign-in that had no parent configuration and obscure the direct-provider path. Native
+Anthropic API setup also needs to be reachable without hand-editing `zest.toml`.
+
+Impact: the launch picker now exposes configured direct providers, offers a credential-manager
+backed Anthropic API preset, and chooses a ready direct provider over an unconfigured Codex row.
+This does not turn a Claude or Gemini subscription into an API entitlement; those CLIs remain
+available through explicit delegation.
+
+---
+
 ### 2026-08-05 — ACP is the only delegation path
 
 Decision: the parent conversation stays on its selected provider. Bounded external work uses
@@ -877,3 +914,21 @@ Impact: Claude receives `--strict-mcp-config` and Gemini an empty MCP allowlist 
 When enabled, the worker can use its CLI-managed servers and receives MCP environment variables,
 but Zest's own provider credentials are removed. Native MCP remains a separate future design with
 its own tool registry and approval/audit surface.
+
+### 2026-08-06 — Restarted turns retry from persisted message identity
+
+Decision: When a provider cannot resume its old stream after a desktop restart, keep the stale run
+closed and offer a fresh retry for the exact submitted user message. Run records persist the user
+and assistant projection ids; the thread remains the only place that stores the prompt body. On
+reload, the desktop restores that prompt into the composer instead of silently asking the user to
+retype it.
+
+Reason: TanStack's continuation model treats a continuation as a new run, while Zest's current
+providers do not expose a durable stream-resume contract. Inferring the last prompt from transcript
+position would be fragile around tool cards, partial assistant text, and future multi-run threads;
+persisting identity gives us a truthful local fallback and leaves the provider-resume seam intact.
+
+Impact: `RunRecord` now carries optional message ids for backward-compatible on-disk migration,
+`ReconstructedChat` exposes a recoverable run, and `SessionInfo.recovery` drives the desktop
+composer prefill. Sending a new message clears the one-time retry affordance; it does not claim the
+old provider run was resumed.
