@@ -888,11 +888,35 @@ impl ThreadStore {
 
     /// Fork the current thread without sharing future checkpoint state.
     pub fn fork(&self, source: &Thread, title: Option<&str>) -> Result<Thread> {
+        self.fork_with_provider(source, source.provider_id.as_deref(), title)
+    }
+
+    /// Fork a thread while assigning the copy to another provider.
+    ///
+    /// The source remains untouched. Provider adapters decide how the copied
+    /// internal history is represented on the wire; the durable copy itself
+    /// is explicitly owned by the target provider from its first turn.
+    pub fn fork_for_provider(
+        &self,
+        source: &Thread,
+        provider_id: &str,
+        title: Option<&str>,
+    ) -> Result<Thread> {
+        self.fork_with_provider(source, Some(provider_id), title)
+    }
+
+    fn fork_with_provider(
+        &self,
+        source: &Thread,
+        provider_id: Option<&str>,
+        title: Option<&str>,
+    ) -> Result<Thread> {
         let mut fork = source.clone();
         fork.id = new_id("thread");
         fork.created_at = now_secs();
         fork.updated_at = fork.created_at;
         fork.pinned = false;
+        fork.provider_id = provider_id.map(str::to_string);
         fork.title = title
             .map(str::to_string)
             .or_else(|| source.title.as_ref().map(|t| format!("Copy of {t}")));
@@ -1074,6 +1098,17 @@ mod characterization {
         assert!(fork.title.as_deref().unwrap().starts_with("Copy of "));
         assert!(fork.checkpoints.is_empty());
         assert!(store.load(&fork.id).is_ok());
+
+        let deepseek_copy = store
+            .fork_for_provider(&thread, "deepseek", Some("Copy for DeepSeek"))
+            .unwrap();
+        assert_eq!(deepseek_copy.provider_id.as_deref(), Some("deepseek"));
+        assert_eq!(deepseek_copy.title.as_deref(), Some("Copy for DeepSeek"));
+        assert_eq!(
+            serde_json::to_string(&deepseek_copy.agent_messages).unwrap(),
+            serde_json::to_string(&thread.agent_messages).unwrap()
+        );
+        assert!(store.load(&deepseek_copy.id).is_ok());
 
         store.delete(&thread.id).unwrap();
         assert!(!store

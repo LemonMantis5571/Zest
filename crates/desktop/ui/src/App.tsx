@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AuthSuccess } from "@/components/AuthSuccess";
 import { ChatScreen } from "@/components/ChatScreen";
 import { ChatSkeleton } from "@/components/ChatSkeleton";
+import { ConversationRecoveryDialog } from "@/components/ConversationRecoveryDialog";
 import { ProfileScreen } from "@/components/ProfileScreen";
 import { ProviderPicker } from "@/components/ProviderPicker";
 import { WaitingScreen } from "@/components/WaitingScreen";
@@ -15,7 +16,12 @@ import {
   restoreApprovalCard,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
-import { rawInvokeError, shouldOfferProviderReconnect } from "@/lib/invokeErrors";
+import {
+  conversationRecovery,
+  rawInvokeError,
+  shouldOfferProviderReconnect,
+  type ConversationRecovery,
+} from "@/lib/invokeErrors";
 import { isLongTurn } from "@/lib/notificationPolicy";
 import { isWindowActuallyActive, notifyWhenAway } from "@/lib/notifications";
 import { revealCount } from "@/lib/reveal";
@@ -178,11 +184,16 @@ function formatInvokeError(err: unknown): string {
   if (raw.includes("busy") || raw.includes("already in progress")) {
     return "A turn is already in progress. Stop it before trying again.";
   }
+  if (raw.includes("thread_provider_unknown")) {
+    return "Choose a provider before reopening this older chat.";
+  }
+  if (raw.includes("is not configured for this project")) {
+    return "The original provider is not configured for this project.";
+  }
   if (raw.includes("model") && raw.includes("not supported")) {
     return "The selected model is unavailable for this account. Choose another model.";
   }
   if (
-    raw.includes("not configured for this project") ||
     raw.includes("does not include the selected provider")
   ) {
     return "This project uses its own provider settings. Choose a provider configured for this project, or add it to zest.toml.";
@@ -266,6 +277,11 @@ export default function App() {
   const [sessionWarning, setSessionWarning] = useState<SessionWarning | null>(null);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [continuing, setContinuing] = useState(false);
+  const [pendingConversationRecovery, setPendingConversationRecovery] = useState<{
+    recovery: ConversationRecovery;
+    root: string;
+  } | null>(null);
+  const [conversationRecoveryBusy, setConversationRecoveryBusy] = useState(false);
 
   const [waitingTitle, setWaitingTitle] = useState("Sign in");
   const [waitingBody, setWaitingBody] = useState(
@@ -1107,23 +1123,6 @@ export default function App() {
     }
   }
 
-  async function onLoadThread(id: string) {
-    if (!id || id === session?.threadId) return;
-    try {
-      if (session?.threadId) {
-        saveDraft(session.threadId, draftRef.current);
-      }
-      const info = await backend.loadThread(id);
-      applySession(info);
-    } catch (err) {
-      toast.add({
-        type: "error",
-        title: "Could not open thread",
-        description: formatInvokeError(err),
-      });
-    }
-  }
-
   async function onDeleteThread(id: string, projectPath: string) {
     try {
       const deletedActive = session?.threadId === id;
@@ -1157,6 +1156,8 @@ export default function App() {
     root: string;
     threadId?: string;
     newThread?: boolean;
+    providerId?: string;
+    copyThread?: boolean;
   }) {
     if (sendingRef.current) {
       toast.add({
@@ -1171,20 +1172,91 @@ export default function App() {
         saveDraft(session.threadId, draftRef.current);
       }
       const info = await backend.openProjectChat(options);
+      setPendingConversationRecovery(null);
       applySession(info, { clearDraft: Boolean(options.newThread) });
-      // A project can fall back to its own default/only provider. Refresh the
-      // picker catalogue so the model list and key status match the session we
-      // actually opened instead of the project we just left.
+      // Refresh the picker catalogue so the model list and key status match the
+      // project we actually opened instead of the project we just left.
       void loadProviders(info.provider).catch(() => {});
       setWorkspacePath(info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
     } catch (err) {
+      const recovery = conversationRecovery(err);
+      if (recovery) {
+        setPendingConversationRecovery({ recovery, root: options.root });
+        return;
+      }
       toast.add({
         type: "error",
         title: "Could not open project chat",
         description: formatInvokeError(err),
       });
       throw err;
+    }
+  }
+
+  async function chooseConversationProvider(providerId: string) {
+    const pending = pendingConversationRecovery;
+    if (!pending || conversationRecoveryBusy) return;
+
+    setConversationRecoveryBusy(true);
+    try {
+      const info = await backend.openProjectChat({
+        root: pending.root,
+        threadId: pending.recovery.threadId,
+        providerId,
+        copyThread: pending.recovery.kind === "owner_unavailable",
+      });
+      const provider = pending.recovery.providers.find((item) => item.id === providerId);
+      setPendingConversationRecovery(null);
+      applySession(info);
+      void loadProviders(info.provider).catch(() => {});
+      setWorkspacePath(info.root);
+      void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+      toast.add({
+        type: "success",
+        title: pending.recovery.kind === "owner_unavailable" ? "Copy opened" : "Provider saved",
+        description:
+          pending.recovery.kind === "owner_unavailable"
+            ? `Opened a copy with ${provider?.label ?? providerId}. The original chat was kept.`
+            : `This chat now uses ${provider?.label ?? providerId}.`,
+      });
+    } catch (err) {
+      const recovery = conversationRecovery(err);
+      if (recovery) {
+        setPendingConversationRecovery({ recovery, root: pending.root });
+      } else {
+        toast.add({
+          type: "error",
+          title: "Could not open conversation",
+          description: formatInvokeError(err),
+        });
+      }
+    } finally {
+      setConversationRecoveryBusy(false);
+    }
+  }
+
+  async function configureConversationProvider() {
+    const pending = pendingConversationRecovery;
+    if (!pending) return;
+
+    try {
+      await backend.openProjectConfig(pending.root);
+      setPendingConversationRecovery(null);
+      toast.add({
+        type: "success",
+        title: "Project configuration opened",
+        description:
+          pending.recovery.kind === "owner_unavailable"
+            ? `Add ${pending.recovery.providerLabel} to this project's zest.toml, then open the chat again.`
+            : "Add a provider to this project's zest.toml, then open the chat again.",
+      });
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not open project configuration",
+        description: formatInvokeError(err),
+      });
     }
   }
 
@@ -1623,7 +1695,6 @@ export default function App() {
               loadProviders(session?.provider ?? selectedIdRef.current).then(() => undefined)
             }
             onReconnect={reconnectProvider}
-            onLoadThread={onLoadThread}
             onAttachFiles={onAttachFiles}
             onOpenFolder={onOpenFolder}
             onRemoveAttachment={(id) =>
@@ -1678,6 +1749,16 @@ export default function App() {
           />
         ) : null}
       </div>
+
+      <ConversationRecoveryDialog
+        recovery={pendingConversationRecovery?.recovery ?? null}
+        busy={conversationRecoveryBusy}
+        onClose={() => {
+          if (!conversationRecoveryBusy) setPendingConversationRecovery(null);
+        }}
+        onConfigure={() => void configureConversationProvider()}
+        onChooseProvider={(providerId) => void chooseConversationProvider(providerId)}
+      />
     </Toaster>
   );
 }

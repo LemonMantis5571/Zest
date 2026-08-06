@@ -100,6 +100,8 @@ type Props = {
     root: string;
     threadId?: string;
     newThread?: boolean;
+    providerId?: string;
+    copyThread?: boolean;
   }) => Promise<void>;
   providers: ProviderRow[];
   onSwitchProvider: (providerId: string) => Promise<void>;
@@ -111,7 +113,6 @@ type Props = {
   /** A background verification that failed after this chat opened. */
   sessionWarning?: SessionWarning | null;
   onDismissWarning?: () => void;
-  onLoadThread: (id: string) => void;
   onModelChange: (model: string) => void;
   onEffortChange: (effort: EffortId) => void;
   approvalMode: ApprovalMode;
@@ -423,7 +424,6 @@ export function ChatScreen({
   onReconnect,
   sessionWarning = null,
   onDismissWarning,
-  onLoadThread,
   onModelChange,
   onEffortChange,
   approvalMode,
@@ -623,8 +623,6 @@ export function ChatScreen({
         sending={sending}
         onOpenChange={setSidebar}
         onNewChat={onNewChat}
-        onLoadThread={onLoadThread}
-        onSwitchProvider={onSwitchProvider}
         onOpenProjectChat={onOpenProjectChat}
         onForkThread={onForkThread}
         onDeleteThread={onDeleteThread}
