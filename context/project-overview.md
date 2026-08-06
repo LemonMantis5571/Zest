@@ -27,7 +27,7 @@ Zest does not perform automatic provider routing or run a second internal delega
 
 ## Current Priorities
 
-1. **Stable Windows Alpha** — core safety, cancellation, file/prompt hardening, and
+1. **Windows Beta** — core safety, cancellation, file/prompt hardening, and
    `scripts/verify.ps1`. Run `cargo run -p zest -- doctor --live` only with a working
    gateway/login; it is manual and spends quota.
 2. **ACP worker UX** — configure external workers in the desktop, make delegation status and
