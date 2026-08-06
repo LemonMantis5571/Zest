@@ -36,12 +36,14 @@ enabled = true
 # credential = "openai"
 
 # External workers are optional. Authenticate their CLIs separately, then
-# enable a worker here or from Settings > External workers.
+# enable a worker here or from Settings > CLI delegation. The optional model
+# is owned by the worker CLI and is independent from the Zest chat model.
 #
 # [agents.claude]
 # mode = "headless"
 # command = "claude"
-# args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "{prompt}"]
+# args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "--model", "{model}", "{prompt}"]
+# model = "sonnet"
 # allow_mcp = false
 # workspace = "isolated"
 # timeout_secs = 900
@@ -49,7 +51,8 @@ enabled = true
 # [agents.gemini]
 # mode = "acp"
 # command = "gemini"
-# args = ["--acp"]
+# args = ["--acp", "--model", "{model}"]
+# model = "gemini-2.5-pro"
 # allow_mcp = false
 # workspace = "isolated"
 # timeout_secs = 900
