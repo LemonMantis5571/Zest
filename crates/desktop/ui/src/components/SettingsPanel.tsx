@@ -25,6 +25,7 @@ import {
 import { getBackend, type SkillSummary } from "@/lib/backend";
 import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/models";
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
+import { useDialogFocusTrap } from "@/lib/useDialogFocusTrap";
 import type {
   ExternalAgentCheck,
   ExternalAgentRow,
@@ -167,6 +168,7 @@ export function SettingsPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const shortcutsRef = useScrollIntoViewOnBump(focusShortcuts);
   const titleId = useId();
+  useDialogFocusTrap(open, panelRef);
   const [provider, setProvider] = useState<ProviderRow | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -713,7 +715,7 @@ export function SettingsPanel({
                           {check.detail}
                         </p>
                       ) : null}
-                      {agent.preset && agent.configured ? (
+                      {agent.configured ? (
                         <Button
                           type="button"
                           size="xs"
