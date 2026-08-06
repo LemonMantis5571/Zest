@@ -32,10 +32,45 @@ pub struct ExternalAgentInput {
 /// configuration templates only: no login command or credential is run by the
 /// setup UI.
 pub fn external_agent_preset(id: &str) -> Option<ExternalAgentInput> {
-    external_agent_preset_with_mcp(id, false)
+    external_agent_preset_with_model(id, false, None)
 }
 
 pub fn external_agent_preset_with_mcp(id: &str, allow_mcp: bool) -> Option<ExternalAgentInput> {
+    external_agent_preset_with_model(id, allow_mcp, None)
+}
+
+/// Return the model choices exposed by the desktop setup for a built-in CLI.
+///
+/// These are CLI-owned aliases/catalogue entries, not Zest provider models.
+/// A manually configured model remains supported through `zest.toml`, and the
+/// desktop view preserves a currently configured value even if it is not in
+/// this small catalogue.
+pub fn external_agent_model_options(id: &str) -> &'static [&'static str] {
+    match id {
+        "claude" => &["sonnet", "opus"],
+        "gemini" => &[
+            "auto",
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ],
+        _ => &[],
+    }
+}
+
+/// Build a built-in worker preset while optionally pinning the model passed to
+/// the vendor CLI. `None` keeps the CLI's configured/default model in charge.
+pub fn external_agent_preset_with_model(
+    id: &str,
+    allow_mcp: bool,
+    model: Option<&str>,
+) -> Option<ExternalAgentInput> {
+    let model = model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+
     match id {
         "claude" => Some(ExternalAgentInput {
             id: id.to_string(),
@@ -53,11 +88,14 @@ pub fn external_agent_preset_with_mcp(id: &str, allow_mcp: bool) -> Option<Exter
                 if !allow_mcp {
                     args.push("--strict-mcp-config".into());
                 }
+                if model.is_some() {
+                    args.extend(["--model".into(), "{model}".into()]);
+                }
                 args.push("{prompt}".into());
                 args
             },
             allow_mcp,
-            model: None,
+            model,
             workspace: ExternalWorkspace::Isolated,
             timeout_secs: 900,
         }),
@@ -70,10 +108,13 @@ pub fn external_agent_preset_with_mcp(id: &str, allow_mcp: bool) -> Option<Exter
                 if !allow_mcp {
                     args.extend(["--allowed-mcp-server-names".into(), "".into()]);
                 }
+                if model.is_some() {
+                    args.extend(["--model".into(), "{model}".into()]);
+                }
                 args
             },
             allow_mcp,
-            model: None,
+            model,
             workspace: ExternalWorkspace::Isolated,
             timeout_secs: 900,
         }),
@@ -340,5 +381,33 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "--allowed-mcp-server-names"));
+    }
+
+    #[test]
+    fn model_aware_presets_pin_the_cli_model_without_changing_defaults() {
+        let claude = external_agent_preset_with_model("claude", false, Some("opus")).unwrap();
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        assert!(claude
+            .args
+            .windows(2)
+            .any(|pair| { pair[0] == "--model" && pair[1] == "{model}" }));
+
+        let gemini =
+            external_agent_preset_with_model("gemini", true, Some("gemini-2.5-pro")).unwrap();
+        assert_eq!(gemini.model.as_deref(), Some("gemini-2.5-pro"));
+        assert!(gemini
+            .args
+            .windows(2)
+            .any(|pair| { pair[0] == "--model" && pair[1] == "{model}" }));
+
+        let default = external_agent_preset("claude").unwrap();
+        assert!(default.model.is_none());
+        assert!(!default.args.iter().any(|arg| arg == "--model"));
+    }
+
+    #[test]
+    fn model_options_are_scoped_to_builtin_workers() {
+        assert_eq!(external_agent_model_options("claude"), &["sonnet", "opus"]);
+        assert!(external_agent_model_options("custom").is_empty());
     }
 }

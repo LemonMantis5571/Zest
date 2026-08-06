@@ -40,6 +40,10 @@ export function setExternalAgentMcp(id: string, enabled: boolean) {
   return invoke<void>("set_external_agent_mcp", { id, enabled });
 }
 
+export function setExternalAgentModel(id: string, model: string | null) {
+  return invoke<void>("set_external_agent_model", { id, model });
+}
+
 export function checkExternalAgent(id: string) {
   return invoke<ExternalAgentCheck>("check_external_agent", { id });
 }

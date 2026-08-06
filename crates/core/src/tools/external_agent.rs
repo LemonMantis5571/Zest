@@ -225,7 +225,11 @@ impl ExternalAgent {
     }
 
     fn target(&self, id: &str, config: &ExternalAgentConfig) -> String {
-        format!("agent/{id}/{}", mode_label(config.mode))
+        format!(
+            "agent/{id}/{}/{}",
+            mode_label(config.mode),
+            external_model_label(config)
+        )
     }
 
     fn worker_prompt(&self, task: &str) -> String {
@@ -398,7 +402,7 @@ impl Tool for ExternalAgent {
             ExternalWorkspace::Current => "current project workspace",
         };
         let summary = format!(
-            "Run {agent_id} via {} in {workspace_note}: {}",
+            "Run {agent_id} ({model}) via {} in {workspace_note}: {}",
             config.command,
             first_line(task)
         );
@@ -2242,6 +2246,28 @@ mod tests {
         config.args = vec!["--acp".into()];
         assert_eq!(expanded_args(&config, "task"), vec!["--acp"]);
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn model_placeholder_is_expanded_once_at_launch() {
+        let mut config = config(ExternalAgentMode::Headless);
+        config.command = "worker".into();
+        config.args = vec![
+            "--model".into(),
+            MODEL_PLACEHOLDER.into(),
+            PROMPT_PLACEHOLDER.into(),
+        ];
+
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec!["--model", "test-model", "task"]
+        );
+
+        config.model = None;
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec!["--model", MODEL_PLACEHOLDER, "task"]
+        );
     }
 
     #[test]

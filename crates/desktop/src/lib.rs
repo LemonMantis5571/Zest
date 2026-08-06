@@ -408,6 +408,10 @@ struct ExternalAgentView {
     detail: String,
     configured: bool,
     mcp_allowed: bool,
+    /// Empty means the worker CLI chooses its own configured/default model.
+    model: String,
+    /// CLI-owned model aliases shown by the built-in worker setup.
+    models: Vec<String>,
     /// Presets can be enabled or removed from Settings. Other entries remain
     /// visible as read-only rows so manual configuration is discoverable.
     preset: bool,
@@ -994,6 +998,23 @@ fn external_agent_view(
         .map(|agent| agent.workspace)
         .unwrap_or(default_workspace);
     let configured = config.is_some();
+    let model = config
+        .and_then(|agent| agent.model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let mut models = if preset {
+        zest_core::config_edit::external_agent_model_options(id)
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if !model.is_empty() && !models.iter().any(|option| option == &model) {
+        models.push(model.clone());
+    }
 
     let (status_label, detail) = if !preset {
         (
@@ -1022,6 +1043,8 @@ fn external_agent_view(
         detail,
         configured,
         mcp_allowed: config.is_some_and(|agent| agent.allow_mcp),
+        model,
+        models,
         preset,
     }
 }
@@ -1104,12 +1127,6 @@ fn set_external_agent_mcp(
     enabled: bool,
 ) -> Result<(), String> {
     let id = id.trim();
-    let Some(preset) = zest_core::config_edit::external_agent_preset_with_mcp(id, enabled) else {
-        return Err(
-            "MCP pass-through is available for the built-in Claude Code and Gemini CLI workers."
-                .into(),
-        );
-    };
     let _edit_guard = state
         .config_edit
         .lock()
@@ -1123,6 +1140,52 @@ fn set_external_agent_mcp(
             "{id} is customized in zest.toml; edit or remove that entry there first"
         ));
     }
+    let Some(preset) = zest_core::config_edit::external_agent_preset_with_model(
+        id,
+        enabled,
+        existing.model.as_deref(),
+    ) else {
+        return Err(
+            "MCP pass-through is available for the built-in Claude Code and Gemini CLI workers."
+                .into(),
+        );
+    };
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::upsert_external_agent(&path, &preset)?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_external_agent_model(
+    state: State<'_, AppState>,
+    id: String,
+    model: Option<String>,
+) -> Result<(), String> {
+    let id = id.trim();
+    let _edit_guard = state
+        .config_edit
+        .lock()
+        .map_err(|_| "settings are busy; try again".to_string())?;
+    let current = load_workspace_config(&state);
+    let Some(existing) = current.agents.get(id) else {
+        return Err("Enable this worker before choosing a model.".into());
+    };
+    if !external_agent_matches_preset(id, existing) {
+        return Err(format!(
+            "{id} is customized in zest.toml; edit or remove that entry there first"
+        ));
+    }
+    let Some(preset) = zest_core::config_edit::external_agent_preset_with_model(
+        id,
+        existing.allow_mcp,
+        model.as_deref(),
+    ) else {
+        return Err(
+            "Worker model selection is available for the built-in Claude Code and Gemini CLI workers."
+                .into(),
+        );
+    };
     let path = editable_config_path(&state)?;
     zest_core::config_edit::upsert_external_agent(&path, &preset)?;
     clear_workspace_config_cache(&state);
@@ -1131,8 +1194,11 @@ fn set_external_agent_mcp(
 
 fn external_agent_matches_preset(id: &str, agent: &zest_core::ExternalAgentConfig) -> bool {
     let matches_current = [false, true].into_iter().any(|allow_mcp| {
-        let Some(preset) = zest_core::config_edit::external_agent_preset_with_mcp(id, allow_mcp)
-        else {
+        let Some(preset) = zest_core::config_edit::external_agent_preset_with_model(
+            id,
+            allow_mcp,
+            agent.model.as_deref(),
+        ) else {
             return false;
         };
         agent.mode == preset.mode
@@ -4319,6 +4385,7 @@ pub fn run() {
             list_external_agents,
             set_external_agent,
             set_external_agent_mcp,
+            set_external_agent_model,
             check_external_agent,
             set_provider_key,
             delete_provider_key,
