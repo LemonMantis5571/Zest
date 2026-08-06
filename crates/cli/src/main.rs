@@ -11,6 +11,14 @@ use zest_core::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--help") | Some("-h")
+    ) {
+        print_help();
+        return Ok(());
+    }
+
     zest_core::adopt_bundled_gateway();
     if let Err(err) = zest_core::ensure_user_config() {
         eprintln!("warning: could not create the user config: {err}");
@@ -32,6 +40,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("doctor") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
+            if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+                print_doctor_help();
+                return Ok(());
+            }
+            if let Some(unknown) = args.iter().find(|a| a.as_str() != "--live") {
+                anyhow::bail!("unknown doctor option `{unknown}` (try: zest doctor --help)");
+            }
             let live = args.iter().any(|a| a == "--live");
             if !live {
                 print_doctor_help();
@@ -41,7 +56,12 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("run") => {
-            run_headless(std::env::args().skip(2).collect()).await?;
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+                print_run_help();
+                return Ok(());
+            }
+            run_headless(args).await?;
             return Ok(());
         }
         _ => {}
@@ -118,6 +138,48 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_help() {
+    println!(
+        "\
+zest — local-first coding workbench
+
+USAGE
+  zest                         Start the interactive terminal client
+  zest auth                    Show provider authentication status
+  zest usage                   Show local usage totals
+  zest doctor --live           Run the opt-in live read-only check
+  zest run --jsonl -- PROMPT   Run one deny-only JSONL/headless turn
+
+OPTIONS
+  -h, --help                  Show this help
+
+Run `zest doctor --help` or `zest run --jsonl --help` for command details.
+"
+    );
+}
+
+fn print_run_help() {
+    println!(
+        "\
+zest run — one deny-only headless turn
+
+USAGE
+  zest run --jsonl -- PROMPT
+  echo PROMPT | zest run --jsonl
+
+OPTIONS
+  --jsonl                     Emit the zest-jsonl-v1 protocol (required)
+  --json                     Compatibility alias for --jsonl
+  --provider ID               Use a configured provider for this turn
+  --model ID                  Use a configured model for this turn
+  --effort LEVEL              Request a supported effort level
+  -h, --help                 Show this help
+
+Approvals are reported and denied instead of waiting for an interactive window.
+"
+    );
 }
 
 /// Run one turn as a small, line-delimited JSON protocol.
@@ -258,6 +320,12 @@ fn emit_stream_json(event: StreamEvent<'_>) {
             "kind": "tool_call_start",
             "name": name,
             "id": id,
+        })),
+        StreamEvent::ToolCallUpdate { name, id, metadata } => emit_json(serde_json::json!({
+            "kind": "tool_call_update",
+            "name": name,
+            "id": id,
+            "metadata": metadata,
         })),
         StreamEvent::ToolCallResult {
             name,
@@ -427,6 +495,7 @@ async fn run_doctor_live() -> anyhow::Result<()> {
                 saw_tool_start = true;
             }
         }
+        StreamEvent::ToolCallUpdate { .. } => {}
         StreamEvent::ToolCallResult {
             name,
             summary,
@@ -725,6 +794,7 @@ impl Renderer {
                 }
                 println!("\n\x1b[36m→ {name}\x1b[0m");
             }
+            StreamEvent::ToolCallUpdate { .. } => {}
             StreamEvent::ToolCallResult {
                 name,
                 summary,
