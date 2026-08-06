@@ -132,12 +132,17 @@ fn default_bash_timeout_ms() -> u64 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderConfig {
     Anthropic {
-        /// Environment variable holding the key. The key itself is never written
-        /// in config — this file is meant to be committed.
+        /// Environment variable holding the key. The key itself is never
+        /// written in config — this file is meant to be committed. A desktop
+        /// setup may instead use `credential` below.
         #[serde(default = "default_anthropic_key_env")]
         api_key_env: String,
         #[serde(default)]
         model: Option<String>,
+        /// OS credential-manager account for a key entered through the desktop.
+        /// When present, it takes precedence over `api_key_env`.
+        #[serde(default)]
+        credential: Option<String>,
     },
     Gateway {
         /// Origin only — `http://127.0.0.1:8317`, not `.../v1/messages`.
@@ -404,6 +409,7 @@ impl Config {
             ProviderConfig::Anthropic {
                 api_key_env: default_anthropic_key_env(),
                 model: None,
+                credential: None,
             },
         );
         Config {

@@ -9,6 +9,7 @@ mod alpha_prove;
 pub mod anthropic;
 pub mod auth;
 pub mod cancel;
+pub mod chat_persistence;
 pub mod commands;
 pub mod config;
 pub mod config_edit;
@@ -41,6 +42,11 @@ pub use auth::{
     LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
+pub use chat_persistence::{
+    ChatPersistence, InterruptRecord, InterruptStatus, InterruptStore, ReconstructedChat,
+    RecoverableRun, RecoveryReconciliation, RunError, RunPatch, RunRecord, RunStatus, RunStore,
+    RunUsage,
+};
 pub use commands::{
     expand as expand_command, expand_as as expand_command_as, parse_command, Expansion,
     ParsedCommand,
@@ -70,8 +76,8 @@ pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue_for_provider, catalogue_from_lists, catalogue_without_efforts,
     context_window_for_model, descriptor_for_picker_id, descriptor_from_config, normalize_effort,
-    probe, Completion, ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, StreamEvent,
-    TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    probe, Completion, ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, ResumeHandle,
+    ResumeSupport, StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use reading_diff::{
     abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,
