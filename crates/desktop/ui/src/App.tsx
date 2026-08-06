@@ -37,6 +37,11 @@ import {
   recentVerifySucceeded,
 } from "@/lib/providerVerify";
 import {
+  isProviderReady,
+  pickProviderFallback,
+  pickReadyProvider,
+} from "@/lib/providerSelection";
+import {
   effortFromSession,
   mergeSessionOptions,
   rollbackSessionOptions,
@@ -59,20 +64,6 @@ import type {
 import { cn } from "@/lib/utils";
 
 type Screen = "boot" | "picker" | "waiting" | "auth-success" | "chat" | "profile";
-
-function isReady(row: ProviderRow) {
-  // Soft memory: a recent failed probe beats filesystem "Signed in".
-  return row.statusKind === "ready" && !recentVerifyFailed(row.id);
-}
-
-function pickReadyProvider(rows: ProviderRow[], prefer: string | null) {
-  const ready = rows.filter(isReady);
-  if (prefer) {
-    const preferred = ready.find((p) => p.id === prefer);
-    if (preferred) return preferred;
-  }
-  return ready[0] ?? null;
-}
 
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
@@ -355,7 +346,7 @@ export default function App() {
     setSelectedId((current) => {
       const preferId = prefer ?? current;
       if (preferId && rows.some((p) => p.id === preferId)) return preferId;
-      const ready = rows.find((p) => p.statusKind === "ready");
+      const ready = rows.find((row) => isProviderReady(row, recentVerifyFailed));
       return ready?.id ?? rows[0]?.id ?? null;
     });
     return rows;
@@ -741,18 +732,33 @@ export default function App() {
     sessionIdRef.current = info.sessionId;
     setAttachments([]);
 
+    const savedDraft = opts?.clearDraft ? "" : loadDraft(info.threadId);
+    const recoveryMessage = info.recovery
+      ? messages.find(
+          (message) =>
+            message.role === "user" && message.id === info.recovery?.userMessageId
+        )
+      : undefined;
+    const draft =
+      !opts?.clearDraft && !savedDraft.trim() && recoveryMessage?.role === "user"
+        ? recoveryMessage.text
+        : savedDraft;
+
     if (opts?.clearDraft) {
       saveDraft(info.threadId, "");
       setDraft("");
     } else {
-      setDraft(loadDraft(info.threadId));
+      if (draft !== savedDraft) saveDraft(info.threadId, draft);
+      setDraft(draft);
     }
 
     if (info.warning) {
       toast.add({
         type: "warning",
-        title: "Conversation updated",
-        description: info.warning,
+        title: recoveryMessage ? "Previous turn ready to retry" : "Conversation updated",
+        description: recoveryMessage
+          ? "Its message is in the composer. Send it to try the turn again."
+          : info.warning,
       });
     }
 
@@ -862,7 +868,7 @@ export default function App() {
         setProfile(userProfile);
         void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
 
-        const ready = pickReadyProvider(rows, prefer);
+        const ready = pickReadyProvider(rows, prefer, recentVerifyFailed);
         if (ready) {
           setSelectedId(ready.id);
           try {
@@ -881,11 +887,7 @@ export default function App() {
           }
         }
 
-        const fallback =
-          (prefer && rows.find((p) => p.id === prefer)) ||
-          rows.find((p) => p.statusKind === "unknown") ||
-          rows[0] ||
-          null;
+        const fallback = pickProviderFallback(rows, prefer);
         setSelectedId(fallback?.id ?? null);
         setScreen("picker");
         markStartup("picker-ready");

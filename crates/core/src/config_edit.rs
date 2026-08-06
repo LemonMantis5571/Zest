@@ -17,6 +17,13 @@ pub struct OpenAiProviderInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct AnthropicProviderInput {
+    pub id: String,
+    pub model: String,
+    pub credential: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExternalAgentInput {
     pub id: String,
     pub mode: ExternalAgentMode,
@@ -196,6 +203,48 @@ pub fn add_openai_provider(path: &Path, input: &OpenAiProviderInput) -> Result<(
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+pub fn add_anthropic_provider(path: &Path, input: &AnthropicProviderInput) -> Result<(), String> {
+    let id = input.id.trim();
+    let model = input.model.trim();
+    let credential = input.credential.trim();
+
+    validate_id(id, "provider")?;
+    if model.is_empty() {
+        return Err("a default model is required".into());
+    }
+    if credential.is_empty() {
+        return Err("a credential name is required".into());
+    }
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("providers") {
+        doc["providers"] = Item::Table(Table::new());
+    }
+    let providers = doc["providers"]
+        .as_table_mut()
+        .ok_or_else(|| "[providers] is not a table".to_string())?;
+    let entry = providers.entry(id).or_insert(Item::Table(Table::new()));
+    let provider = entry
+        .as_table_mut()
+        .ok_or_else(|| format!("provider `{id}` is not a table"))?;
+    if let Some(kind) = provider.get("kind").and_then(Item::as_str) {
+        if kind != "anthropic" {
+            return Err(format!("provider `{id}` already has kind `{kind}`"));
+        }
+    }
+    provider["kind"] = toml_edit::value("anthropic");
+    provider["model"] = toml_edit::value(model);
+    provider["credential"] = toml_edit::value(credential);
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 pub fn upsert_external_agent(path: &Path, input: &ExternalAgentInput) -> Result<(), String> {
     let id = input.id.trim();
     let command = input.command.trim();
@@ -333,6 +382,38 @@ mod tests {
         assert!(raw.contains("# keep me"));
         let config = Config::parse(&raw).unwrap();
         assert!(config.providers.contains_key("deepseek"));
+    }
+
+    #[test]
+    fn adds_anthropic_api_provider_without_discarding_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(
+            &path,
+            "# keep me\n[providers.codex]\nkind = \"gateway\"\nbase_url = \"http://localhost\"\nmodel = \"m\"\n",
+        )
+        .unwrap();
+
+        add_anthropic_provider(
+            &path,
+            &AnthropicProviderInput {
+                id: "anthropic".into(),
+                model: "claude-opus-5".into(),
+                credential: "anthropic".into(),
+            },
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(raw.contains("# keep me"));
+        let config = Config::parse(&raw).unwrap();
+        assert!(matches!(
+            config.providers["anthropic"],
+            crate::config::ProviderConfig::Anthropic {
+                credential: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

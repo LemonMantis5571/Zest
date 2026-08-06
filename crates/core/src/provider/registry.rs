@@ -74,9 +74,24 @@ impl ProviderRegistry {
 
 fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provider>, String> {
     match entry {
-        ProviderConfig::Anthropic { api_key_env, model } => {
-            let key = read_key(api_key_env)
-                .ok_or_else(|| format!("{api_key_env} is not set in the environment"))?;
+        ProviderConfig::Anthropic {
+            api_key_env,
+            model,
+            credential,
+        } => {
+            let key = credential
+                .as_deref()
+                .map(crate::credentials::get)
+                .transpose()
+                .map_err(|e| format!("could not read credential: {e}"))?
+                .flatten()
+                .or_else(|| read_key(api_key_env))
+                .ok_or_else(|| {
+                    credential.as_deref().map_or_else(
+                        || format!("{api_key_env} is not set in the environment"),
+                        |account| format!("API key for credential `{account}` is not set"),
+                    )
+                })?;
 
             let mut provider = AnthropicProvider::native(key)
                 .map_err(|e| format!("could not build client: {e}"))?;

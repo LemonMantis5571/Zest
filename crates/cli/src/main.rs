@@ -384,6 +384,7 @@ fn emit_stream_json(event: StreamEvent<'_>) {
             "requested": requested,
             "served": served,
         })),
+        StreamEvent::ResumeHandle(_) => {}
         StreamEvent::Text(_) | StreamEvent::Thinking(_) => {}
     }
 }
@@ -521,6 +522,7 @@ async fn run_doctor_live() -> anyhow::Result<()> {
         StreamEvent::ModelSubstituted { served, .. } => {
             println!("\n\x1b[33m! The selected model was unavailable; this response used {served} instead.\x1b[0m");
         }
+        StreamEvent::ResumeHandle(_) => {}
     };
 
     agent
@@ -822,6 +824,7 @@ impl Renderer {
                 }
                 println!("\n\x1b[33m! The selected model was unavailable; this response used {served} instead.\x1b[0m");
             }
+            StreamEvent::ResumeHandle(_) => {}
         }
     }
 }
