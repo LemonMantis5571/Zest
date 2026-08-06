@@ -13,6 +13,8 @@ crates/desktop/tauri.signing.conf.json
 
 # --- Project-local Zest state (do not commit chat history or personal prompts) ---
 .zest/threads/
+.zest/runs/
+.zest/interrupts/
 .zest/last-thread-id
 .zest/system.md
 .zest/doctor*
