@@ -861,3 +861,19 @@ Impact: `usage.rs` owns the day helpers and `profile.rs` uses them, so the persi
 the derived streaks agree on where a day starts. The front end formats bare ISO dates from local
 parts rather than `new Date(iso)`, which would parse them as UTC midnight and show the previous
 day west of Greenwich.
+
+### 2026-08-05 — CLI-owned MCP is explicit pass-through
+
+Decision: Let Claude Code and Gemini CLI use their existing MCP configuration only when the
+worker has `allow_mcp = true`. Keep it off by default, expose the choice in Desktop Settings,
+and do not implement a native Zest MCP client in this slice.
+
+Reason: The CLIs already own MCP discovery, authentication, and tool execution. Reusing that path
+keeps Zest lightweight, while the explicit opt-in prevents a delegated worker from silently
+gaining external capabilities. Zest still approves the delegation itself, but cannot inspect or
+approve each MCP call made inside the external CLI.
+
+Impact: Claude receives `--strict-mcp-config` and Gemini an empty MCP allowlist when disabled.
+When enabled, the worker can use its CLI-managed servers and receives MCP environment variables,
+but Zest's own provider credentials are removed. Native MCP remains a separate future design with
+its own tool registry and approval/audit surface.

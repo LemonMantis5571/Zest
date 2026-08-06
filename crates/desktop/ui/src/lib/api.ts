@@ -36,6 +36,10 @@ export function setExternalAgent(id: string, enabled: boolean) {
   return invoke<void>("set_external_agent", { id, enabled });
 }
 
+export function setExternalAgentMcp(id: string, enabled: boolean) {
+  return invoke<void>("set_external_agent_mcp", { id, enabled });
+}
+
 export function checkExternalAgent(id: string) {
   return invoke<ExternalAgentCheck>("check_external_agent", { id });
 }

@@ -42,6 +42,7 @@ enabled = true
 # mode = "headless"
 # command = "claude"
 # args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "{prompt}"]
+# allow_mcp = false
 # workspace = "isolated"
 # timeout_secs = 900
 #
@@ -49,5 +50,6 @@ enabled = true
 # mode = "acp"
 # command = "gemini"
 # args = ["--acp"]
+# allow_mcp = false
 # workspace = "isolated"
 # timeout_secs = 900

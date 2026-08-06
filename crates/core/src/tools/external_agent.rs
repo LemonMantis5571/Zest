@@ -557,7 +557,11 @@ async fn spawn_and_run(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     prepare_external_command(&mut command);
-    scrub_secret_environment(&mut command);
+    if config.allow_mcp {
+        scrub_zest_secret_environment(&mut command);
+    } else {
+        scrub_secret_environment(&mut command);
+    }
 
     let mut child = command
         .spawn()
@@ -660,19 +664,33 @@ fn expanded_args(config: &ExternalAgentConfig, prompt: &str) -> Vec<String> {
     if config.mode == ExternalAgentMode::Headless && !has_prompt {
         args.push(prompt.to_string());
     }
-    normalize_claude_args(config, args)
+    normalize_external_args(config, args)
+}
+
+fn normalize_external_args(config: &ExternalAgentConfig, args: Vec<String>) -> Vec<String> {
+    let args = normalize_claude_args(config, args);
+    normalize_gemini_args(config, args)
 }
 
 /// Claude Code needs explicit non-interactive permissions for delegated edits.
 /// Add the safe edit-only mode and the stream verbosity flag at launch time for
 /// older project configs; refreshed presets also persist both flags.
 fn normalize_claude_args(config: &ExternalAgentConfig, mut args: Vec<String>) -> Vec<String> {
-    if config.mode != ExternalAgentMode::Headless
-        || !Path::new(&config.command)
-            .file_stem()
-            .is_some_and(|stem| stem.eq_ignore_ascii_case("claude"))
-    {
+    if config.mode != ExternalAgentMode::Headless || !is_command(&config.command, "claude") {
         return args;
+    }
+
+    if config.allow_mcp {
+        args.retain(|arg| arg != "--strict-mcp-config" && !arg.starts_with("--strict-mcp-config="));
+    } else {
+        args = remove_claude_mcp_config(args);
+        if !args
+            .iter()
+            .any(|arg| arg == "--strict-mcp-config" || arg.starts_with("--strict-mcp-config="))
+        {
+            let insert_at = args.len().saturating_sub(1);
+            args.insert(insert_at, "--strict-mcp-config".into());
+        }
     }
 
     if !args.iter().any(|arg| arg == "--verbose") {
@@ -710,6 +728,69 @@ fn normalize_claude_args(config: &ExternalAgentConfig, mut args: Vec<String>) ->
     args
 }
 
+fn normalize_gemini_args(config: &ExternalAgentConfig, mut args: Vec<String>) -> Vec<String> {
+    if !is_command(&config.command, "gemini") {
+        return args;
+    }
+
+    if config.allow_mcp {
+        return args;
+    }
+
+    args = remove_gemini_mcp_allowlist(args);
+    args.extend(["--allowed-mcp-server-names".into(), "".into()]);
+    args
+}
+
+fn is_command(command: &str, expected_stem: &str) -> bool {
+    Path::new(command)
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(expected_stem))
+}
+
+fn remove_claude_mcp_config(args: Vec<String>) -> Vec<String> {
+    let mut output = Vec::with_capacity(args.len());
+    let mut skip_value = false;
+    for arg in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if arg == "--mcp-config" {
+            skip_value = true;
+            continue;
+        }
+        if arg.starts_with("--mcp-config=")
+            || arg == "--strict-mcp-config"
+            || arg.starts_with("--strict-mcp-config=")
+        {
+            continue;
+        }
+        output.push(arg);
+    }
+    output
+}
+
+fn remove_gemini_mcp_allowlist(args: Vec<String>) -> Vec<String> {
+    let mut output = Vec::with_capacity(args.len());
+    let mut skip_value = false;
+    for arg in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if arg == "--allowed-mcp-server-names" {
+            skip_value = true;
+            continue;
+        }
+        if arg.starts_with("--allowed-mcp-server-names=") {
+            continue;
+        }
+        output.push(arg);
+    }
+    output
+}
+
 fn scrub_secret_environment(command: &mut Command) {
     for (name, _) in std::env::vars() {
         let upper = name.to_ascii_uppercase();
@@ -719,6 +800,22 @@ fn scrub_secret_environment(command: &mut Command) {
         {
             command.env_remove(name);
         }
+    }
+}
+
+/// MCP pass-through is an explicit trust decision, so preserve the user's
+/// MCP environment while still keeping Zest's own provider credentials out of
+/// the worker process.
+fn scrub_zest_secret_environment(command: &mut Command) {
+    const PARENT_SECRET_ENV: &[&str] = &[
+        "ZEST_GATEWAY_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "DEEPSEEK_API_KEY",
+    ];
+    for name in PARENT_SECRET_ENV {
+        command.env_remove(name);
     }
 }
 
@@ -2124,6 +2221,7 @@ mod tests {
             mode,
             command: "agent".into(),
             args: vec!["--format".into(), "json".into(), PROMPT_PLACEHOLDER.into()],
+            allow_mcp: false,
             model: Some("test-model".into()),
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
@@ -2157,6 +2255,7 @@ mod tests {
                 "stream-json".into(),
                 "{prompt}".into(),
             ],
+            allow_mcp: false,
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
@@ -2170,6 +2269,7 @@ mod tests {
                 "acceptEdits",
                 "--output-format",
                 "stream-json",
+                "--strict-mcp-config",
                 "task"
             ]
         );
@@ -2186,13 +2286,102 @@ mod tests {
                 "plan".into(),
                 "{prompt}".into(),
             ],
+            allow_mcp: false,
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
         };
         assert_eq!(
             expanded_args(&config, "task"),
-            vec!["--print", "--permission-mode", "plan", "task"]
+            vec![
+                "--print",
+                "--permission-mode",
+                "plan",
+                "--strict-mcp-config",
+                "task"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_mcp_pass_through_removes_the_strict_guard_only_when_enabled() {
+        let mut config = ExternalAgentConfig {
+            mode: ExternalAgentMode::Headless,
+            command: "claude".into(),
+            args: vec![
+                "--print".into(),
+                "--permission-mode".into(),
+                "plan".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--mcp-config".into(),
+                "servers.json".into(),
+                "--strict-mcp-config".into(),
+                PROMPT_PLACEHOLDER.into(),
+            ],
+            allow_mcp: true,
+            model: None,
+            workspace: ExternalWorkspace::Current,
+            timeout_secs: 30,
+        };
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec![
+                "--print",
+                "--permission-mode",
+                "plan",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--mcp-config",
+                "servers.json",
+                "task"
+            ]
+        );
+
+        config.allow_mcp = false;
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec![
+                "--print",
+                "--permission-mode",
+                "plan",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--strict-mcp-config",
+                "task"
+            ]
+        );
+    }
+
+    #[test]
+    fn gemini_mcp_pass_through_uses_an_empty_allowlist_by_default() {
+        let mut config = ExternalAgentConfig {
+            mode: ExternalAgentMode::Acp,
+            command: "gemini".into(),
+            args: vec!["--acp".into()],
+            allow_mcp: false,
+            model: None,
+            workspace: ExternalWorkspace::Current,
+            timeout_secs: 30,
+        };
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec!["--acp", "--allowed-mcp-server-names", ""]
+        );
+
+        config.allow_mcp = true;
+        assert_eq!(expanded_args(&config, "task"), vec!["--acp"]);
+
+        config.args = vec![
+            "--acp".into(),
+            "--allowed-mcp-server-names".into(),
+            "docs,github".into(),
+        ];
+        assert_eq!(
+            expanded_args(&config, "task"),
+            vec!["--acp", "--allowed-mcp-server-names", "docs,github"]
         );
     }
 
@@ -2519,6 +2708,7 @@ mod tests {
                     env!("CARGO_MANIFEST_DIR")
                 ),
             ],
+            allow_mcp: false,
             model: None,
             workspace: ExternalWorkspace::Current,
             timeout_secs: 30,
@@ -2550,6 +2740,7 @@ mod tests {
                     ),
                     PROMPT_PLACEHOLDER.into(),
                 ],
+                allow_mcp: false,
                 model: None,
                 workspace: ExternalWorkspace::Current,
                 timeout_secs: 30,
@@ -2567,6 +2758,7 @@ mod tests {
                     "_".into(),
                     PROMPT_PLACEHOLDER.into(),
                 ],
+                allow_mcp: false,
                 model: None,
                 workspace: ExternalWorkspace::Current,
                 timeout_secs: 30,

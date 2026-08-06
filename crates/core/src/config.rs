@@ -197,6 +197,10 @@ pub struct ExternalAgentConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Let the child CLI use MCP servers from its own configuration. This is
+    /// opt-in because Zest cannot inspect or approve individual MCP calls.
+    #[serde(default)]
+    pub allow_mcp: bool,
     /// Optional label/model shown in the delegation result and available as
     /// the `{model}` argument placeholder.
     #[serde(default)]
@@ -600,10 +604,10 @@ kind = "anthropic"
 [agents.claude]
 mode = "headless"
 command = "claude"
+allow_mcp = true
 args = [
     "--print",
     "--output-format", "stream-json",
-    "--strict-mcp-config",
     "{prompt}",
 ]
 workspace = "isolated"
@@ -620,6 +624,7 @@ timeout_secs = 120
 
         assert_eq!(config.agents.len(), 2);
         assert_eq!(config.agents["claude"].mode, ExternalAgentMode::Headless);
+        assert!(config.agents["claude"].allow_mcp);
         assert_eq!(
             config.agents["claude"].workspace,
             ExternalWorkspace::Isolated
@@ -642,6 +647,7 @@ command = "claude"
         .unwrap();
         let agent = &config.agents["claude"];
         assert_eq!(agent.mode, ExternalAgentMode::Headless);
+        assert!(!agent.allow_mcp);
         assert_eq!(agent.workspace, ExternalWorkspace::Isolated);
         assert_eq!(agent.timeout_secs, 900);
     }
