@@ -102,6 +102,7 @@ export function ProviderSwitchSheet({
             const current = row.id === currentProviderId;
             const failed = recentVerifyFailed(row.id);
             const selectable =
+              row.selectable &&
               (row.statusKind === "ready" || row.statusKind === "unknown") &&
               !failed;
             return (

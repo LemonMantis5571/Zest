@@ -5,12 +5,19 @@ import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 
-type Preset = "deepseek" | "openai" | "custom";
+type Preset = "anthropic" | "deepseek" | "openai" | "custom";
 
 const PRESETS: Record<
   Preset,
   { label: string; id: string; baseUrl: string; model: string; models: string[] }
 > = {
+  anthropic: {
+    label: "Anthropic",
+    id: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-opus-5",
+    models: [],
+  },
   deepseek: {
     label: "DeepSeek",
     id: "deepseek",
@@ -58,12 +65,12 @@ function Field({
 }
 
 export function ApiProviderForm({ onDone, onCancel }: Props) {
-  const [preset, setPreset] = useState<Preset>("deepseek");
-  const [id, setId] = useState(PRESETS.deepseek.id);
-  const [baseUrl, setBaseUrl] = useState(PRESETS.deepseek.baseUrl);
-  const [model, setModel] = useState(PRESETS.deepseek.model);
-  const [models, setModels] = useState(PRESETS.deepseek.models.join(", "));
-  const [credential, setCredential] = useState(PRESETS.deepseek.id);
+  const [preset, setPreset] = useState<Preset>("anthropic");
+  const [id, setId] = useState(PRESETS.anthropic.id);
+  const [baseUrl, setBaseUrl] = useState(PRESETS.anthropic.baseUrl);
+  const [model, setModel] = useState(PRESETS.anthropic.model);
+  const [models, setModels] = useState(PRESETS.anthropic.models.join(", "));
+  const [credential, setCredential] = useState(PRESETS.anthropic.id);
   const [key, setKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,8 +89,8 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
   const canSave =
     key.trim().length > 0 &&
     id.trim().length > 0 &&
-    baseUrl.trim().length > 0 &&
-    model.trim().length > 0;
+    model.trim().length > 0 &&
+    (preset === "anthropic" || baseUrl.trim().length > 0);
 
   return (
     <form
@@ -93,18 +100,27 @@ export function ApiProviderForm({ onDone, onCancel }: Props) {
         if (!canSave) return;
         setSaving(true);
         setError(null);
-        void getBackend()
-          .configureApiProvider({
-            id,
-            baseUrl,
-            model,
-            models: models
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean),
-            credential,
-            key,
-          })
+        const backend = getBackend();
+        const save =
+          preset === "anthropic"
+            ? backend.configureAnthropicProvider({
+                id: id.trim(),
+                model: model.trim(),
+                credential: credential.trim(),
+                key,
+              })
+            : backend.configureApiProvider({
+                id: id.trim(),
+                baseUrl,
+                model,
+                models: models
+                  .split(",")
+                  .map((value) => value.trim())
+                  .filter(Boolean),
+                credential,
+                key,
+              });
+        void save
           .then(async () => {
             setKey("");
             await onDone(id.trim());

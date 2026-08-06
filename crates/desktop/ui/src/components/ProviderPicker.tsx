@@ -51,6 +51,7 @@ export function ProviderPicker({
   const selectedNeedsConnect =
     selected != null && recentVerifyFailed(selected.id);
   const ready =
+    selected?.selectable === true &&
     !selectedNeedsConnect &&
     (selected?.statusKind === "ready" || selected?.statusKind === "unknown");
 
@@ -64,7 +65,8 @@ export function ProviderPicker({
           Choose a provider
         </h1>
         <p className="m-0 max-w-[38ch] text-[13px] leading-relaxed text-muted-foreground">
-          Use an existing sign-in. Zest never asks for your password.
+          Use an existing sign-in, or connect a provider with your own API key.
+          Zest never asks for your password.
         </p>
       </header>
 
@@ -104,14 +106,21 @@ export function ProviderPicker({
         {providers.map((p, index) => {
           const selectedRow = p.id === selectedId;
           const verifyFailed = recentVerifyFailed(p.id);
+          const usable = p.selectable && !verifyFailed;
           const detail = verifyFailed
             ? "Connection check failed — reconnect"
             : p.statusKind === "ready"
-              ? p.method
+              ? usable
+                ? p.method
+                : p.detail
               : p.statusKind === "unknown"
                 ? shortenUnknown(p.detail)
                 : p.detail;
-          const statusLabel = verifyFailed ? "Reconnect" : p.statusLabel;
+          const statusLabel = verifyFailed
+            ? "Reconnect"
+            : p.statusKind === "ready" && !p.selectable
+              ? "Configure"
+              : p.statusLabel;
 
           return (
             <li
@@ -134,9 +143,9 @@ export function ProviderPicker({
                 <span
                   className={cn(
                     "justify-self-center size-2 rounded-full transition-colors duration-150",
-                    !verifyFailed && p.statusKind === "ready" && "bg-primary",
+                    usable && p.statusKind === "ready" && "bg-primary",
                     verifyFailed && "bg-amber-400",
-                    !verifyFailed && p.statusKind === "unknown" && "bg-[#c4c4c4]",
+                    usable && p.statusKind === "unknown" && "bg-[#c4c4c4]",
                     !verifyFailed &&
                       (p.statusKind === "not_logged_in" ||
                         p.statusKind === "unconfigured") &&
@@ -160,7 +169,7 @@ export function ProviderPicker({
                 <span
                   className={cn(
                     "whitespace-nowrap text-[11px] font-medium text-muted-foreground",
-                    !verifyFailed && p.statusKind === "ready" && "text-primary",
+                    usable && p.statusKind === "ready" && "text-primary",
                     verifyFailed && "text-amber-400"
                   )}
                 >
