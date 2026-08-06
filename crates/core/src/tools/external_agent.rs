@@ -677,13 +677,12 @@ fn normalize_claude_args(config: &ExternalAgentConfig, mut args: Vec<String>) ->
 
     if !args.iter().any(|arg| arg == "--verbose") {
         let format_index = args.iter().enumerate().find_map(|(index, arg)| {
-            if arg == "--output-format=stream-json" {
-                Some(index)
-            } else if arg == "--output-format"
-                && args
-                    .get(index + 1)
-                    .is_some_and(|value| value == "stream-json")
-            {
+            let is_stream_json = arg == "--output-format=stream-json"
+                || (arg == "--output-format"
+                    && args
+                        .get(index + 1)
+                        .is_some_and(|value| value == "stream-json"));
+            if is_stream_json {
                 Some(index)
             } else {
                 None
@@ -2388,8 +2387,10 @@ mod tests {
 
     #[test]
     fn malformed_lines_are_visible_when_no_structured_answer_exists() {
-        let mut run = ExternalAgentRun::default();
-        run.malformed_lines = 2;
+        let run = ExternalAgentRun {
+            malformed_lines: 2,
+            ..ExternalAgentRun::default()
+        };
         assert!(run.text().is_empty());
         assert_eq!(run.malformed_lines, 2);
     }
