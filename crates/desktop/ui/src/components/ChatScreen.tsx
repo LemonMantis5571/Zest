@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FileIcon,
   FileTextIcon,
@@ -449,9 +449,12 @@ export function ChatScreen({
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [workbenchAutoOpened, setWorkbenchAutoOpened] = useState(false);
+  const lastAutoWorkbenchKey = useRef("");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const closeWorkbench = useCallback(() => {
     setWorkbenchOpen(false);
+    setWorkbenchAutoOpened(false);
     requestAnimationFrame(() => {
       document.getElementById("workbench-toggle")?.focus();
     });
@@ -462,7 +465,28 @@ export function ChatScreen({
   );
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = shortRoot(session.root);
+  const activeWorkbenchKey = useMemo(() => {
+    const activeTools = messages.flatMap((message) =>
+      message.role === "assistant"
+        ? message.tools
+            .filter((tool) => tool.status === "running" || tool.status === "awaiting_approval")
+            .map((tool) => `${tool.id}:${tool.status}`)
+        : []
+    );
+    return [compacting ? "compacting" : "", ...activeTools].filter(Boolean).join("|");
+  }, [compacting, messages]);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
+
+  useEffect(() => {
+    if (!activeWorkbenchKey) {
+      lastAutoWorkbenchKey.current = "";
+      return;
+    }
+    if (lastAutoWorkbenchKey.current === activeWorkbenchKey) return;
+    lastAutoWorkbenchKey.current = activeWorkbenchKey;
+    setWorkbenchAutoOpened(true);
+    setWorkbenchOpen(true);
+  }, [activeWorkbenchKey]);
 
   const jumpToMessage = useCallback((messageId: string) => {
     document.getElementById(`message-${messageId}`)?.scrollIntoView({
@@ -486,7 +510,10 @@ export function ChatScreen({
         id: "toggle-workbench",
         label: workbenchOpen ? "Close workbench" : "Open workbench",
         description: "Inspect activity, outline, and recovery checkpoints",
-        run: () => setWorkbenchOpen((value) => !value),
+        run: () => {
+          setWorkbenchAutoOpened(false);
+          setWorkbenchOpen((value) => !value);
+        },
       },
       {
         id: "open-provider",
@@ -654,7 +681,10 @@ export function ChatScreen({
               aria-controls="workbench-panel"
               aria-expanded={workbenchOpen}
               id="workbench-toggle"
-              onClick={() => setWorkbenchOpen((value) => !value)}
+              onClick={() => {
+                setWorkbenchAutoOpened(false);
+                setWorkbenchOpen((value) => !value);
+              }}
             >
               <PanelRightOpenIcon aria-hidden="true" />
             </Button>
@@ -858,6 +888,7 @@ export function ChatScreen({
 
       <WorkbenchPanel
         open={workbenchOpen}
+        autoOpened={workbenchAutoOpened}
         session={session}
         messages={messages}
         sending={sending}
