@@ -14,8 +14,10 @@ worker that is already authenticated in its own CLI. Claude Code and Gemini CLI 
 workers. Zest uses ACP or a non-interactive CLI, keeps the worker in an isolated workspace by
 default, requires approval before execution, and returns the answer and diff for review.
 
-Zest does not implement vendor OAuth for workers, embed their SDKs, attach MCP servers, or route
-individual tasks between Zest providers. The selected Zest provider owns the parent conversation.
+Zest does not implement vendor OAuth for workers, embed their SDKs, or route individual tasks
+between Zest providers. External workers may opt in to their own CLI-managed MCP servers; Zest
+does not manage or individually approve those MCP calls. The selected Zest provider owns the parent
+conversation.
 
 ## Main Users
 
@@ -65,7 +67,7 @@ component, no accounts or telemetry.
 - Treating Zest as a general assistant or adding channels, personas, or hosted accounts.
 - Reintroducing a Zest-to-Zest routing policy or the removed internal delegate tool.
 - Implementing OAuth or copying secrets for Claude Code/Gemini CLI.
-- Attaching MCP servers to external workers.
+- Silently attaching or managing MCP servers for external workers.
 - Adding an SDK when the existing hand-written provider clients are sufficient.
 - Guessing at provider APIs, model IDs, or streaming shapes.
 - Claiming the loop works until it has been tested against the relevant live path.

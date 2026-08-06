@@ -1,10 +1,16 @@
+<div align="center">
+
+<img src="assets/logo.png" alt="Zest Logo" width="128" height="128" />
+
 # Zest Harness
 
-> **The provider-aware, local-first coding harness built in Rust.**
+**The provider-aware, local-first coding harness built in Rust.**
 
 Zest gives coding AI models a focused, secure execution workspace on your machine. Stream responses, run terminal commands, view real-time diffs, and delegate complex tasks to external tools—all while keeping full control over your code, your secrets, and your quota.
 
 [![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
+
+</div>
 
 ---
 
@@ -129,15 +135,20 @@ credential = "deepseek"
 ```
 
 ### 2. External Workers (Claude Code & Gemini CLI)
-Delegate bounded subtasks to external CLI tools without re-authenticating. Sign into the vendor CLI on your machine and declare it in your local `zest.toml` or Desktop Settings:
+Delegate bounded subtasks to external CLI tools without re-authenticating. Sign into the vendor CLI on your machine and declare it in your local `zest.toml` or Desktop Settings. MCP pass-through is off by default; enable it per worker only if you want that CLI to use its own configured MCP servers. Zest does not manage those servers or review individual MCP calls.
 
 ```toml
 [agents.claude]
 mode = "headless"
 command = "claude"
 args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "{prompt}"]
+allow_mcp = false
 workspace = "isolated"
 ```
+
+When enabled, Claude uses its existing MCP configuration and Gemini uses its existing MCP server
+configuration. The same setting is available from Settings > ACP workers. The delegation approval
+still applies before the worker starts, but MCP calls remain controlled by the external CLI.
 
 ---
 
