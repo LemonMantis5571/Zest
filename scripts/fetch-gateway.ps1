@@ -50,8 +50,11 @@ $requiredTargets = @(
 
 function Get-HostTarget {
     try {
-        $tuple = (& rustc --print host-tuple 2>$null | Select-Object -First 1)
-        if ($LASTEXITCODE -eq 0 -and $tuple) { return $tuple.Trim() }
+        # Do not pipe through Select-Object: closing that pipeline early can
+        # leave PowerShell's LASTEXITCODE at -1 even when rustc succeeded.
+        $tuple = & rustc --print host-tuple 2>$null
+        $rustcExit = $LASTEXITCODE
+        if ($rustcExit -eq 0 -and $tuple) { return ([string]$tuple).Trim() }
     } catch {
         # Fall through to the Windows-only compatibility path below.
     }
