@@ -116,7 +116,9 @@ Generated installer artifacts will be created in:
 ## Quick Setup & Configuration
 
 ### 1. Provider Setup (API Keys)
-Configure model providers via **Settings > Add API provider** in Zest Desktop, or directly in `zest.toml`. Keys are stored securely in your OS Credential Manager.
+Configure model providers via **Settings > Add API provider** in Zest Desktop. Advanced users can use a local `zest.toml`; the repository ships only `zest.toml.example`. Keys are stored securely in your OS Credential Manager.
+
+Zest creates the user-level configuration at `%USERPROFILE%\.zest\zest.toml` on first launch. You do not need to create a project `zest.toml` unless you want provider or worker settings that apply only to that project.
 
 ```toml
 [providers.deepseek]
@@ -127,7 +129,7 @@ credential = "deepseek"
 ```
 
 ### 2. External Workers (Claude Code & Gemini CLI)
-Delegate bounded subtasks to external CLI tools without re-authenticating. Sign into the vendor CLI on your machine and declare it in `zest.toml` or Desktop Settings:
+Delegate bounded subtasks to external CLI tools without re-authenticating. Sign into the vendor CLI on your machine and declare it in your local `zest.toml` or Desktop Settings:
 
 ```toml
 [agents.claude]

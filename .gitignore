@@ -19,6 +19,9 @@ crates/desktop/tauri.signing.conf.json
 .zest/*.json
 # Keep .zest/skills/ shareable when present (not ignored).
 
+# Local/project configuration. Use zest.toml.example for a shareable starter.
+zest.toml
+
 # --- Gateway binaries (fetch with scripts/fetch-gateway.ps1; see README) ---
 /tools/*
 !/tools/.gitkeep
