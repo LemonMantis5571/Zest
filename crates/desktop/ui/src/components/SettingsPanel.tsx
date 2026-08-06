@@ -3,7 +3,6 @@ import {
   BotIcon,
   BookOpenIcon,
   ChartColumnIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
   KeyboardIcon,
   type LucideIcon,
@@ -23,6 +22,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { WorkerModelPicker } from "@/components/WorkerModelPicker";
 import { getBackend, type SkillSummary } from "@/lib/backend";
 import { chipLabel, effortsForModel, modelLabel, type EffortId } from "@/lib/models";
 import { optimizeAvatarFile } from "@/lib/optimizeAvatar";
@@ -169,7 +169,6 @@ export function SettingsPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const shortcutsRef = useScrollIntoViewOnBump(focusShortcuts);
   const titleId = useId();
-  const externalModelId = useId();
   useDialogFocusTrap(open, panelRef);
   const [provider, setProvider] = useState<ProviderRow | null>(null);
   const [loading, setLoading] = useState(false);
@@ -765,37 +764,20 @@ export function SettingsPanel({
                           <div className="min-w-0">
                             <div className="text-xs font-medium">Worker model</div>
                             <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                              Independent from Zest&apos;s selected model.
+                              Independent from Zest&apos;s chat model.
                             </p>
                           </div>
-                          <div className="relative shrink-0">
-                            <label
-                              className="sr-only"
-                              htmlFor={`${externalModelId}-${agent.id}`}
-                            >
-                              Model used by {agent.label}
-                            </label>
-                            <select
-                              id={`${externalModelId}-${agent.id}`}
-                              value={agent.model}
-                              disabled={sending || busy || externalBusy !== null || externalLoading}
-                              onChange={(event) =>
-                                void setExternalAgentModel(agent, event.target.value)
-                              }
-                              className="h-8 max-w-[155px] appearance-none rounded-md border border-transparent bg-transparent px-2.5 pr-7 text-xs font-medium text-foreground outline-none transition-colors hover:bg-secondary/50 focus-visible:border-border/60 focus-visible:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50"
-                            >
-                              <option value="">CLI default</option>
-                              {agent.models.map((modelOption) => (
-                                <option key={modelOption} value={modelOption}>
-                                  {modelOption}
-                                </option>
-                              ))}
-                            </select>
-                            <ChevronDownIcon
-                              className="pointer-events-none absolute right-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground"
-                              aria-hidden="true"
-                            />
-                          </div>
+                          <WorkerModelPicker
+                            workerLabel={agent.label}
+                            model={agent.model}
+                            models={agent.models}
+                            disabled={
+                              sending || busy || externalBusy !== null || externalLoading
+                            }
+                            onModelChange={(nextModel) =>
+                              void setExternalAgentModel(agent, nextModel)
+                            }
+                          />
                         </div>
                       ) : null}
                       {agent.preset && agent.configured ? (
