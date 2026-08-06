@@ -6,6 +6,7 @@ import type { ExternalAgentView } from "./generated/ExternalAgentView.ts";
 import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
+import type { TurnRecoveryView } from "./generated/TurnRecovery.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/WorkspaceReview.ts";
 import type { PlanningQuestion } from "./planningQuestion.ts";
@@ -134,6 +135,7 @@ export type SessionInfo = Omit<GeneratedSessionInfo, "messages"> & {
 };
 
 export type ThreadCheckpoint = ThreadCheckpointView;
+export type TurnRecovery = TurnRecoveryView;
 
 export type ThreadSummary = {
   id: string;
