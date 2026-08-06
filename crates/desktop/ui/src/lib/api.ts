@@ -71,6 +71,10 @@ export function configureApiProvider(input: {
   return invoke<void>("configure_api_provider", input);
 }
 
+export function openProjectConfig(root: string) {
+  return invoke<void>("open_project_config", { root });
+}
+
 export function usageSnapshot() {
   return invoke<UsageSnapshot>("usage_snapshot");
 }
@@ -139,11 +143,15 @@ export function openProjectChat(options: {
   root: string;
   threadId?: string | null;
   newThread?: boolean;
+  providerId?: string | null;
+  copyThread?: boolean;
 }) {
   return invoke<SessionInfo>("open_project_chat", {
     root: options.root,
     threadId: options.threadId ?? null,
     newThread: options.newThread ?? null,
+    providerId: options.providerId ?? null,
+    copyThread: options.copyThread ?? null,
   });
 }
 
