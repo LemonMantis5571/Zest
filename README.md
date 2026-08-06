@@ -14,18 +14,6 @@ Zest gives coding AI models a focused, secure execution workspace on your machin
 
 ---
 
-## See Zest in action
-
-<p align="center">
-  <video controls preload="metadata" poster="./assets/zest-showcase-poster.jpg" width="720">
-    <source src="./assets/zest-showcase.mp4" type="video/mp4" />
-  </video>
-</p>
-
-If your Markdown viewer does not show the inline player, [watch or download the CLI showcase video](./assets/zest-showcase.mp4), or click the preview below.
-
-[![Watch the Zest CLI showcase](./assets/zest-showcase-poster.jpg)](./assets/zest-showcase.mp4)
-
 ## Why Zest Harness?
 
 Most AI coding tools lock you into proprietary SaaS subscriptions, hide token usage under opaque telemetry, or attempt to auto-route your prompts through middleman services.

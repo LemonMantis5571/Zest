@@ -53,8 +53,10 @@ Step "toolchain check" {
   }
 }
 
-Step "gateway release pin" {
-  & (Join-Path $Root "scripts\fetch-gateway.ps1") -CheckPin
+Step "gateway release and sidecar" {
+  # CI starts from a clean checkout. Fetch the pinned host sidecar so Tauri's
+  # build script can validate its external binary during Clippy and tests.
+  & (Join-Path $Root "scripts\fetch-gateway.ps1")
 }
 
 Step "npm ci" {
