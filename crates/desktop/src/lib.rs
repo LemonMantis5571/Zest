@@ -1002,13 +1002,13 @@ fn external_agent_view(
         )
     } else if configured {
         (
-            "Enabled".into(),
-            format!("Uses your {label} CLI session. Check the CLI before delegating."),
+            "Delegation enabled".into(),
+            format!("Delegates through your {label} CLI session. Check the CLI before delegating."),
         )
     } else {
         (
-            "Not enabled".into(),
-            format!("Enable to add {label} to delegated work."),
+            "Delegation off".into(),
+            format!("Enable delegation to let Zest send bounded tasks to {label}."),
         )
     };
 
@@ -1042,7 +1042,7 @@ fn external_agent_scope(state: &AppState) -> String {
 fn external_agent_mode_label(mode: ExternalAgentMode) -> &'static str {
     match mode {
         ExternalAgentMode::Headless => "Headless CLI",
-        ExternalAgentMode::Acp => "ACP",
+        ExternalAgentMode::Acp => "CLI via ACP",
     }
 }
 
