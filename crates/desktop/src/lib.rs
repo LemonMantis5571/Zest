@@ -2288,7 +2288,11 @@ fn list_cached_threads(
     }
 
     cache.files.retain(|name, _| seen.contains(name));
-    out.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+    out.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
     out
 }
 
@@ -2478,7 +2482,7 @@ mod chat_summary_tests {
         let root = std::env::temp_dir().join(format!("zest-chat-cache-{}", new_id("test")));
         let store = ThreadStore::open(&root).unwrap();
         let mut first = Thread::new().with_provider("codex");
-        let second = Thread::new().with_provider("codex");
+        let mut second = Thread::new().with_provider("codex");
         first.apply_user("user-1", "hello");
         store.save(&first).unwrap();
         store.save(&second).unwrap();
@@ -2487,6 +2491,15 @@ mod chat_summary_tests {
         let initial = list_cached_threads(&store, Some("codex"), &mut cache);
         assert_eq!(initial.len(), 2);
         assert_eq!(cache.files.len(), 2);
+
+        second.set_pinned(true);
+        store.save(&second).unwrap();
+        let pinned_first = list_cached_threads(&store, Some("codex"), &mut cache);
+        assert_eq!(
+            pinned_first.first().map(|summary| summary.id.as_str()),
+            Some(second.id.as_str())
+        );
+        assert!(pinned_first.first().is_some_and(|summary| summary.pinned));
 
         let other_provider = Thread::new().with_provider("claude");
         store.save(&other_provider).unwrap();
@@ -2826,6 +2839,51 @@ fn delete_thread(
         })
         .map_err(map_session_err)
         .and_then(|r| r)
+}
+
+/// Set a chat's sidebar pin without changing its activity timestamp. This is
+/// allowed for any known project because pinning only changes navigation
+/// metadata; it never opens, rewinds, or executes the conversation.
+#[tauri::command]
+fn set_thread_pinned(
+    state: State<'_, AppState>,
+    id: String,
+    project_path: Option<String>,
+    pinned: bool,
+) -> Result<(), String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+
+    let target_root = state
+        .sessions
+        .with_session_mut(|session| -> Result<PathBuf, String> {
+            let target_root = match project_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+                None => session.root.clone(),
+            };
+            let store = open_store(&target_root)?;
+            let summary = store.set_pinned(&id, pinned).map_err(|e| e.to_string())?;
+
+            let same_project = display_path(&session.root) == display_path(&target_root)
+                || session.root == target_root;
+            if same_project && session.thread_id == id {
+                session.thread.pinned = summary.pinned;
+            }
+            Ok(target_root)
+        })
+        .map_err(map_session_err)
+        .and_then(|result| result)?;
+
+    // The scanner normally invalidates from file metadata. Remove the entry
+    // explicitly as well so a fast pin/unpin always refreshes immediately on
+    // filesystems with coarse timestamp resolution.
+    if let Ok(mut cache) = state.chat_summary_cache.lock() {
+        cache.projects.remove(&target_root);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -4230,6 +4288,7 @@ pub fn run() {
             rewind_thread,
             compact_context,
             delete_thread,
+            set_thread_pinned,
             send_message,
             save_markdown,
             cancel_turn,

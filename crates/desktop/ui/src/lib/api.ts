@@ -170,6 +170,18 @@ export function deleteThread(id: string, projectPath?: string | null) {
   });
 }
 
+export function setThreadPinned(
+  id: string,
+  projectPath: string | null | undefined,
+  pinned: boolean
+) {
+  return invoke<void>("set_thread_pinned", {
+    id,
+    projectPath: projectPath ?? null,
+    pinned,
+  });
+}
+
 export function sendMessage(text: string, attachments?: AttachmentInput[]) {
   return invoke<void>("send_message", {
     text,

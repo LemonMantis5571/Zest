@@ -140,6 +140,7 @@ export type ThreadSummary = {
   createdAt: number;
   updatedAt: number;
   title?: string;
+  pinned: boolean;
   providerId?: string;
   messageCount: number;
 };
