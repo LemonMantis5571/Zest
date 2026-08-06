@@ -649,7 +649,7 @@ export function SettingsPanel({
           </SettingsSection>
 
           <SettingsSection
-            title="ACP workers"
+            title="CLI delegation"
             icon={BotIcon}
             hint={
               externalLoading
@@ -664,10 +664,9 @@ export function SettingsPanel({
               className="min-w-0"
             >
               <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
-                Delegate bounded work to a CLI you already use through ACP or headless mode.
-                Sign in with Claude Code or Gemini CLI first. You can optionally let each CLI use
-                its own MCP servers; Zest does not manage those servers or review their individual
-                calls.
+                Enable a CLI worker to handle bounded tasks. This does not change your selected
+                provider or route normal chats through the CLI. Sign in to the CLI first; MCP
+                access is optional and controlled separately for each worker.
               </p>
               {externalLoading ? (
                 <p className="text-xs text-muted-foreground" role="status">
@@ -700,14 +699,14 @@ export function SettingsPanel({
                             variant={agent.configured ? "secondary" : "outline"}
                             disabled={sending || busy || externalBusy !== null || externalLoading}
                             aria-pressed={agent.configured}
-                            aria-label={`${agent.configured ? "Disable" : "Enable"} ${agent.label}`}
+                            aria-label={`${agent.configured ? "Disable delegation through" : "Enable delegation through"} ${agent.label}`}
                             onClick={() => void toggleExternalAgent(agent)}
                           >
                             {busy && externalBusy?.action === "saving"
                               ? "Saving..."
                               : agent.configured
-                                ? "Disable"
-                                : "Enable"}
+                                ? "Disable delegation"
+                                : "Enable delegation"}
                           </Button>
                         ) : (
                           <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -734,31 +733,6 @@ export function SettingsPanel({
                           {check.detail}
                         </p>
                       ) : null}
-                      {agent.preset && agent.configured ? (
-                        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/50 pt-2.5">
-                          <div className="min-w-0">
-                            <div className="text-xs font-medium">Use CLI MCP servers</div>
-                            <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                              Uses servers already configured in {agent.label}.
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant={agent.mcpAllowed ? "secondary" : "outline"}
-                            disabled={sending || busy || externalBusy !== null || externalLoading}
-                            aria-pressed={agent.mcpAllowed}
-                            aria-label={`${agent.mcpAllowed ? "Disable" : "Allow"} MCP servers for ${agent.label}`}
-                            onClick={() => void toggleExternalAgentMcp(agent)}
-                          >
-                            {busy && externalBusy?.action === "mcp"
-                              ? "Saving..."
-                              : agent.mcpAllowed
-                                ? "Allowed"
-                                : "Off"}
-                          </Button>
-                        </div>
-                      ) : null}
                       {agent.configured ? (
                         <Button
                           type="button"
@@ -770,6 +744,32 @@ export function SettingsPanel({
                         >
                           {busy && externalBusy?.action === "checking" ? "Checking..." : "Check CLI"}
                         </Button>
+                      ) : null}
+                      {agent.preset && agent.configured ? (
+                        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/50 pt-2.5">
+                          <div className="min-w-0">
+                            <div className="text-xs font-medium">Optional MCP access</div>
+                            <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                              Lets {agent.label} use the MCP servers already configured in its CLI.
+                              This does not change provider routing.
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={agent.mcpAllowed ? "secondary" : "outline"}
+                            disabled={sending || busy || externalBusy !== null || externalLoading}
+                            aria-pressed={agent.mcpAllowed}
+                            aria-label={`${agent.mcpAllowed ? "Turn off" : "Turn on"} MCP access for ${agent.label}`}
+                            onClick={() => void toggleExternalAgentMcp(agent)}
+                          >
+                            {busy && externalBusy?.action === "mcp"
+                              ? "Saving..."
+                              : agent.mcpAllowed
+                                ? "On"
+                                : "Off"}
+                          </Button>
+                        </div>
                       ) : null}
                     </li>
                   );

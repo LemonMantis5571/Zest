@@ -225,10 +225,10 @@ export function createFixtureBackend(): DesktopBackend {
           scope: "Project zest.toml",
           mode: "Headless CLI",
           workspace: "Isolated worktree",
-          statusLabel: enabledExternalAgents.has("claude") ? "Enabled" : "Not enabled",
+          statusLabel: enabledExternalAgents.has("claude") ? "Delegation enabled" : "Delegation off",
           detail: enabledExternalAgents.has("claude")
-            ? "Uses your Claude Code CLI session."
-            : "Enable this worker in the desktop app.",
+            ? "Delegates through your Claude Code CLI session."
+            : "Enable delegation to let Zest send bounded tasks to Claude Code.",
           configured: enabledExternalAgents.has("claude"),
           mcpAllowed: enabledExternalAgents.has("claude") && fixtureMcpAgents.has("claude"),
           preset: true,
@@ -237,12 +237,12 @@ export function createFixtureBackend(): DesktopBackend {
           id: "gemini",
           label: "Gemini CLI",
           scope: "Project zest.toml",
-          mode: "ACP",
+          mode: "CLI via ACP",
           workspace: "Isolated worktree",
-          statusLabel: enabledExternalAgents.has("gemini") ? "Enabled" : "Not enabled",
+          statusLabel: enabledExternalAgents.has("gemini") ? "Delegation enabled" : "Delegation off",
           detail: enabledExternalAgents.has("gemini")
-            ? "Uses your Gemini CLI session."
-            : "Enable this worker in the desktop app.",
+            ? "Delegates through your Gemini CLI session."
+            : "Enable delegation to let Zest send bounded tasks to Gemini CLI.",
           configured: enabledExternalAgents.has("gemini"),
           mcpAllowed: enabledExternalAgents.has("gemini") && fixtureMcpAgents.has("gemini"),
           preset: true,
