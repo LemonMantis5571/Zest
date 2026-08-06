@@ -141,14 +141,17 @@ Delegate bounded subtasks to external CLI tools without re-authenticating. Sign 
 [agents.claude]
 mode = "headless"
 command = "claude"
-args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "{prompt}"]
+args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "--model", "{model}", "{prompt}"]
+model = "sonnet"
 allow_mcp = false
 workspace = "isolated"
 ```
 
 When enabled, Claude uses its existing MCP configuration and Gemini uses its existing MCP server
-configuration. The same setting is available from Settings > ACP workers. The delegation approval
-still applies before the worker starts, but MCP calls remain controlled by the external CLI.
+configuration. The same settings are available from Settings > CLI delegation. The worker model is
+independent from Zest's selected chat model; choose **CLI default** to let the vendor CLI decide.
+The delegation approval still applies before the worker starts, but MCP calls remain controlled by
+the external CLI.
 
 ---
 

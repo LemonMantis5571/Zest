@@ -3,6 +3,7 @@ import {
   BotIcon,
   BookOpenIcon,
   ChartColumnIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   KeyboardIcon,
   type LucideIcon,
@@ -168,6 +169,7 @@ export function SettingsPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const shortcutsRef = useScrollIntoViewOnBump(focusShortcuts);
   const titleId = useId();
+  const externalModelId = useId();
   useDialogFocusTrap(open, panelRef);
   const [provider, setProvider] = useState<ProviderRow | null>(null);
   const [loading, setLoading] = useState(false);
@@ -180,7 +182,7 @@ export function SettingsPanel({
   const [externalChecks, setExternalChecks] = useState<Record<string, ExternalAgentCheck>>({});
   const [externalBusy, setExternalBusy] = useState<{
     id: string;
-    action: "saving" | "checking" | "mcp";
+    action: "saving" | "checking" | "mcp" | "model";
   } | null>(null);
   const [externalLoading, setExternalLoading] = useState(false);
   const [externalError, setExternalError] = useState<string | null>(null);
@@ -451,6 +453,21 @@ export function SettingsPanel({
       if (onReloadSession) await onReloadSession();
     } catch {
       setExternalError(`Could not update MCP access for ${agent.label}. Try again.`);
+    } finally {
+      setExternalBusy(null);
+    }
+  }
+
+  async function setExternalAgentModel(agent: ExternalAgentRow, nextModel: string) {
+    if (!agent.preset || !agent.configured || sending || nextModel === agent.model) return;
+    setExternalBusy({ id: agent.id, action: "model" });
+    setExternalError(null);
+    try {
+      await getBackend().setExternalAgentModel(agent.id, nextModel || null);
+      setExternalAgents(await getBackend().listExternalAgents());
+      if (onReloadSession) await onReloadSession();
+    } catch {
+      setExternalError(`Could not update the model for ${agent.label}. Try again.`);
     } finally {
       setExternalBusy(null);
     }
@@ -742,6 +759,44 @@ export function SettingsPanel({
                         >
                           {busy && externalBusy?.action === "checking" ? "Checking..." : "Check CLI"}
                         </Button>
+                      ) : null}
+                      {agent.preset && agent.configured && agent.models.length ? (
+                        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/50 pt-2.5">
+                          <div className="min-w-0">
+                            <div className="text-xs font-medium">Worker model</div>
+                            <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                              Independent from Zest&apos;s selected model.
+                            </p>
+                          </div>
+                          <div className="relative shrink-0">
+                            <label
+                              className="sr-only"
+                              htmlFor={`${externalModelId}-${agent.id}`}
+                            >
+                              Model used by {agent.label}
+                            </label>
+                            <select
+                              id={`${externalModelId}-${agent.id}`}
+                              value={agent.model}
+                              disabled={sending || busy || externalBusy !== null || externalLoading}
+                              onChange={(event) =>
+                                void setExternalAgentModel(agent, event.target.value)
+                              }
+                              className="h-8 max-w-[155px] appearance-none rounded-md border border-transparent bg-transparent px-2.5 pr-7 text-xs font-medium text-foreground outline-none transition-colors hover:bg-secondary/50 focus-visible:border-border/60 focus-visible:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50"
+                            >
+                              <option value="">CLI default</option>
+                              {agent.models.map((modelOption) => (
+                                <option key={modelOption} value={modelOption}>
+                                  {modelOption}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDownIcon
+                              className="pointer-events-none absolute right-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground"
+                              aria-hidden="true"
+                            />
+                          </div>
+                        </div>
                       ) : null}
                       {agent.preset && agent.configured ? (
                         <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/50 pt-2.5">

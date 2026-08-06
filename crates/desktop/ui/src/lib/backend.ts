@@ -49,6 +49,7 @@ export type DesktopBackend = {
   listExternalAgents(): Promise<ExternalAgentRow[]>;
   setExternalAgent(id: string, enabled: boolean): Promise<void>;
   setExternalAgentMcp(id: string, enabled: boolean): Promise<void>;
+  setExternalAgentModel(id: string, model: string | null): Promise<void>;
   checkExternalAgent(id: string): Promise<ExternalAgentCheck>;
   setProviderKey(id: string, key: string): Promise<void>;
   deleteProviderKey(id: string): Promise<void>;
@@ -152,6 +153,7 @@ export function createTauriBackend(): DesktopBackend {
     listExternalAgents: () => tauriApi.listExternalAgents(),
     setExternalAgent: (id, enabled) => tauriApi.setExternalAgent(id, enabled),
     setExternalAgentMcp: (id, enabled) => tauriApi.setExternalAgentMcp(id, enabled),
+    setExternalAgentModel: (id, model) => tauriApi.setExternalAgentModel(id, model),
     checkExternalAgent: (id) => tauriApi.checkExternalAgent(id),
     setProviderKey: (id, key) => tauriApi.setProviderKey(id, key),
     deleteProviderKey: (id) => tauriApi.deleteProviderKey(id),
@@ -214,6 +216,18 @@ export function createFixtureBackend(): DesktopBackend {
   let fixturePinned = false;
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
+  const fixtureExternalModels = new Map<string, string>();
+
+  const fixtureExternalModelOptions: Record<string, string[]> = {
+    claude: ["sonnet", "opus"],
+    gemini: [
+      "auto",
+      "gemini-3-pro-preview",
+      "gemini-3-flash-preview",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+    ],
+  };
 
   return {
     mode: "fixture",
@@ -231,6 +245,8 @@ export function createFixtureBackend(): DesktopBackend {
             : "Enable delegation to let Zest send bounded tasks to Claude Code.",
           configured: enabledExternalAgents.has("claude"),
           mcpAllowed: enabledExternalAgents.has("claude") && fixtureMcpAgents.has("claude"),
+          model: fixtureExternalModels.get("claude") ?? "",
+          models: fixtureExternalModelOptions.claude,
           preset: true,
         },
         {
@@ -245,6 +261,8 @@ export function createFixtureBackend(): DesktopBackend {
             : "Enable delegation to let Zest send bounded tasks to Gemini CLI.",
           configured: enabledExternalAgents.has("gemini"),
           mcpAllowed: enabledExternalAgents.has("gemini") && fixtureMcpAgents.has("gemini"),
+          model: fixtureExternalModels.get("gemini") ?? "",
+          models: fixtureExternalModelOptions.gemini,
           preset: true,
         },
       ];
@@ -254,11 +272,16 @@ export function createFixtureBackend(): DesktopBackend {
       else {
         enabledExternalAgents.delete(id);
         fixtureMcpAgents.delete(id);
+        fixtureExternalModels.delete(id);
       }
     },
     async setExternalAgentMcp(id, enabled) {
       if (enabled) fixtureMcpAgents.add(id);
       else fixtureMcpAgents.delete(id);
+    },
+    async setExternalAgentModel(id, model) {
+      if (model?.trim()) fixtureExternalModels.set(id, model.trim());
+      else fixtureExternalModels.delete(id);
     },
     async checkExternalAgent() {
       return {
