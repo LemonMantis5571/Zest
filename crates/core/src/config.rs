@@ -23,7 +23,7 @@ pub const CONFIG_FILE: &str = "zest.toml";
 /// Safe starter config embedded in every build. It contains provider metadata,
 /// never a credential, so a fresh install can bootstrap user-global config
 /// without asking the user to copy files out of the source checkout.
-pub const DEFAULT_USER_CONFIG: &str = include_str!("../../../zest.toml");
+pub const DEFAULT_USER_CONFIG: &str = include_str!("../../../zest.toml.example");
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -814,10 +814,10 @@ timeout_ms = 5000
 
     #[test]
     fn the_repo_config_parses() {
-        // zest.toml is the file every fresh clone starts from; a typo in the
-        // committed `[tools.bash]` block would break launch, not a test.
-        let raw = include_str!("../../../zest.toml");
-        let config = Config::parse(raw).expect("committed zest.toml must parse");
+        // The example is embedded into fresh installs; a typo in its committed
+        // `[tools.bash]` block would break launch, not just this test.
+        let raw = include_str!("../../../zest.toml.example");
+        let config = Config::parse(raw).expect("committed zest.toml.example must parse");
         assert!(config.tools.bash.enabled);
         assert!(config.lint().is_empty(), "{:?}", config.lint());
     }

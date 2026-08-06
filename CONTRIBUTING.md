@@ -51,9 +51,9 @@ Do not commit:
 - downloaded gateway binaries or generated `ui/dist` output; or
 - signing overlays containing local certificate configuration.
 
-Project `zest.toml` files may be committed when they contain only provider
-endpoints, model names, and worker configuration. Never put a secret value in
-one.
+`zest.toml` is ignored because it is normally a local/project override. Use
+`zest.toml.example` for shareable configuration documentation, and never force-
+add a personal config or put a secret value in either file.
 
 ## Packaging
 

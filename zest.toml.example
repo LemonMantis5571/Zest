@@ -1,0 +1,53 @@
+# Zest starter configuration.
+#
+# Copy this file to `zest.toml` only when you intentionally want project-local
+# provider settings. Otherwise Zest creates and manages
+# `%USERPROFILE%/.zest/zest.toml` for the machine. Credentials never belong in
+# this file.
+
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+api_key_env = "ZEST_GATEWAY_KEY"
+model = "gpt-5.6-terra"
+
+[default]
+provider = "codex"
+model = "gpt-5.6-terra"
+
+[tools.bash]
+# Read-only commands can run without an extra approval; other commands ask.
+enabled = true
+
+# OpenAI-compatible providers are configured explicitly when needed. Their
+# API keys are stored in the OS credential manager, not here.
+#
+# [providers.deepseek]
+# kind = "openai_compatible"
+# base_url = "https://api.deepseek.com"
+# model = "deepseek-v4-flash"
+# models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+# credential = "deepseek"
+#
+# [providers.openai]
+# kind = "openai_compatible"
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-5"
+# credential = "openai"
+
+# External workers are optional. Authenticate their CLIs separately, then
+# enable a worker here or from Settings > External workers.
+#
+# [agents.claude]
+# mode = "headless"
+# command = "claude"
+# args = ["--print", "--output-format", "stream-json", "--strict-mcp-config", "{prompt}"]
+# workspace = "isolated"
+# timeout_secs = 900
+#
+# [agents.gemini]
+# mode = "acp"
+# command = "gemini"
+# args = ["--acp"]
+# workspace = "isolated"
+# timeout_secs = 900
