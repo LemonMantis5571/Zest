@@ -42,7 +42,7 @@ export function ModelEffortPicker({
 }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const labelId = useId();
+  const panelId = useId();
   const modelOptions = modelOptionsFromCapabilities(models);
   const effortOptions = effortsForModel(models, model);
   const capability = capabilityForModel(models, model);
@@ -98,33 +98,33 @@ export function ModelEffortPicker({
         disabled={disabled}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-controls={open ? labelId : undefined}
+        aria-controls={open ? panelId : undefined}
         title={pickerLabel}
         className={cn(
-          "inline-flex max-w-[260px] cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none transition-colors",
-          "hover:bg-secondary hover:text-foreground",
-          "focus-visible:ring-2 focus-visible:ring-ring/50",
-          open && "bg-secondary text-foreground",
+          "inline-flex min-h-8 max-w-[260px] cursor-pointer items-center gap-2 rounded-lg border border-border/70 bg-card/70 px-2.5 py-1.5 text-xs font-medium text-foreground/85 shadow-sm outline-none transition-all",
+          "hover:border-border hover:bg-secondary hover:text-foreground",
+          "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+          open && "border-border bg-secondary text-foreground shadow-md",
           "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
         )}
         onClick={() => setOpen((value) => !value)}
       >
         <span className="truncate">{supportsEffort ? chipLabel(model, effort) : modelLabel(model)}</span>
-        <ChevronDownIcon className="size-2.5 shrink-0 opacity-70" />
+        <ChevronDownIcon className="size-3 shrink-0 opacity-60" />
       </button>
 
       {open ? (
         <div
-          id={labelId}
+          id={panelId}
           role="dialog"
           aria-label={pickerLabel}
-          className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[220px] rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg"
+          className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[240px] overflow-hidden rounded-xl border border-border/90 bg-popover p-1.5 text-popover-foreground shadow-xl"
         >
-          <div className="px-1.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <div className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             Model
           </div>
           {capability ? (
-            <div className="mx-1.5 mb-1 rounded-md bg-secondary/60 px-2 py-1.5 text-[10px] leading-relaxed text-muted-foreground">
+            <div className="mx-1 mb-1.5 rounded-lg border border-border/50 bg-secondary/60 px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 {contextLabel ? <span>{contextLabel}</span> : null}
                 <span>{capability.supportsTools ? "Tools" : "Text only"}</span>
@@ -147,9 +147,9 @@ export function ModelEffortPicker({
                   role="option"
                   aria-selected={selected}
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-none",
-                    "hover:bg-accent hover:text-accent-foreground",
-                    selected && "bg-accent/70"
+                    "flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm outline-none transition-colors",
+                    "hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground",
+                    selected && "bg-accent/80"
                   )}
                   onClick={() => applyModel(item.id)}
                 >
@@ -164,7 +164,7 @@ export function ModelEffortPicker({
             <>
               <div className="my-1 h-px bg-border" />
 
-              <div className="px-1.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <div className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 Effort
               </div>
               <div role="listbox" aria-label="Effort" className="flex flex-col">
@@ -177,9 +177,9 @@ export function ModelEffortPicker({
                       role="option"
                       aria-selected={selected}
                       className={cn(
-                        "flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-none",
-                        "hover:bg-accent hover:text-accent-foreground",
-                        selected && "bg-accent/70"
+                        "flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm outline-none transition-colors",
+                        "hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground",
+                        selected && "bg-accent/80"
                       )}
                       onClick={() => applyEffort(item.id)}
                     >
@@ -196,7 +196,7 @@ export function ModelEffortPicker({
 
           <button
             type="button"
-            className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground"
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
             onClick={reset}
           >
             <RotateCcwIcon className="size-3.5" />
