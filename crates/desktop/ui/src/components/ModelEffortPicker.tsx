@@ -101,10 +101,10 @@ export function ModelEffortPicker({
         aria-controls={open ? panelId : undefined}
         title={pickerLabel}
         className={cn(
-          "inline-flex min-h-8 max-w-[260px] cursor-pointer items-center gap-2 rounded-lg border border-border/70 bg-card/70 px-2.5 py-1.5 text-xs font-medium text-foreground/85 shadow-sm outline-none transition-all",
-          "hover:border-border hover:bg-secondary hover:text-foreground",
+          "inline-flex min-h-8 max-w-[260px] cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground/85 outline-none transition-colors",
+          "hover:bg-secondary/60 hover:text-foreground",
           "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-          open && "border-border bg-secondary text-foreground shadow-md",
+          open && "bg-secondary/70 text-foreground",
           "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
         )}
         onClick={() => setOpen((value) => !value)}
