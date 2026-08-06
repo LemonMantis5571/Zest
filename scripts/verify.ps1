@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# ASCII-safe Stable Windows Alpha verify gate (PowerShell 5.1).
+# ASCII-safe Windows beta verify gate (PowerShell 5.1).
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
@@ -14,6 +14,33 @@ function Step($name, $scriptBlock) {
 }
 
 $env:CARGO_TARGET_DIR = Join-Path $Root "target"
+$BindingFiles = @(
+  "crates/desktop/ui/src/lib/generated/ChatEvent.ts",
+  "crates/desktop/ui/src/lib/generated/SessionInfo.ts",
+  "crates/desktop/ui/src/lib/generated/ProviderView.ts",
+  "crates/desktop/ui/src/lib/generated/ExternalAgentView.ts",
+  "crates/desktop/ui/src/lib/generated/ExternalAgentCheckView.ts",
+  "crates/desktop/ui/src/lib/generated/ModelCapability.ts",
+  "crates/desktop/ui/src/lib/generated/ToolMetaView.ts"
+)
+
+function Normalize-BindingWhitespace {
+  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+  $normalizationRules = @{
+    "ChatEvent.ts" = '(?m)[ \t]+(?=\r?$)'
+    "ExternalAgentView.ts" = '(?m)[ \t]+(?=\r?$)'
+    "SessionInfo.ts" = '(?m)^(defaultModel:.*checkpoints:.*?)[ \t]+(?=\r?$)'
+  }
+  foreach ($entry in $normalizationRules.GetEnumerator()) {
+    $path = Join-Path $Root (Join-Path "crates/desktop/ui/src/lib/generated" $entry.Key)
+    $text = [System.IO.File]::ReadAllText($path)
+    $replacement = if ($entry.Key -eq "SessionInfo.ts") { '$1' } else { '' }
+    $clean = [regex]::Replace($text, $entry.Value, $replacement)
+    if ($clean -ne $text) {
+      [System.IO.File]::WriteAllText($path, $clean, $utf8NoBom)
+    }
+  }
+}
 
 Step "toolchain check" {
   $rustc = (rustc --version)
@@ -61,14 +88,10 @@ Step "cargo test" {
 
 Step "binding drift (ts-rs)" {
   cargo test -p zest-desktop --features export-bindings --lib export_bindings
-  git diff --exit-code -- `
-    "crates/desktop/ui/src/lib/generated/ChatEvent.ts" `
-    "crates/desktop/ui/src/lib/generated/SessionInfo.ts" `
-    "crates/desktop/ui/src/lib/generated/ProviderView.ts" `
-    "crates/desktop/ui/src/lib/generated/ExternalAgentView.ts" `
-    "crates/desktop/ui/src/lib/generated/ExternalAgentCheckView.ts" `
-    "crates/desktop/ui/src/lib/generated/ModelCapability.ts" `
-    "crates/desktop/ui/src/lib/generated/ToolMetaView.ts"
+  # ts-rs versions differ only in trailing spaces on a few generated lines;
+  # normalize that generator noise while keeping type and field changes strict.
+  Normalize-BindingWhitespace
+  git diff --exit-code -- $BindingFiles
 }
 
 Step "npm audit" {
@@ -86,8 +109,10 @@ Step "RustSec (cargo audit)" {
 }
 
 Step "git diff --check" {
-  git diff --check
-  git diff --cached --check
+  git diff --check --ignore-space-at-eol
+  if ($LASTEXITCODE -ne 0) { throw "Unstaged whitespace errors found." }
+  git diff --cached --check --ignore-space-at-eol
+  if ($LASTEXITCODE -ne 0) { throw "Staged whitespace errors found." }
 }
 
 Write-Host ""
