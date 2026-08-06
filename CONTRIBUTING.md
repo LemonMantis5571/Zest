@@ -1,50 +1,108 @@
 # Contributing
 
-## Prerequisites
+Zest is a Windows-first beta. Small, focused changes are easier to review than
+large refactors, especially around the provider, approval, gateway, and ACP
+boundaries.
 
-Match the pinned toolchain in the [README](README.md) (Rust 1.97.1, Node 24.16.0, npm 11.13.0).
+## Before you start
 
-## Verify before a PR
+Read:
 
-```powershell
-.\scripts\verify.ps1
-```
+1. [`AGENTS.md`](AGENTS.md) and [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md);
+2. the relevant files under [`context/`](context/); and
+3. the matching skill and durable corrections under [`skills/`](skills/) and
+   [`memory/`](memory/).
 
-That runs `cargo fmt --check`, clippy `-D warnings`, workspace tests, UI lint, and UI build.
+Use Rust 1.97.1, Node 24.16.0, and npm 11.13.0. The pinned versions are in
+`rust-toolchain.toml`, `.nvmrc`, and `package.json`.
 
-## Desktop UI
+## Local development
 
-```powershell
-npm install
-npm run ui:build          # required before cargo run -p zest-desktop
-npm run desktop:dev       # optional HMR
-```
+~~~powershell
+npm ci
+./scripts/fetch-gateway.ps1
+npm run ui:build
+npm run desktop:dev       # Tauri + Vite hot reload
+cargo run -p zest          # terminal front-end
+~~~
 
-Regenerate ts-rs bindings after changing `ChatEvent` / `SessionInfo` in `crates/desktop/src/lib.rs` — see `crates/desktop/ui/src/lib/generated/README.md`.
+The desktop UI is in `crates/desktop/ui`. The Rust command layer is in
+`crates/desktop/src`, and provider/tool behavior belongs in `crates/core`.
+Regenerate TypeScript bindings only through the documented ts-rs test when
+changing the DTOs in `crates/desktop/src/lib.rs`.
 
-## Package the desktop gateway
+## Verification before a PR
 
-The package must contain exactly the CLIProxyAPI release pinned in
-`crates/desktop/gateway-release.json`:
+Run the same gate as Windows CI:
 
-```powershell
-.\scripts\fetch-gateway.ps1
-.\scripts\fetch-gateway.ps1 -Check
+~~~powershell
+./scripts/verify.ps1
+~~~
+
+It runs the gateway pin check, `npm ci`, UI test/lint/build, Rust formatting,
+strict clippy, workspace library tests, binding drift, npm audit, RustSec, and
+Git whitespace checks. Keep live-provider verification separate: it requires
+credentials and consumes real quota.
+
+Do not commit:
+
+- API keys, gateway keys, `.env` files, credential-manager exports, or private
+  signing keys;
+- downloaded gateway binaries or generated `ui/dist` output; or
+- signing overlays containing local certificate configuration.
+
+Project `zest.toml` files may be committed when they contain only provider
+endpoints, model names, and worker configuration. Never put a secret value in
+one.
+
+## Packaging
+
+The exact sidecar and release process are documented in
+[docs/RELEASING.md](docs/RELEASING.md). The short path is:
+
+~~~powershell
+./scripts/fetch-gateway.ps1 -Check
 npm run desktop:build
-# npm run desktop:build also checks the configured target directory for the sidecar and MIT notice.
-```
+./scripts/release-checksums.ps1 -OutFile SHA256SUMS.txt
+~~~
 
-Before treating a release as ready, install it in a clean Windows VM or user profile with no
-`tools/CLIProxyAPI`, `ZEST_CLIPROXY_PATH`, gateway config, or existing process. Confirm first-run
-loopback provisioning, no console window, Codex and Claude Connect, chat after restart, useful
-missing/corrupt-gateway errors, and that a separate hand-installed gateway still overrides the
-bundle. Public or commercial distribution also requires a current vendor-terms review; the MIT
-notice only covers redistribution of CLIProxyAPI itself.
+The package must contain the CLIProxyAPI release pinned in
+`crates/desktop/gateway-release.json` and the matching
+`crates/desktop/licenses/CLIProxyAPI-LICENSE.txt` notice. Public or commercial
+distribution requires a current review of the upstream vendor terms; the
+notice covers the bundled software license, not every provider service.
 
-## Agent docs
+Before calling an installer ready, use a clean Windows profile with no source
+checkout, Rust, Node.js, hand-installed gateway, or existing Zest state. Test
+first-run gateway provisioning, Codex sign-in, API-key presence without key
+rendering, a denied approval, restart persistence, and useful missing-CLI
+errors.
 
-Follow `AGENTS.md` → `PROJECT_CONTEXT.md` → `context/` → relevant `skills/`. Record durable corrections in the matching `learnings.md` or `memory/`.
+## Code and UI conventions
+
+- Keep provider-independent agent behavior in `crates/core`.
+- Treat approval, credential, gateway, and worktree boundaries as security
+  boundaries; do not broaden them for convenience.
+- Keep user-facing copy actionable and free of internal debugging language.
+- Use the existing design tokens and local UI primitives. Avoid adding portal
+  components that regress in the Tauri WebView.
+- Add a focused regression test for behavior changes. For UI state, add or
+  update the characterization tests under `crates/desktop/ui/src`.
 
 ## Commit style
 
-[Conventional Commits](https://www.conventionalcommits.org/): `feat(scope):`, `fix:`, `docs:`, `chore:`, `ci:`.
+Use [Conventional Commits](https://www.conventionalcommits.org/), for example:
+
+~~~text
+feat(provider): add compatible endpoint setup
+fix(cli): handle streamed tool metadata
+docs(release): explain beta installers
+chore(deps): remove unused direct dependency
+~~~
+
+Keep commits scoped and explain any user-visible migration in the body.
+
+## Security reports
+
+Do not use a public issue for a vulnerability. Follow
+[SECURITY.md](SECURITY.md) and use a private GitHub Security Advisory.
