@@ -512,6 +512,11 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
 }
 
 fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
+    let method = config
+        .providers
+        .get(id)
+        .map(provider_method)
+        .unwrap_or("API key");
     let descriptor = config
         .providers
         .get(id)
@@ -522,13 +527,17 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
         .get(id)
         .map(|provider| provider.auth_status())
     {
-        Some(AuthStatus::Ready { .. }) => ("ready", "Ready", "API key provider".to_string()),
+        Some(AuthStatus::Ready { .. }) => ("ready", "Ready", format!("{method} provider")),
         Some(AuthStatus::Unknown { reason }) => ("unknown", "Unverified", reason),
         Some(AuthStatus::NotLoggedIn { fix }) => ("not_logged_in", "Not configured", fix),
         Some(AuthStatus::Unconfigured) | None => (
             "unconfigured",
             "Not configured",
-            "Add an API key in Settings".to_string(),
+            if method == "API key" {
+                "Add an API key in Settings".to_string()
+            } else {
+                format!("Configure {method} to continue")
+            },
         ),
     };
     ProviderView {
@@ -545,7 +554,7 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
             })
             .collect::<Vec<_>>()
             .join(" "),
-        method: "API key".into(),
+        method: method.into(),
         status_kind: status_kind.into(),
         status_label: status_label.into(),
         detail,
@@ -564,6 +573,22 @@ fn configured_provider_view(id: &str, config: &Config) -> ProviderView {
                 supports_vision: model.supports_vision,
             })
             .collect(),
+    }
+}
+
+fn provider_method(config: &ProviderConfig) -> &'static str {
+    match config {
+        ProviderConfig::Anthropic { .. } => "Environment key",
+        ProviderConfig::Gateway { .. } => "Gateway",
+        ProviderConfig::OpenaiCompatible {
+            credential,
+            api_key_env,
+            ..
+        } => match (credential.is_some(), api_key_env.is_some()) {
+            (true, _) => "API key",
+            (false, true) => "Environment key",
+            (false, false) => "No authentication",
+        },
     }
 }
 
@@ -899,7 +924,12 @@ fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
         .collect();
     let existing: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
     for (id, entry) in &config.providers {
-        if existing.contains(id) || !matches!(entry, ProviderConfig::OpenaiCompatible { .. }) {
+        if existing.contains(id)
+            || !matches!(
+                entry,
+                ProviderConfig::Anthropic { .. } | ProviderConfig::OpenaiCompatible { .. }
+            )
+        {
             continue;
         }
         rows.push(configured_provider_view(id, &config));
@@ -4418,6 +4448,39 @@ mod characterization {
         assert!(desktop_can_start_login("codex"));
         assert!(!desktop_can_start_login("claude"));
         assert!(!desktop_can_start_login("antigravity"));
+    }
+
+    #[test]
+    fn configured_provider_methods_match_the_secret_source() {
+        assert_eq!(
+            provider_method(&ProviderConfig::Anthropic {
+                api_key_env: "ANTHROPIC_API_KEY".into(),
+                model: None,
+            }),
+            "Environment key"
+        );
+        assert_eq!(
+            provider_method(&ProviderConfig::OpenaiCompatible {
+                base_url: "http://localhost:11434/v1".into(),
+                model: "local".into(),
+                models: vec![],
+                efforts: vec![],
+                credential: None,
+                api_key_env: Some("LOCAL_API_KEY".into()),
+            }),
+            "Environment key"
+        );
+        assert_eq!(
+            provider_method(&ProviderConfig::OpenaiCompatible {
+                base_url: "http://localhost:11434/v1".into(),
+                model: "local".into(),
+                models: vec![],
+                efforts: vec![],
+                credential: None,
+                api_key_env: None,
+            }),
+            "No authentication"
+        );
     }
 
     #[test]
