@@ -6,6 +6,7 @@ import {
   ImageIcon,
   CommandIcon,
   PanelRightOpenIcon,
+  PencilIcon,
   SettingsIcon,
   TriangleAlertIcon,
   XIcon,
@@ -88,6 +89,7 @@ type Props = {
   effort: EffortId;
   onDraftChange: (value: string) => void;
   onSend: (text?: string) => void;
+  onEditMessage: (messageId: string, text: string) => Promise<void>;
   onStop?: () => void;
   onNewChat: () => void;
   onForkThread: () => Promise<void>;
@@ -163,8 +165,82 @@ type ChatMessageRowProps = {
   onOpenDiff: (path: string, diff: string) => void;
   onReconnectProvider?: (providerId: string) => void;
   onSend: (text?: string) => void;
+  editing: boolean;
+  editingText: string;
+  editingBusy: boolean;
+  onStartEdit: (messageId: string, text: string) => void;
+  onChangeEdit: (text: string) => void;
+  onCancelEdit: () => void;
+  onSubmitEdit: () => void;
   onResolveQuestion: (questionId: string, answer: string) => Promise<void>;
 };
+
+type MessageEditFormProps = {
+  value: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+};
+
+function MessageEditForm({
+  value,
+  busy,
+  onChange,
+  onCancel,
+  onSubmit,
+}: MessageEditFormProps) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (busy) return;
+    const textarea = ref.current;
+    if (!textarea) return;
+    textarea.focus();
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  }, [busy]);
+
+  return (
+    <div className="w-full max-w-[42rem] overflow-hidden rounded-xl border border-border/80 bg-[var(--chat-header)]">
+      <textarea
+        ref={ref}
+        value={value}
+        rows={3}
+        aria-label="Edit message"
+        aria-busy={busy}
+        disabled={busy}
+        className="block max-h-[220px] min-h-[84px] w-full resize-y bg-transparent px-3.5 pt-3 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!busy) onCancel();
+            return;
+          }
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            if (!busy && value.trim()) onSubmit();
+          }
+        }}
+      />
+      <div className="flex items-center justify-end gap-1.5 px-2.5 pb-2.5">
+        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={busy || !value.trim()}
+          onClick={onSubmit}
+        >
+          Send
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Keep settled messages out of the streaming render path. Appending a delta
@@ -182,40 +258,81 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onOpenDiff,
   onReconnectProvider,
   onSend,
+  editing,
+  editingText,
+  editingBusy,
+  onStartEdit,
+  onChangeEdit,
+  onCancelEdit,
+  onSubmitEdit,
   onResolveQuestion,
 }: ChatMessageRowProps) {
   if (msg.role === "user") {
+    if (editing) {
+      return (
+        <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
+          <Message align="end" className="justify-end">
+            <MessageContent className="items-end gap-1.5">
+              <MessageEditForm
+                value={editingText}
+                busy={editingBusy}
+                onChange={onChangeEdit}
+                onCancel={onCancelEdit}
+                onSubmit={onSubmitEdit}
+              />
+            </MessageContent>
+          </Message>
+        </MessageScrollerItem>
+      );
+    }
+
     return (
       <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
         <Message align="end" className="justify-end">
           <MessageContent className="items-end gap-1.5">
-            {msg.attachments && msg.attachments.length > 0 ? (
-              <AttachmentGroup className="justify-end">
-                {msg.attachments.map((att) => (
-                  <Attachment key={`${msg.id}-${att.name}`} size="sm">
-                    <AttachmentMedia variant="icon">
-                      {att.kind === "pdf" ? (
-                        <FileTextIcon />
-                      ) : att.kind === "image" ? (
-                        <ImageIcon />
-                      ) : (
-                        <FileIcon />
-                      )}
-                    </AttachmentMedia>
-                    <AttachmentContent>
-                      <AttachmentTitle>{att.name}</AttachmentTitle>
-                    </AttachmentContent>
-                  </Attachment>
-                ))}
-              </AttachmentGroup>
-            ) : null}
-            {msg.text.trim() ? (
-              <Bubble variant="secondary" align="end" className="max-w-[85%]">
-                <BubbleContent className="whitespace-pre-wrap bg-[var(--user-bubble)] text-[13.5px] leading-relaxed text-foreground">
-                  <LinkifyText text={msg.text} />
-                </BubbleContent>
-              </Bubble>
-            ) : null}
+            <div className="group/user flex flex-col items-end gap-1.5">
+              {msg.attachments && msg.attachments.length > 0 ? (
+                <AttachmentGroup className="justify-end">
+                  {msg.attachments.map((att) => (
+                    <Attachment key={`${msg.id}-${att.name}`} size="sm">
+                      <AttachmentMedia variant="icon">
+                        {att.kind === "pdf" ? (
+                          <FileTextIcon />
+                        ) : att.kind === "image" ? (
+                          <ImageIcon />
+                        ) : (
+                          <FileIcon />
+                        )}
+                      </AttachmentMedia>
+                      <AttachmentContent>
+                        <AttachmentTitle>{att.name}</AttachmentTitle>
+                      </AttachmentContent>
+                    </Attachment>
+                  ))}
+                </AttachmentGroup>
+              ) : null}
+              {msg.text.trim() ? (
+                <Bubble variant="secondary" align="end" className="max-w-[85%]">
+                  <BubbleContent className="whitespace-pre-wrap bg-[var(--user-bubble)] text-[13.5px] leading-relaxed text-foreground">
+                    <LinkifyText text={msg.text} />
+                  </BubbleContent>
+                </Bubble>
+              ) : null}
+              {!sending && !(msg.attachments && msg.attachments.length > 0) ? (
+                <div className="flex items-center gap-0.5 text-muted-foreground opacity-0 transition-opacity group-hover/user:opacity-100 focus-within:opacity-100">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    title="Edit message"
+                    aria-label="Edit message"
+                    onClick={() => onStartEdit(msg.id, msg.text)}
+                  >
+                    <PencilIcon />
+                  </Button>
+                </div>
+              ) : null}
+            </div>
           </MessageContent>
         </Message>
       </MessageScrollerItem>
@@ -407,6 +524,7 @@ export function ChatScreen({
   effort,
   onDraftChange,
   onSend,
+  onEditMessage,
   onStop,
   onNewChat,
   onForkThread,
@@ -452,6 +570,9 @@ export function ChatScreen({
   const [workbenchAutoOpened, setWorkbenchAutoOpened] = useState(false);
   const lastAutoWorkbenchKey = useRef("");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingMessageText, setEditingMessageText] = useState("");
+  const [editingMessageBusy, setEditingMessageBusy] = useState(false);
   const closeWorkbench = useCallback(() => {
     setWorkbenchOpen(false);
     setWorkbenchAutoOpened(false);
@@ -476,6 +597,38 @@ export function ChatScreen({
     return [compacting ? "compacting" : "", ...activeTools].filter(Boolean).join("|");
   }, [compacting, messages]);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
+
+  const startEditingMessage = useCallback(
+    (messageId: string, text: string) => {
+      if (sending || editingMessageBusy) return;
+      setEditingMessageId(messageId);
+      setEditingMessageText(text);
+    },
+    [editingMessageBusy, sending]
+  );
+
+  const cancelEditingMessage = useCallback(() => {
+    if (editingMessageBusy) return;
+    setEditingMessageId(null);
+    setEditingMessageText("");
+  }, [editingMessageBusy]);
+
+  const submitEditingMessage = useCallback(async () => {
+    const messageId = editingMessageId;
+    const text = editingMessageText.trim();
+    if (!messageId || !text || sending || editingMessageBusy) return;
+
+    setEditingMessageBusy(true);
+    try {
+      await onEditMessage(messageId, text);
+      setEditingMessageId(null);
+      setEditingMessageText("");
+    } catch {
+      // The parent owns the toast; keep the editor open so the user can retry.
+    } finally {
+      setEditingMessageBusy(false);
+    }
+  }, [editingMessageBusy, editingMessageId, editingMessageText, onEditMessage, sending]);
 
   useEffect(() => {
     if (!activeWorkbenchKey) {
@@ -579,6 +732,11 @@ export function ChatScreen({
         setPaletteOpen(false);
         return;
       }
+      if (editingMessageId) {
+        e.preventDefault();
+        cancelEditingMessage();
+        return;
+      }
       if (sending && onStop) {
         e.preventDefault();
         onStop();
@@ -586,7 +744,7 @@ export function ChatScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [diffTarget, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
+  }, [cancelEditingMessage, diffTarget, editingMessageId, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
 
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.
@@ -791,6 +949,13 @@ export function ChatScreen({
                       onOpenDiff={openDiff}
                       onReconnectProvider={onReconnectProvider}
                       onSend={onSend}
+                      editing={editingMessageId === msg.id}
+                      editingText={editingMessageText}
+                      editingBusy={editingMessageBusy}
+                      onStartEdit={startEditingMessage}
+                      onChangeEdit={setEditingMessageText}
+                      onCancelEdit={cancelEditingMessage}
+                      onSubmitEdit={() => void submitEditingMessage()}
                       onResolveQuestion={onResolveQuestion}
                     />
                   ))}

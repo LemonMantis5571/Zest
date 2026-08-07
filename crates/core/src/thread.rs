@@ -886,6 +886,79 @@ impl ThreadStore {
         Ok(snapshot)
     }
 
+    /// Restore the conversation to the point immediately before a user
+    /// message so the caller can submit an edited replacement as a new turn.
+    ///
+    /// Each non-initial desktop turn creates a checkpoint at exactly this
+    /// boundary. The returned thread intentionally excludes the selected
+    /// message and every later response; the next send owns the replacement
+    /// message id and creates a fresh checkpoint for the new branch.
+    pub fn rewind_before_user_message(&self, thread: &Thread, message_id: &str) -> Result<Thread> {
+        let message_index = thread
+            .messages
+            .iter()
+            .position(|message| message.id() == message_id)
+            .ok_or_else(|| HarnessError::Other("message not found".into()))?;
+        if !matches!(
+            thread.messages.get(message_index),
+            Some(StoredMessage::User { .. })
+        ) {
+            return Err(HarnessError::Other(
+                "only user messages can be edited".into(),
+            ));
+        }
+
+        let mut restored = if message_index == 0 {
+            let mut base = thread.clone();
+            base.messages.clear();
+            base.agent_messages.clear();
+            base.title = None;
+            base
+        } else {
+            let checkpoint = thread
+                .checkpoints
+                .iter()
+                .rev()
+                .find(|checkpoint| checkpoint.message_count == message_index)
+                .ok_or_else(|| {
+                    HarnessError::Other(
+                        "message cannot be edited because its rewind checkpoint is missing".into(),
+                    )
+                })?;
+            self.load_checkpoint(&thread.id, &checkpoint.id)?
+        };
+
+        if restored.messages.len() != message_index {
+            return Err(HarnessError::Other(
+                "message rewind checkpoint does not match the transcript".into(),
+            ));
+        }
+
+        let thread_id = ThreadId::parse(&thread.id)
+            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        let discarded_checkpoints = thread
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.message_count >= message_index)
+            .map(|checkpoint| checkpoint.id.clone())
+            .collect::<Vec<_>>();
+        restored.checkpoints = thread
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.message_count < message_index)
+            .cloned()
+            .collect();
+        restored.touch();
+        self.save(&restored)?;
+
+        let checkpoint_dir = self.checkpoints_dir_for(&thread_id);
+        for checkpoint_id in discarded_checkpoints {
+            let _ = fs::remove_file(checkpoint_dir.join(format!("{checkpoint_id}.json")));
+        }
+
+        Ok(restored)
+    }
+
     /// Fork the current thread without sharing future checkpoint state.
     pub fn fork(&self, source: &Thread, title: Option<&str>) -> Result<Thread> {
         self.fork_with_provider(source, source.provider_id.as_deref(), title)
@@ -1114,6 +1187,63 @@ mod characterization {
         assert!(!store
             .checkpoints_dir_for(&ThreadId::parse(&thread.id).unwrap())
             .exists());
+    }
+
+    #[test]
+    fn editing_a_user_message_restores_the_checkpoint_before_its_turn() {
+        let root = scratch("edit-message");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+
+        thread.apply_user("u1", "first question");
+        thread.apply_assistant_start("a1", None);
+        thread.apply_text_delta("a1", "first answer");
+        thread.apply_done("a1");
+        thread.agent_messages = vec![Message::user_text("first question")];
+        store.save(&thread).unwrap();
+
+        let checkpoint = store
+            .create_checkpoint(&mut thread, "Before the next turn")
+            .unwrap();
+        thread.apply_user("u2", "second question");
+        thread.apply_assistant_start("a2", None);
+        thread.apply_text_delta("a2", "second answer");
+        thread.apply_done("a2");
+        thread
+            .agent_messages
+            .push(Message::user_text("second question"));
+        store.save(&thread).unwrap();
+
+        let restored = store.rewind_before_user_message(&thread, "u2").unwrap();
+        assert_eq!(restored.messages.len(), 2);
+        assert_eq!(restored.messages[0].id(), "u1");
+        assert_eq!(restored.messages[1].id(), "a1");
+        assert_eq!(restored.agent_messages.len(), 1);
+        assert!(restored.checkpoints.is_empty());
+        assert!(store.load_checkpoint(&thread.id, &checkpoint.id).is_err());
+
+        let loaded = store.load(&thread.id).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.agent_messages.len(), 1);
+    }
+
+    #[test]
+    fn editing_the_first_user_message_starts_from_an_empty_branch() {
+        let root = scratch("edit-first-message");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+        thread.apply_user("u1", "first question");
+        thread.apply_assistant_start("a1", None);
+        thread.apply_text_delta("a1", "first answer");
+        thread.apply_done("a1");
+        thread.agent_messages = vec![Message::user_text("first question")];
+        store.save(&thread).unwrap();
+
+        let restored = store.rewind_before_user_message(&thread, "u1").unwrap();
+        assert!(restored.messages.is_empty());
+        assert!(restored.agent_messages.is_empty());
+        assert!(restored.title.is_none());
+        assert_eq!(restored.provider_id.as_deref(), Some("codex"));
     }
 
     #[test]

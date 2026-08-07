@@ -3345,6 +3345,42 @@ fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<Se
         .and_then(|r| r)
 }
 
+/// Remove a user message and its later branch so the UI can submit an edited
+/// replacement as a fresh turn. Workspace files are intentionally untouched.
+#[tauri::command]
+fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+    state.approvals.clear();
+    state.questions.clear();
+
+    let message_id = message_id.trim().to_string();
+    if message_id.is_empty() {
+        return Err(desktop_err("invalid", "message id is empty"));
+    }
+
+    state
+        .sessions
+        .with_session_mut(|session| -> Result<SessionInfo, String> {
+            let store = open_store(&session.root)?;
+            let restored = store
+                .rewind_before_user_message(&session.thread, &message_id)
+                .map_err(|e| e.to_string())?;
+            restored
+                .assert_provider(&session.provider_id)
+                .map_err(|e| e.to_string())?;
+
+            session.agent.clear_messages();
+            session.agent.messages = restored.agent_messages.clone();
+            session.agent.last_usage = None;
+            session.thread = restored;
+            session.recovery = None;
+            persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
+            Ok(session_info_from(session, None))
+        })
+        .map_err(map_session_err)
+        .and_then(|r| r)
+}
+
 /// Ask the active provider for a compact, persistence-safe checkpoint of the
 /// conversation. The operation occupies the normal turn slot so it cannot race
 /// a send or an approval, but it does not add a visible assistant answer.
@@ -5093,6 +5129,7 @@ pub fn run() {
             new_thread,
             fork_thread,
             rewind_thread,
+            edit_message,
             compact_context,
             delete_thread,
             set_thread_pinned,
