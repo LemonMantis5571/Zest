@@ -15,6 +15,7 @@ import type {
   CommandView,
   AttachmentInput,
   ChatEvent,
+  ChatMessage,
   ContextUsage,
   ExternalAgentCheck,
   ExternalAgentRow,
@@ -99,6 +100,7 @@ export type DesktopBackend = {
   sessionInfo(): Promise<SessionInfo | null>;
   forkThread(): Promise<SessionInfo>;
   rewindThread(checkpointId: string): Promise<SessionInfo>;
+  editMessage(messageId: string): Promise<SessionInfo>;
   compactContext(): Promise<ContextUsage>;
   deleteThread(id: string, projectPath?: string | null): Promise<SessionInfo>;
   setThreadPinned(
@@ -187,6 +189,7 @@ export function createTauriBackend(): DesktopBackend {
     sessionInfo: () => tauriApi.sessionInfo(),
     forkThread: () => tauriApi.forkThread(),
     rewindThread: (checkpointId) => tauriApi.rewindThread(checkpointId),
+    editMessage: (messageId) => tauriApi.editMessage(messageId),
     compactContext: () => tauriApi.compactContext(),
     deleteThread: (id, projectPath) => tauriApi.deleteThread(id, projectPath),
     setThreadPinned: (id, projectPath, pinned) =>
@@ -492,6 +495,14 @@ export function createFixtureBackend(): DesktopBackend {
     async rewindThread() {
       return { ...session };
     },
+    async editMessage(messageId: string) {
+      const index = session.messages.findIndex((message) => message.id === messageId);
+      if (index < 0 || session.messages[index]?.role !== "user") {
+        throw new Error("fixture: user message not found");
+      }
+      session = { ...session, messages: session.messages.slice(0, index) };
+      return { ...session };
+    },
     async compactContext() {
       return this.contextUsage();
     },
@@ -519,6 +530,30 @@ export function createFixtureBackend(): DesktopBackend {
         const lines = attachments.map((a) => `Attached: ${a.name} (${a.detail})`);
         display = display ? `${display}\n\n${lines.join("\n")}` : lines.join("\n");
       }
+      const fixtureAssistantText = `Fixture echo: ${text.trim() || "(attachment)"}`;
+      const fixtureUser: ChatMessage = {
+        id: userId,
+        role: "user",
+        text: display,
+        attachments: attachments?.length
+          ? attachments.map((attachment) => ({
+              name: attachment.name,
+              kind: attachment.kind ?? "file",
+            }))
+          : undefined,
+      };
+      const fixtureAssistant: ChatMessage = {
+        id: assistantId,
+        role: "assistant",
+        text: fixtureAssistantText,
+        thinking: "",
+        tools: [],
+        streaming: false,
+      };
+      session = {
+        ...session,
+        messages: [...session.messages, fixtureUser, fixtureAssistant],
+      };
       chatHandler({ kind: "user", ...id, message_id: userId, text: display });
       chatHandler({
         kind: "assistant_start",
