@@ -1853,6 +1853,14 @@ fn cancel_login(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Marker prefix on every "this folder will not work as a project" failure.
+///
+/// The UI matches on this token instead of sniffing the OS error text. Windows
+/// says "Access is denied.", POSIX says "Permission denied", and matching
+/// neither is exactly how a first-run install-directory failure used to surface
+/// in the picker as an unattributed "Something went wrong. Try again."
+const WORKSPACE_NOT_WRITABLE: &str = "workspace_not_writable";
+
 fn canonicalize_dir(path: PathBuf) -> Result<PathBuf, String> {
     if !path.is_dir() {
         return Err(format!("not a directory: {}", path.display()));
@@ -1860,9 +1868,92 @@ fn canonicalize_dir(path: PathBuf) -> Result<PathBuf, String> {
     path.canonicalize().or(Ok(path))
 }
 
-fn cwd_workspace() -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    canonicalize_dir(cwd)
+/// Can Zest actually create `.zest/` here?
+///
+/// `is_dir` is not enough, and neither is any metadata flag: on Windows the
+/// answer lives in an ACL, and read-only mounts and full disks fail the same
+/// way. Writing a real file is the only probe that agrees with what the session
+/// is about to attempt.
+fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".zest-write-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Where the running executable lives — never a project folder.
+///
+/// A packaged install is handed its own install directory as the working
+/// directory, and that directory is read-only without elevation on every
+/// platform Zest ships to (`C:\Program Files\Zest`, `/Applications`, `/usr/lib`).
+/// Rejecting it by location as well as by writability keeps an elevated or
+/// misconfigured install from quietly filling the program folder with chat
+/// history.
+fn install_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    canonicalize_dir(exe.parent()?.to_path_buf()).ok()
+}
+
+fn is_install_dir(path: &Path) -> bool {
+    install_dir().is_some_and(|dir| path.starts_with(&dir))
+}
+
+/// A candidate is a workspace only if Zest can keep its state there.
+fn usable_workspace(path: PathBuf) -> Option<PathBuf> {
+    let dir = canonicalize_dir(path).ok()?;
+    if is_install_dir(&dir) || !dir_is_writable(&dir) {
+        return None;
+    }
+    Some(dir)
+}
+
+fn cwd_workspace() -> Option<PathBuf> {
+    usable_workspace(std::env::current_dir().ok()?)
+}
+
+/// The folder first run falls back to when the working directory is unusable.
+///
+/// Documents is where someone who did not choose a project expects to find
+/// their own files, and a dedicated subfolder keeps `.zest/` out of its top
+/// level. Created on demand so the very first launch has somewhere to land
+/// instead of dead-ending on the picker.
+fn default_workspace() -> Option<PathBuf> {
+    let base = dirs::document_dir().or_else(dirs::home_dir)?;
+    let root = base.join("Zest");
+    if !root.is_dir() {
+        std::fs::create_dir_all(&root).ok()?;
+    }
+    if !dir_is_writable(&root) {
+        return None;
+    }
+    canonicalize_dir(root).ok()
+}
+
+fn no_writable_workspace_error() -> String {
+    format!(
+        "{WORKSPACE_NOT_WRITABLE}: Zest could not find a project folder it is allowed to write to. \
+         Use Open to choose one inside your user account, such as a folder under Documents."
+    )
+}
+
+/// Explain a storage failure in terms of the folder, not the OS error.
+///
+/// Every caller here is about to create something under `<root>/.zest`, so when
+/// the root is not writable that is the whole story and the raw errno adds
+/// nothing a user can act on.
+fn workspace_write_error(root: &Path, error: impl std::fmt::Display) -> String {
+    if !dir_is_writable(root) {
+        return format!(
+            "{WORKSPACE_NOT_WRITABLE}: Zest cannot save chats in {}. \
+             Use Open to choose a folder you own, such as one under Documents.",
+            display_path(root)
+        );
+    }
+    error.to_string()
 }
 
 fn load_persisted_workspace() -> Option<PathBuf> {
@@ -1927,23 +2018,48 @@ fn remember_workspace(root: &Path) {
     }
 }
 
+/// Pick the project folder, rejecting any candidate Zest cannot write to.
+///
+/// Order matters: an explicit choice beats a remembered one, a remembered one
+/// beats wherever the process happened to start, and Documents/Zest catches the
+/// case where none of those are usable. Every step is writability-checked,
+/// because a candidate that fails only surfaces later as a storage error deep
+/// inside session startup, far from the folder that caused it.
 fn resolve_workspace_root(state: &AppState) -> Result<PathBuf, String> {
     if let Ok(guard) = state.workspace_root.lock() {
         if let Some(root) = guard.as_ref() {
             return Ok(root.clone());
         }
     }
-    if let Some(persisted) = load_persisted_workspace() {
-        if let Ok(mut guard) = state.workspace_root.lock() {
-            *guard = Some(persisted.clone());
-        }
-        return Ok(persisted);
+    let resolved = load_persisted_workspace()
+        .and_then(usable_workspace)
+        .or_else(cwd_workspace)
+        .or_else(default_workspace)
+        .ok_or_else(no_writable_workspace_error)?;
+    if let Ok(mut guard) = state.workspace_root.lock() {
+        *guard = Some(resolved.clone());
     }
-    cwd_workspace()
+    Ok(resolved)
 }
 
 fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String> {
     let root = canonicalize_dir(root)?;
+    // Refuse here rather than at first write: the folder picker is the one
+    // moment the user is already thinking about which folder to use.
+    if is_install_dir(&root) {
+        return Err(format!(
+            "{WORKSPACE_NOT_WRITABLE}: {} is the Zest program folder, not a project. \
+             Choose a folder inside your user account instead.",
+            display_path(&root)
+        ));
+    }
+    if !dir_is_writable(&root) {
+        return Err(format!(
+            "{WORKSPACE_NOT_WRITABLE}: Zest cannot save anything in {}. \
+             Choose a folder you own, such as one under Documents.",
+            display_path(&root)
+        ));
+    }
     persist_workspace(&root)?;
     if let Ok(mut guard) = state.workspace_root.lock() {
         *guard = Some(root.clone());
@@ -1956,7 +2072,7 @@ fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String
 }
 
 fn open_store(root: &std::path::Path) -> Result<ThreadStore, String> {
-    ThreadStore::open(root).map_err(|e| e.to_string())
+    ThreadStore::open(root).map_err(|e| workspace_write_error(root, e))
 }
 
 /// Load the transcript together with its lifecycle projection, then close any
@@ -5091,7 +5207,11 @@ pub fn run() {
             questions: Arc::new(QuestionHub::new()),
             login: Mutex::new(None),
             persist: Mutex::new(None),
-            workspace_root: Mutex::new(load_persisted_workspace()),
+            // Validated here too: seeding the cache with a remembered folder
+            // that has since become unwritable would let it skip the checks in
+            // `resolve_workspace_root` entirely. `None` just means the first
+            // caller resolves it properly.
+            workspace_root: Mutex::new(load_persisted_workspace().and_then(usable_workspace)),
             workspace_config: Mutex::new(None),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
             config_edit: Mutex::new(()),
@@ -5159,6 +5279,89 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zest desktop");
+}
+
+/// The bug these guard: a packaged install starts with its own program folder
+/// as the working directory. First run adopted it as the project, session
+/// startup then failed creating `<root>/.zest/threads`, and the picker showed
+/// that as an unattributed error under the provider row — so a perfectly good
+/// Codex sign-in looked broken.
+#[cfg(test)]
+mod workspace_root_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zest-workspace-{name}-{}", new_id("test")));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn writable_scratch_dir_is_usable() {
+        let dir = scratch("writable");
+        assert!(dir_is_writable(&dir));
+        assert!(usable_workspace(dir).is_some());
+    }
+
+    #[test]
+    fn missing_dir_is_not_a_workspace() {
+        let missing = std::env::temp_dir().join(format!("zest-absent-{}", new_id("test")));
+        assert!(usable_workspace(missing).is_none());
+    }
+
+    #[test]
+    fn probe_leaves_nothing_behind() {
+        let dir = scratch("no-litter");
+        assert!(dir_is_writable(&dir));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    /// The exact first-run trap: the directory the executable lives in is
+    /// rejected on location, so an elevated or writable install cannot quietly
+    /// fill the program folder with chat history either.
+    #[test]
+    fn install_dir_is_never_a_workspace() {
+        let Some(dir) = install_dir() else {
+            return;
+        };
+        assert!(is_install_dir(&dir));
+        assert!(usable_workspace(dir.clone()).is_none());
+        // Subdirectories of the install belong to the install too.
+        assert!(is_install_dir(&dir.join("resources")));
+    }
+
+    #[test]
+    fn default_workspace_is_writable_when_available() {
+        let Some(root) = default_workspace() else {
+            return;
+        };
+        assert!(root.is_dir());
+        assert!(dir_is_writable(&root));
+        assert!(!is_install_dir(&root));
+    }
+
+    /// The UI keys the "choose another folder" guidance off this token, so the
+    /// wording of the OS error must never be what decides whether it appears.
+    #[test]
+    fn workspace_failures_carry_the_ui_token() {
+        assert!(no_writable_workspace_error().starts_with(WORKSPACE_NOT_WRITABLE));
+
+        let unwritable = PathBuf::from(if cfg!(windows) {
+            r"C:\Program Files\Zest\does-not-exist"
+        } else {
+            "/proc/zest-does-not-exist"
+        });
+        let message = workspace_write_error(&unwritable, "Access is denied. (os error 5)");
+        assert!(message.starts_with(WORKSPACE_NOT_WRITABLE), "{message}");
+    }
+
+    /// A writable root means the failure was something else; do not mislabel it.
+    #[test]
+    fn writable_root_keeps_the_underlying_error() {
+        let dir = scratch("real-error");
+        let message = workspace_write_error(&dir, "disk quota exceeded");
+        assert_eq!(message, "disk quota exceeded");
+    }
 }
 
 #[cfg(all(test, feature = "export-bindings"))]

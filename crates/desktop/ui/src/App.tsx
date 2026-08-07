@@ -18,8 +18,10 @@ import {
 import { loadDraft, saveDraft } from "@/lib/drafts";
 import {
   conversationRecovery,
+  isWorkspaceProblem,
   rawInvokeError,
   shouldOfferProviderReconnect,
+  workspaceProblemMessage,
   type ConversationRecovery,
 } from "@/lib/invokeErrors";
 import { isLongTurn } from "@/lib/notificationPolicy";
@@ -171,6 +173,11 @@ function normalizeMessages(raw: ChatMessage[] | undefined): ChatMessage[] {
 }
 
 function formatInvokeError(err: unknown): string {
+  // Ahead of everything else: a folder Zest cannot write in fails whatever it
+  // was asked to do, so the generic classifications below would only describe
+  // the symptom. It also has to outrank the "permission" branch further down,
+  // which says nothing about which folder or how to change it.
+  if (isWorkspaceProblem(err)) return workspaceProblemMessage(err);
   const raw = rawInvokeError(err).toLowerCase();
   if (raw.includes("busy") || raw.includes("already in progress")) {
     return "A turn is already in progress. Stop it before trying again.";
@@ -250,6 +257,19 @@ function isModelUnsupported(err: unknown): boolean {
   );
 }
 
+/**
+ * A picker failure plus the one thing the picker needs to decide from it:
+ * whether the way out is a different folder or a different account.
+ */
+type PickerError = {
+  message: string;
+  workspace: boolean;
+};
+
+function pickerErrorFrom(err: unknown): PickerError {
+  return { message: formatInvokeError(err), workspace: isWorkspaceProblem(err) };
+}
+
 const backend = getBackend();
 
 export default function App() {
@@ -266,7 +286,7 @@ export default function App() {
    * more than the warning gains.
    */
   const [sessionWarning, setSessionWarning] = useState<SessionWarning | null>(null);
-  const [pickerError, setPickerError] = useState<string | null>(null);
+  const [pickerError, setPickerError] = useState<PickerError | null>(null);
   const [continuing, setContinuing] = useState(false);
   const [pendingConversationRecovery, setPendingConversationRecovery] = useState<{
     recovery: ConversationRecovery;
@@ -381,7 +401,10 @@ export default function App() {
         try {
           await enterChatRef.current(row.id);
         } catch {
-          setPickerError("Could not open this provider. Try again.");
+          setPickerError({
+            message: "Could not open this provider. Try again.",
+            workspace: false,
+          });
           setScreen("picker");
         }
         return;
@@ -397,7 +420,7 @@ export default function App() {
       await enterChatRef.current(row.id);
     } catch (err) {
       markProviderVerifyFailed(row.id);
-      setPickerError(formatInvokeError(err));
+      setPickerError(pickerErrorFrom(err));
       setScreen("picker");
     }
   }, []);
@@ -879,7 +902,7 @@ export default function App() {
             measureStartup("session-ready", "boot-effect");
             return;
           } catch (err) {
-            setPickerError(formatInvokeError(err));
+            setPickerError(pickerErrorFrom(err));
             setScreen("picker");
             markStartup("picker-error");
             measureStartup("picker-error", "boot-effect");
@@ -893,7 +916,7 @@ export default function App() {
         markStartup("picker-ready");
         measureStartup("picker-ready", "boot-effect");
       } catch (err) {
-        setPickerError(formatInvokeError(err));
+        setPickerError(pickerErrorFrom(err));
         setScreen("picker");
         markStartup("picker-error");
         measureStartup("picker-error", "boot-effect");
@@ -965,7 +988,7 @@ export default function App() {
       await enterChat(row.id);
     } catch (err) {
       setScreen("picker");
-      setPickerError(formatInvokeError(err));
+      setPickerError(pickerErrorFrom(err));
     } finally {
       setContinuing(false);
     }
@@ -982,7 +1005,7 @@ export default function App() {
       setScreen("waiting");
       startWaitingPoll();
     } catch (err) {
-      setPickerError(formatInvokeError(err));
+      setPickerError(pickerErrorFrom(err));
     }
   }
 
@@ -1007,7 +1030,7 @@ export default function App() {
     try {
       await enterChat(providerId);
     } catch (err) {
-      setPickerError(formatInvokeError(err));
+      setPickerError(pickerErrorFrom(err));
       toast.add({
         type: "error",
         title: "Could not switch provider",
@@ -1369,7 +1392,7 @@ export default function App() {
           try {
             await enterChat(providerId);
           } catch (err) {
-            setPickerError(formatInvokeError(err));
+            setPickerError(pickerErrorFrom(err));
             setScreen("picker");
           }
         } else {
@@ -1741,7 +1764,7 @@ export default function App() {
               try {
                 await enterChat(id);
               } catch (err) {
-                setPickerError(formatInvokeError(err));
+                setPickerError(pickerErrorFrom(err));
                 setScreen("picker");
               }
             }}

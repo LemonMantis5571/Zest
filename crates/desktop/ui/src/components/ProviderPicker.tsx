@@ -14,7 +14,7 @@ type Props = {
   providers: ProviderRow[];
   selectedId: string | null;
   workspacePath: string | null;
-  error: string | null;
+  error: { message: string; workspace: boolean } | null;
   onSelect: (id: string) => void;
   onContinue: () => void;
   onConnect: () => void;
@@ -93,6 +93,32 @@ export function ProviderPicker({
           Open
         </Button>
       </div>
+
+      {/*
+        A folder problem belongs against the folder, not under the provider
+        list. As a bare red line beneath the Codex row it read as "Codex is
+        broken" — while the actual remedy was the Open button above, which
+        nobody had reason to connect to the failure.
+      */}
+      {error?.workspace ? (
+        <div className="mb-5 rounded-lg border border-destructive/40 bg-destructive/10 p-3">
+          <div className="text-xs font-medium text-destructive">
+            This folder cannot be used as a project
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-foreground/80">{error.message}</p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="mt-2.5 w-full"
+            disabled={continuing}
+            onClick={onOpenFolder}
+          >
+            <FolderOpenIcon className="size-3.5" />
+            Choose a different folder
+          </Button>
+        </div>
+      ) : null}
 
       <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         Available on this machine
@@ -181,7 +207,9 @@ export function ProviderPicker({
         })}
       </ul>
 
-      {error ? <p className="mt-3 text-xs text-destructive">{error}</p> : null}
+      {error && !error.workspace ? (
+        <p className="mt-3 text-xs text-destructive">{error.message}</p>
+      ) : null}
 
       {/*
         Without this the picker is a dead end for anyone who has no CLI sign-in:
