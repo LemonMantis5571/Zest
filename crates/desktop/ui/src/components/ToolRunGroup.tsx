@@ -14,8 +14,6 @@ type Props = {
     decision: ApprovalChoice
   ) => Promise<void>;
   onOpenDiff?: (path: string, diff: string) => void;
-  /** The one pending approval allowed to render a full card. */
-  activeApprovalId?: string | null;
 };
 
 /**
@@ -30,7 +28,6 @@ export function ToolRunGroup({
   summary,
   onResolveApproval,
   onOpenDiff,
-  activeApprovalId,
 }: Props) {
   const hasChanges = summary.added > 0 || summary.removed > 0;
   // Completed edits contain the user's most important review surface. Keep
@@ -54,9 +51,6 @@ export function ToolRunGroup({
             <ToolCallRow
               key={tool.id}
               tool={tool}
-              queued={
-                tool.status === "awaiting_approval" && tool.id !== activeApprovalId
-              }
               onResolveApproval={onResolveApproval}
               onOpenDiff={onOpenDiff}
             />

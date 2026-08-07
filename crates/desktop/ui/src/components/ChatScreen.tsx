@@ -417,11 +417,6 @@ const ChatMessageRow = memo(function ChatMessageRow({
     );
   }
 
-  // Only the oldest pending approval gets a full card; the rest queue behind it
-  // as one-liners rather than stacking a screenful of identical button rows.
-  const activeApprovalToolId =
-    msg.tools.find((tool) => tool.status === "awaiting_approval")?.id ?? null;
-
   const structuredQuestion = isLast ? msg.question : undefined;
   const planningQuestion =
     structuredQuestion ?? (isLast ? planningQuestionFor(msg) : null);
@@ -446,7 +441,6 @@ const ChatMessageRow = memo(function ChatMessageRow({
                     key={`group-${run.tools[0].id}`}
                     tools={run.tools}
                     summary={run.summary}
-                    activeApprovalId={activeApprovalToolId}
                     onResolveApproval={onResolveApproval}
                     onOpenDiff={onOpenDiff}
                   />
@@ -454,10 +448,6 @@ const ChatMessageRow = memo(function ChatMessageRow({
                   <ToolCallRow
                     key={run.tool.id}
                     tool={run.tool}
-                    queued={
-                      run.tool.status === "awaiting_approval" &&
-                      run.tool.id !== activeApprovalToolId
-                    }
                     onResolveApproval={onResolveApproval}
                     onOpenDiff={onOpenDiff}
                   />
@@ -682,6 +672,22 @@ export function ChatScreen({
     return [compacting ? "compacting" : "", ...activeTools].filter(Boolean).join("|");
   }, [compacting, messages]);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
+  /**
+   * Every tool still waiting on a decision, oldest first.
+   *
+   * Flattened across messages because the card is anchored to the composer, not
+   * to the message that happens to own the call — a turn can leave approvals in
+   * more than one assistant message.
+   */
+  const pendingApprovals = useMemo(
+    () =>
+      messages.flatMap((message) =>
+        message.role === "assistant"
+          ? message.tools.filter((tool) => tool.status === "awaiting_approval")
+          : []
+      ),
+    [messages]
+  );
 
   const startEditingMessage = useCallback(
     (messageId: string, text: string) => {
@@ -1044,6 +1050,38 @@ export function ChatScreen({
               <MessageScrollerButton />
             </MessageScroller>
           </MessageScrollerProvider>
+
+          {/*
+            One approval card, in one place, for the whole conversation.
+            Anchored above the composer rather than inline in the transcript:
+            inline it scrolled away mid-decision, and every pending call drew
+            another copy of the same three buttons. The transcript still shows
+            each pending call as a one-line "Awaiting approval" row, so the
+            history stays readable — it just does not ask twice.
+          */}
+          {pendingApprovals.length > 0 ? (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-[8.5rem]">
+              <div className="pointer-events-auto mx-auto w-full max-w-[var(--chat-max)] rounded-xl border border-amber-500/30 bg-[color-mix(in_srgb,var(--card)_94%,transparent)] p-2 shadow-lg backdrop-blur-xl">
+                <div className="flex items-baseline justify-between gap-2 px-1 pb-1.5">
+                  <span className="text-[10px] font-medium uppercase tracking-wide text-amber-400/90">
+                    Needs your approval
+                  </span>
+                  {pendingApprovals.length > 1 ? (
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                      1 of {pendingApprovals.length}
+                    </span>
+                  ) : null}
+                </div>
+                <ToolCallRow
+                  key={pendingApprovals[0].id}
+                  tool={pendingApprovals[0]}
+                  asCard
+                  onResolveApproval={onResolveApproval}
+                  onOpenDiff={openDiff}
+                />
+              </div>
+            </div>
+          ) : null}
 
           <Composer
             approvalMode={approvalMode}

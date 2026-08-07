@@ -22,21 +22,22 @@ type Props = {
   ) => Promise<void>;
   onOpenDiff?: (path: string, diff: string) => void;
   /**
-   * Another approval is already asking. Render a one-line placeholder instead
-   * of a second full card.
+   * Render the full approval card with its decision buttons.
    *
-   * Approvals are answered one at a time, so a queue of full cards — each with
-   * its own Deny / Allow for session / Allow once — stacked up the transcript
-   * and pushed the conversation off screen while offering no extra choice.
+   * Off by default, which means the transcript shows a pending approval as a
+   * one-line row and nothing else. The card lives in one fixed place above the
+   * composer instead: as an inline element it moved with the scroll, drew a
+   * fresh copy of Deny / Allow for session / Allow once per pending call, and
+   * pushed the conversation off screen while offering no extra choice.
    */
-  queued?: boolean;
+  asCard?: boolean;
 };
 
 /**
  * Compact tool row — quiet chrome, expands for detail.
  * Rows with a diff open the full DiffViewer on click.
  */
-export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, queued }: Props) {
+export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Props) {
   const awaiting = tool.status === "awaiting_approval";
   const [busy, setBusy] = useState<ApprovalChoice | null>(null);
   const [open, setOpen] = useState(false);
@@ -62,13 +63,13 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, queued }: Pro
   const isCommand = tool.name === "bash";
   const isDelegation = tool.name === "delegate_external";
 
-  if (awaiting && queued) {
+  if (awaiting && !asCard) {
     return (
       <div
         data-tool-id={tool.id}
-        className="flex min-h-8 w-full max-w-full items-center gap-2 rounded-lg px-2 py-1 text-left opacity-70"
+        className="flex min-h-8 w-full max-w-full items-center gap-2 rounded-lg px-2 py-1 text-left"
       >
-        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-muted/50 text-muted-foreground">
+        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-amber-500/15 text-amber-400/90">
           {isCommand || isDelegation ? (
             <TerminalIcon className="size-3" />
           ) : (
@@ -79,7 +80,7 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, queued }: Pro
           text={tool.path || tool.summary || tool.name}
           className="min-w-0 flex-1 font-mono text-[11.5px] text-muted-foreground/75"
         />
-        <span className="shrink-0 text-[10px] text-muted-foreground/70">Queued</span>
+        <span className="shrink-0 text-[10px] text-amber-400/80">Awaiting approval</span>
       </div>
     );
   }
