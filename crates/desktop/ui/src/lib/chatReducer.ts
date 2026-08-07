@@ -49,6 +49,17 @@ export function joinThinkingStream(prev: string, delta: string): string {
   if (/\*\*$/.test(prev) && /^\*\*/.test(delta)) {
     return `${prev}\n\n${delta}`;
   }
+  // A `**` chunk arriving after a finished sentence is the next titled step,
+  // not emphasis inside the old one. Only the `**`-meets-`**` case was handled,
+  // so a step following prose glued into `…moving on.**Next title**`: the
+  // heading rendered inline mid-paragraph instead of starting a block, and
+  // nothing downstream could tell the steps apart to count or summarise them.
+  //
+  // Gated on sentence-ending punctuation rather than "any non-space", so
+  // genuine inline emphasis (`the**gateway**`) is still left alone.
+  if (/^\*\*/.test(delta) && /[.!?:]$/.test(prev)) {
+    return `${prev}\n\n${delta}`;
+  }
   if (/\s$/.test(prev) || /^\s/.test(delta)) return prev + delta;
   if (/[A-Za-z0-9)]$/.test(prev) && /^[A-Z]/.test(delta)) {
     return `${prev}\n\n${delta}`;

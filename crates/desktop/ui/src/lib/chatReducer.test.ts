@@ -528,6 +528,26 @@ describe("joinThinkingStream", () => {
     assert.equal(joinThinkingStream("done", "Next"), "done\n\nNext");
   });
 
+  it("starts a new block when a title follows a finished sentence", () => {
+    // The column bug: each summarized step ends in prose, so the next
+    // `**Title**` glued onto it and rendered inline instead of as a heading —
+    // leaving nothing able to tell one step from the next.
+    assert.equal(
+      joinThinkingStream("Working through the details.", "**Refining eligibility logic**"),
+      "Working through the details.\n\n**Refining eligibility logic**"
+    );
+    assert.equal(
+      joinThinkingStream("Next:", "**Adding validation**"),
+      "Next:\n\n**Adding validation**"
+    );
+  });
+
+  it("leaves genuine inline emphasis alone", () => {
+    // No sentence boundary, so this is emphasis inside the current sentence.
+    assert.equal(joinThinkingStream("the", "**gateway**"), "the**gateway**");
+    assert.equal(joinThinkingStream("check the ", "**gateway**"), "check the **gateway**");
+  });
+
   it("handles empty sides", () => {
     assert.equal(joinThinkingStream("", "**A**"), "**A**");
     assert.equal(joinThinkingStream("**A**", ""), "**A**");
