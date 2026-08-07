@@ -61,6 +61,22 @@ function MessageScrollerContent({
   )
 }
 
+/**
+ * No `content-visibility: auto` here, deliberately.
+ *
+ * Paired with `contain-intrinsic-size: auto 10rem` it made every skipped message
+ * report a flat 160px instead of its real height. Measured on a single streaming
+ * turn, the viewport's scrollHeight was 649px while the content actually
+ * occupied 3728px — the assistant message alone was 3307px collapsed into a
+ * 160px placeholder. Each time the browser flipped a message between skipped and
+ * rendered, the scroll height swung by thousands of pixels: the transcript
+ * jumped under the cursor, the scrollbar resized on almost every frame, and
+ * autoscroll chased a target that kept moving.
+ *
+ * A fixed intrinsic estimate cannot work here — chat messages range from one
+ * line to thousands of pixels — and the render cost it was buying is already
+ * covered by the per-block memoization in `Markdown`.
+ */
 function MessageScrollerItem({
   className,
   scrollAnchor = false,
@@ -70,10 +86,7 @@ function MessageScrollerItem({
     <MessageScrollerPrimitive.Item
       data-slot="message-scroller-item"
       scrollAnchor={scrollAnchor}
-      className={cn(
-        "min-w-0 shrink-0 [contain-intrinsic-size:auto_10rem] [content-visibility:auto]",
-        className
-      )}
+      className={cn("min-w-0 shrink-0", className)}
       {...props}
     />
   )

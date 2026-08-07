@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronRightIcon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
@@ -26,6 +27,7 @@ import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
 import { looksLikeDocument } from "@/lib/documentShape";
 import { buildablePlanId } from "@/lib/planActions";
 import { planningQuestionFor } from "@/lib/planningQuestion";
+import { lastThinkingLine, thinkingSummaryLabel } from "@/lib/thinkingSummary";
 import { Markdown } from "@/components/Markdown";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
 import { SettingsPanel } from "@/components/SettingsPanel";
@@ -243,6 +245,82 @@ function MessageEditForm({
 }
 
 /**
+ * The reasoning stream, as one line instead of a column.
+ *
+ * Summarized thinking arrives as a run of `**Title**` blocks. Rendering all of
+ * them stacked a screen-tall wall of headings above the answer and pushed the
+ * reply itself out of view — so only the newest line shows while the turn runs,
+ * and everything stays reachable behind the disclosure.
+ *
+ * Collapsed by default after the turn settles too: by then the answer is what
+ * the reader wants, and the reasoning is reference material.
+ */
+function ThinkingTrace({
+  thinking,
+  streaming,
+  hasText,
+}: {
+  thinking: string;
+  streaming: boolean;
+  hasText: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const headline = useMemo(
+    () => (streaming ? lastThinkingLine(thinking) : thinkingSummaryLabel(thinking)),
+    [streaming, thinking]
+  );
+  const working = streaming && !hasText;
+
+  return (
+    <div className="min-w-0 text-xs text-[#8a8f98]">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        {working ? (
+          <span className="shrink-0">
+            <ZestPulse size={14} />
+          </span>
+        ) : (
+          <ChevronRightIcon
+            className={cn(
+              "size-3 shrink-0 text-[#6f747c] transition-transform duration-200",
+              expanded && "rotate-90"
+            )}
+            aria-hidden
+          />
+        )}
+        {/*
+          The line swaps content in place as steps arrive. Keyed on the text so
+          each new step fades in rather than snapping, and truncated to one line
+          so a long title cannot reintroduce the wall of text this replaced.
+        */}
+        <span
+          key={headline}
+          className={cn(
+            "min-w-0 flex-1 truncate animate-in fade-in duration-300",
+            working && "shimmer-text"
+          )}
+        >
+          {headline}
+        </span>
+      </button>
+
+      {expanded ? (
+        <Markdown
+          streaming={streaming}
+          className="mt-1 border-l border-border/60 pl-3 text-xs text-[#8a8f98] [&_a]:text-[#6b86d4] [&_p]:mb-1.5 [&_p]:leading-relaxed [&_p]:text-[#8a8f98] [&_strong]:font-medium [&_strong]:text-[#9aa0a8]"
+        >
+          {thinking}
+        </Markdown>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * Keep settled messages out of the streaming render path. Appending a delta
  * still updates the active row, but unchanged rows now retain their existing
  * React subtree instead of rebuilding every tool card and Markdown document.
@@ -339,6 +417,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
     );
   }
 
+  // Only the oldest pending approval gets a full card; the rest queue behind it
+  // as one-liners rather than stacking a screenful of identical button rows.
+  const activeApprovalToolId =
+    msg.tools.find((tool) => tool.status === "awaiting_approval")?.id ?? null;
+
   const structuredQuestion = isLast ? msg.question : undefined;
   const planningQuestion =
     structuredQuestion ?? (isLast ? planningQuestionFor(msg) : null);
@@ -363,6 +446,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
                     key={`group-${run.tools[0].id}`}
                     tools={run.tools}
                     summary={run.summary}
+                    activeApprovalId={activeApprovalToolId}
                     onResolveApproval={onResolveApproval}
                     onOpenDiff={onOpenDiff}
                   />
@@ -370,6 +454,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
                   <ToolCallRow
                     key={run.tool.id}
                     tool={run.tool}
+                    queued={
+                      run.tool.status === "awaiting_approval" &&
+                      run.tool.id !== activeApprovalToolId
+                    }
                     onResolveApproval={onResolveApproval}
                     onOpenDiff={onOpenDiff}
                   />
@@ -379,29 +467,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
           ) : null}
 
           {msg.thinking ? (
-            <Marker
-              role="status"
-              className="items-start gap-2 border-0 bg-transparent px-0 py-0.5 text-xs text-[#8a8f98]"
-            >
-              {msg.streaming && !msg.text ? (
-                <MarkerIcon className="mt-0.5">
-                  <ZestPulse size={14} />
-                </MarkerIcon>
-              ) : null}
-              <MarkerContent
-                className={cn(
-                  "min-w-0 text-[#8a8f98]",
-                  msg.streaming && !msg.text && "shimmer-text"
-                )}
-              >
-                <Markdown
-                  streaming={msg.streaming}
-                  className="text-xs text-[#8a8f98] [&_a]:text-[#6b86d4] [&_p]:mb-1.5 [&_p]:leading-relaxed [&_p]:text-[#8a8f98] [&_strong]:font-medium [&_strong]:text-[#9aa0a8]"
-                >
-                  {msg.thinking}
-                </Markdown>
-              </MarkerContent>
-            </Marker>
+            <ThinkingTrace thinking={msg.thinking} streaming={msg.streaming} hasText={Boolean(msg.text)} />
           ) : null}
 
           {planningQuestion ? (
@@ -569,15 +635,34 @@ export function ChatScreen({
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [workbenchAutoOpened, setWorkbenchAutoOpened] = useState(false);
   const lastAutoWorkbenchKey = useRef("");
+  /**
+   * The user closed the Workbench, so stop opening it for them.
+   *
+   * Auto-open keys off the set of running tools, which changes on every tool
+   * call — so dismissing it only lasted until the next one, and a working turn
+   * reopened the panel over and over. Opening it by hand clears this, because
+   * that is the user asking for the automatic behaviour back.
+   */
+  const workbenchDismissed = useRef(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
   const [editingMessageBusy, setEditingMessageBusy] = useState(false);
   const closeWorkbench = useCallback(() => {
+    workbenchDismissed.current = true;
     setWorkbenchOpen(false);
     setWorkbenchAutoOpened(false);
     requestAnimationFrame(() => {
       document.getElementById("workbench-toggle")?.focus();
+    });
+  }, []);
+  /** Manual toggle — opening by hand opts back into auto-open. */
+  const toggleWorkbench = useCallback(() => {
+    setWorkbenchAutoOpened(false);
+    setWorkbenchOpen((value) => {
+      const next = !value;
+      workbenchDismissed.current = !next;
+      return next;
     });
   }, []);
   const openDiff = useCallback(
@@ -637,6 +722,7 @@ export function ChatScreen({
     }
     if (lastAutoWorkbenchKey.current === activeWorkbenchKey) return;
     lastAutoWorkbenchKey.current = activeWorkbenchKey;
+    if (workbenchDismissed.current) return;
     setWorkbenchAutoOpened(true);
     setWorkbenchOpen(true);
   }, [activeWorkbenchKey]);
@@ -663,10 +749,7 @@ export function ChatScreen({
         id: "toggle-workbench",
         label: workbenchOpen ? "Close workbench" : "Open workbench",
         description: "Inspect activity, outline, and recovery checkpoints",
-        run: () => {
-          setWorkbenchAutoOpened(false);
-          setWorkbenchOpen((value) => !value);
-        },
+        run: toggleWorkbench,
       },
       {
         id: "open-provider",
@@ -686,7 +769,7 @@ export function ChatScreen({
         },
       },
     ],
-    [onNewChat, sending, workbenchOpen]
+    [onNewChat, sending, toggleWorkbench, workbenchOpen]
   );
 
   // A bump means "open the User section". Zero is the initial value, so the
@@ -837,10 +920,7 @@ export function ChatScreen({
               aria-controls="workbench-panel"
               aria-expanded={workbenchOpen}
               id="workbench-toggle"
-              onClick={() => {
-                setWorkbenchAutoOpened(false);
-                setWorkbenchOpen((value) => !value);
-              }}
+              onClick={toggleWorkbench}
             >
               <PanelRightOpenIcon aria-hidden="true" />
             </Button>

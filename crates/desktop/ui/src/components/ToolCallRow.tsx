@@ -21,13 +21,22 @@ type Props = {
     decision: ApprovalChoice
   ) => Promise<void>;
   onOpenDiff?: (path: string, diff: string) => void;
+  /**
+   * Another approval is already asking. Render a one-line placeholder instead
+   * of a second full card.
+   *
+   * Approvals are answered one at a time, so a queue of full cards — each with
+   * its own Deny / Allow for session / Allow once — stacked up the transcript
+   * and pushed the conversation off screen while offering no extra choice.
+   */
+  queued?: boolean;
 };
 
 /**
  * Compact tool row — quiet chrome, expands for detail.
  * Rows with a diff open the full DiffViewer on click.
  */
-export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
+export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, queued }: Props) {
   const awaiting = tool.status === "awaiting_approval";
   const [busy, setBusy] = useState<ApprovalChoice | null>(null);
   const [open, setOpen] = useState(false);
@@ -52,6 +61,28 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff }: Props) {
   // file; for it, `path` carries the command line verbatim.
   const isCommand = tool.name === "bash";
   const isDelegation = tool.name === "delegate_external";
+
+  if (awaiting && queued) {
+    return (
+      <div
+        data-tool-id={tool.id}
+        className="flex min-h-8 w-full max-w-full items-center gap-2 rounded-lg px-2 py-1 text-left opacity-70"
+      >
+        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-muted/50 text-muted-foreground">
+          {isCommand || isDelegation ? (
+            <TerminalIcon className="size-3" />
+          ) : (
+            <FilePenLineIcon className="size-3" />
+          )}
+        </span>
+        <TruncateWithHover
+          text={tool.path || tool.summary || tool.name}
+          className="min-w-0 flex-1 font-mono text-[11.5px] text-muted-foreground/75"
+        />
+        <span className="shrink-0 text-[10px] text-muted-foreground/70">Queued</span>
+      </div>
+    );
+  }
 
   if (awaiting) {
     return (
