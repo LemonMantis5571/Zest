@@ -1125,6 +1125,25 @@ export default function App() {
     }
   }
 
+  async function onEditMessage(messageId: string, text: string) {
+    if (sendingRef.current || compactionInFlightRef.current) return;
+    const editedText = text.trim();
+    if (!editedText) return;
+
+    try {
+      const info = await backend.editMessage(messageId);
+      applySession(info, { clearDraft: true });
+      await submitTurn(editedText, [], { restoreDraftOnFailure: true });
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not edit message",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
+  }
+
   async function onDeleteThread(id: string, projectPath: string) {
     try {
       const deletedActive = session?.threadId === id;
@@ -1682,6 +1701,7 @@ export default function App() {
             optionsDisabled={optionsUpdating}
             onDraftChange={setDraft}
             onSend={onSend}
+            onEditMessage={onEditMessage}
             onStop={onStop}
             onNewChat={onNewChat}
             onForkThread={onForkThread}

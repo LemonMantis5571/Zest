@@ -184,6 +184,10 @@ export function rewindThread(checkpointId: string) {
   return invoke<SessionInfo>("rewind_thread", { checkpointId });
 }
 
+export function editMessage(messageId: string) {
+  return invoke<SessionInfo>("edit_message", { messageId });
+}
+
 export function compactContext() {
   return invoke<ContextUsage>("compact_context");
 }
