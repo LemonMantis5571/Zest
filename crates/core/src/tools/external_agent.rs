@@ -497,6 +497,61 @@ async fn run_current(
     Ok(run)
 }
 
+/// Git repositories sitting directly inside `root`.
+///
+/// Only one level down, and deliberately so. `git rev-parse` searches *upward*
+/// from the working directory, so a project folder that merely contains
+/// repositories — `HR Updated/{backend,frontend}`, a very ordinary layout —
+/// looks exactly like a folder with no version control at all. One level is
+/// enough to tell those two cases apart; crawling deeper would cost a full
+/// filesystem walk to say the same thing.
+fn contained_repositories(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().join(".git").exists())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `["a"] -> "a"`, `["a", "b"] -> "a and b"`, `["a", "b", "c"] -> "a, b, and c"`.
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+/// Why isolation cannot start here, and what the user can actually do about it.
+///
+/// The previous wording named neither the folder nor a way forward, so a
+/// container-of-repositories workspace dead-ended on advice ("choose
+/// workspace = current") whose consequences were not stated.
+fn no_repository_error(root: &Path, contained: &[String]) -> String {
+    let escape_hatch = "or set workspace = \"current\" for this agent to let it edit \
+         the project directly instead of returning a diff";
+    if contained.is_empty() {
+        return format!(
+            "delegation runs in an isolated Git worktree, and {} is not a Git repository. \
+             Run `git init` there, open a project folder that is a repository, {escape_hatch}.",
+            root.display()
+        );
+    }
+    format!(
+        "delegation runs in an isolated Git worktree, and {} is not a Git repository — \
+         though {} inside it {}. Open one of those as the project folder, {escape_hatch}.",
+        root.display(),
+        join_names(contained),
+        if contained.len() == 1 { "is" } else { "are" }
+    )
+}
+
 async fn run_isolated(
     root: &Path,
     config: &ExternalAgentConfig,
@@ -504,9 +559,7 @@ async fn run_isolated(
 ) -> Result<ExternalAgentRun, String> {
     let base = git_output(root, &["rev-parse", "HEAD"])
         .await
-        .map_err(|_| {
-            "isolated external agents require a Git repository; choose workspace = current only when you accept direct project changes".to_string()
-        })?;
+        .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
 
     let temp = tempfile::tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
     let worktree = temp.path().join("workspace");
@@ -2213,6 +2266,87 @@ fn clip(value: &str) -> String {
     }
     let clipped: String = value.chars().take(MAX_ERROR_CHARS - 1).collect();
     format!("{clipped}…")
+}
+
+/// The reported dead end: a project folder holding `backend/` and `frontend/`,
+/// each its own repository. `git rev-parse` only looks upward, so the container
+/// reads as "no version control" and delegation refused without saying that the
+/// repositories were right there, one level down.
+#[cfg(test)]
+mod isolation_precondition_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zest-isolation-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn repo_at(root: &Path, name: &str) {
+        std::fs::create_dir_all(root.join(name).join(".git")).unwrap();
+    }
+
+    #[test]
+    fn finds_repositories_one_level_down_and_sorts_them() {
+        let root = scratch("contained");
+        repo_at(&root, "frontend");
+        repo_at(&root, "backend");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+
+        assert_eq!(
+            contained_repositories(&root),
+            vec!["backend".to_string(), "frontend".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_plain_folder_reports_nothing() {
+        let root = scratch("empty");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        assert!(contained_repositories(&root).is_empty());
+        // An unreadable or missing root must answer "none", never panic.
+        assert!(contained_repositories(&root.join("absent")).is_empty());
+    }
+
+    #[test]
+    fn the_error_names_the_repositories_it_found() {
+        let root = Path::new("/projects/HR Updated");
+        let message = no_repository_error(root, &["backend".to_string(), "frontend".to_string()]);
+        assert!(message.contains("HR Updated"), "{message}");
+        assert!(message.contains("backend and frontend"), "{message}");
+        assert!(
+            message.contains("Open one of those as the project folder"),
+            "{message}"
+        );
+        // The escape hatch has to state its consequence, not just its name.
+        assert!(message.contains("edit the project directly"), "{message}");
+    }
+
+    #[test]
+    fn with_no_repositories_it_suggests_creating_one() {
+        let message = no_repository_error(Path::new("/tmp/plain"), &[]);
+        assert!(message.contains("git init"), "{message}");
+        assert!(!message.contains("inside it"), "{message}");
+    }
+
+    #[test]
+    fn names_read_as_a_sentence() {
+        assert_eq!(join_names(&[]), "");
+        assert_eq!(join_names(&["api".into()]), "api");
+        assert_eq!(join_names(&["api".into(), "web".into()]), "api and web");
+        assert_eq!(
+            join_names(&["api".into(), "web".into(), "infra".into()]),
+            "api, web, and infra"
+        );
+    }
+
+    #[test]
+    fn a_single_repository_stays_grammatical() {
+        let message = no_repository_error(Path::new("/tmp/one"), &["api".to_string()]);
+        assert!(message.contains("api inside it is"), "{message}");
+    }
 }
 
 #[cfg(test)]
