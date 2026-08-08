@@ -192,7 +192,11 @@ impl Agent {
         let completion = self.provider.stream_turn(&request, &mut sink).await?;
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
-                ledger.record(self.provider.id(), &completion);
+                ledger.record(
+                    self.provider.id(),
+                    billed_model(&request.model, completion.served_model.as_deref()),
+                    &completion,
+                );
             }
         }
 
@@ -326,7 +330,11 @@ impl Agent {
             // staged wire history. Accounting must never abort a paid-for turn.
             if let Some(ledger) = &self.ledger {
                 if let Ok(mut ledger) = ledger.lock() {
-                    ledger.record(self.provider.id(), &completion);
+                    ledger.record(
+                        self.provider.id(),
+                        billed_model(&request.model, completion.served_model.as_deref()),
+                        &completion,
+                    );
                 }
             }
             last_usage = Some(completion.usage.clone());
@@ -863,6 +871,23 @@ impl ToolCallOutcome {
 }
 
 /// Short one-line preview for UI / CLI tool result markers.
+/// Which model a turn is billed to.
+///
+/// The requested name, unless the endpoint served something genuinely different.
+///
+/// Not simply `served_model`: providers routinely answer an alias with its dated
+/// build, and billing those apart would split one model across two ledger rows
+/// while leaving both unmatched by a price book keyed on the alias. `models_agree`
+/// already draws that line for the substitution warning, so accounting draws it
+/// the same way — one rule, one place. A real substitution does bill to what ran,
+/// because that is what spent the money.
+fn billed_model<'a>(requested: &'a str, served: Option<&'a str>) -> &'a str {
+    match served {
+        Some(served) if !models_agree(requested, served) => served,
+        _ => requested,
+    }
+}
+
 /// Whether a served model name is the one that was requested.
 ///
 /// Deliberately loose. Providers routinely answer with a more specific name than
@@ -920,6 +945,38 @@ fn redact_sensitive_staged(messages: Vec<Message>, sensitive_ids: &[String]) -> 
         }
     }
     out
+}
+
+#[cfg(test)]
+mod billing_tests {
+    use super::billed_model;
+
+    #[test]
+    fn a_dated_build_bills_to_the_alias_that_was_asked_for() {
+        // Otherwise one model becomes two ledger rows, and neither matches a
+        // price book keyed on the alias.
+        assert_eq!(
+            billed_model("claude-opus-5", Some("claude-opus-5-20260101")),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            billed_model("gpt-5.6-sol", Some("gpt-5.6-sol")),
+            "gpt-5.6-sol"
+        );
+    }
+
+    #[test]
+    fn a_real_substitution_bills_to_what_actually_ran() {
+        assert_eq!(
+            billed_model("claude-opus-5", Some("claude-haiku-4-5")),
+            "claude-haiku-4-5"
+        );
+    }
+
+    #[test]
+    fn a_silent_endpoint_bills_to_the_request() {
+        assert_eq!(billed_model("gpt-5.6-sol", None), "gpt-5.6-sol");
+    }
 }
 
 #[cfg(test)]

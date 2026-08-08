@@ -1,4 +1,4 @@
-import { ArrowLeftIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ type Props = {
   providerLabel?: string | null;
   onBack: () => void;
   onEditProfile: () => void;
+  onOpenUsage: () => void;
 };
 
 /** Which number the heatmap is colouring. */
@@ -20,7 +21,13 @@ type Metric = "activity" | "tokens";
 const WEEKS = 27;
 const DAY_MS = 86_400_000;
 
-export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }: Props) {
+export function ProfileScreen({
+  profile,
+  providerLabel,
+  onBack,
+  onEditProfile,
+  onOpenUsage,
+}: Props) {
   const [stats, setStats] = useState<ProfileStats | null>(null);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [skillCount, setSkillCount] = useState<number | null>(null);
@@ -164,7 +171,15 @@ export function ProfileScreen({ profile, providerLabel, onBack, onEditProfile }:
           />
         </Panel>
 
-        <Panel title="Zest tokens by provider">
+        <Panel
+          title="Zest tokens by provider"
+          action={
+            <Button type="button" variant="ghost" size="sm" onClick={onOpenUsage}>
+              Full report
+              <ArrowRightIcon className="size-3.5" />
+            </Button>
+          }
+        >
           {usage?.providers.length ? (
             usage.providers.map((p) => (
               <Row
@@ -373,10 +388,21 @@ function describe(cell: Cell, metric: Metric): string {
   return `${when} — ${chats} chat${chats === 1 ? "" : "s"}, ${messages} messages`;
 }
 
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+function Panel({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section>
-      <h2 className="m-0 mb-2 text-[13px] font-semibold tracking-[-0.1px]">{title}</h2>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h2 className="m-0 text-[13px] font-semibold tracking-[-0.1px]">{title}</h2>
+        {action}
+      </div>
       <div className="flex flex-col">{children}</div>
     </section>
   );
