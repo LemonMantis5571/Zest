@@ -24,8 +24,35 @@ export type ToolRunSummary = {
   label: string;
 };
 
-/** Below this a group costs more attention than the rows it replaces. */
+/**
+ * Below this a group costs more attention than the rows it replaces, *while the
+ * turn is still working*.
+ *
+ * Kept high on purpose during a turn: rows folding away underneath you as each
+ * call lands makes it hard to follow what the model is doing.
+ */
 export const COLLAPSE_THRESHOLD = 5;
+
+/**
+ * The threshold once every tool in the message has finished.
+ *
+ * A finished turn is something you scroll past, not something you watch, so the
+ * bar for folding drops to "more than one row". Two is the floor rather than
+ * one because "Ran 1 lookup" is longer than the row it would replace and hides
+ * which file was read.
+ */
+export const SETTLED_COLLAPSE_THRESHOLD = 2;
+
+/**
+ * The threshold to group this message's tools at.
+ *
+ * Keyed on whether anything is still live rather than on the turn's sending
+ * flag: tools routinely finish while the assistant is still writing its reply,
+ * and by then the tool list is done and can be folded.
+ */
+export function collapseThresholdFor(tools: ToolPart[]): number {
+  return tools.every(isSettled) ? SETTLED_COLLAPSE_THRESHOLD : COLLAPSE_THRESHOLD;
+}
 
 const WRITE_TOOLS = new Set(["write_file", "edit_file"]);
 

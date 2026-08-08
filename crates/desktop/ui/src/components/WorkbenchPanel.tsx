@@ -20,7 +20,6 @@ import type { ChatMessage, SessionInfo, WorkspaceReview } from "@/lib/types";
 
 type Props = {
   open: boolean;
-  autoOpened?: boolean;
   session: SessionInfo;
   messages: ChatMessage[];
   sending: boolean;
@@ -78,7 +77,6 @@ function messagePreview(message: ChatMessage) {
 
 export function WorkbenchPanel({
   open,
-  autoOpened = false,
   session,
   messages,
   sending,
@@ -98,7 +96,9 @@ export function WorkbenchPanel({
 
   useEffect(() => {
     if (!open) return;
-    if (!autoOpened) panelRef.current?.focus();
+    // Always focus now: the panel only opens because someone asked for it, so
+    // moving focus into it is following the user rather than stealing from them.
+    panelRef.current?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -109,7 +109,7 @@ export function WorkbenchPanel({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [autoOpened, open, onClose]);
+  }, [open, onClose]);
 
   const tasks = useMemo(
     () =>
@@ -186,22 +186,22 @@ export function WorkbenchPanel({
   if (!open) return null;
 
   return (
+    // Non-modal: the panel floats over the transcript but claims none of it.
+    //
+    // There used to be a transparent full-size button here to catch clicks
+    // outside. It also caught every wheel event, so the transcript could not be
+    // scrolled while the panel was open — the page looked frozen. A review
+    // surface has no business freezing the thing being reviewed, so the panel
+    // is dismissed by its own close button, Escape, or the toggle, and the
+    // wrapper stays `pointer-events-none` so everything behind it still works.
     <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-end p-3 sm:p-4">
-      <button
-        type="button"
-        aria-label="Close Workbench"
-        className="pointer-events-auto absolute inset-0 cursor-default"
-        tabIndex={-1}
-        onClick={onClose}
-      />
       <aside
         ref={panelRef}
         id="workbench-panel"
-        role="dialog"
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
         tabIndex={-1}
-        className="pointer-events-auto relative z-10 flex h-full max-h-[720px] w-[min(360px,calc(100%_-_24px))] min-w-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-card text-card-foreground outline-none"
+        className="pointer-events-auto relative z-10 flex h-full max-h-[720px] w-[min(360px,calc(100%_-_24px))] min-w-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-card text-card-foreground shadow-2xl outline-none"
       >
       <header className="flex shrink-0 items-center justify-between border-b border-border/60 px-3 py-2.5">
         <div>
