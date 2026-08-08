@@ -125,6 +125,8 @@ type Props = {
   onBuildPlan?: () => void;
   /** Show the profile screen (avatar click). */
   onOpenProfile?: () => void;
+  /** Show the usage screen. */
+  onOpenUsage?: () => void;
   /**
    * Bumped to request the User section of Settings — the profile screen sends
    * edits here rather than duplicating the form.
@@ -611,6 +613,7 @@ export function ChatScreen({
   onPasteImages,
   onProfileChange,
   onOpenProfile,
+  onOpenUsage,
   settingsRequest = 0,
   optionsDisabled = false,
 }: Props) {
@@ -856,6 +859,7 @@ export function ChatScreen({
       setSettingsOpen(true);
     },
     "view.profile": () => onOpenProfile?.(),
+    "view.usage": () => onOpenUsage?.(),
     "view.provider": () => setProviderSwitchOpen(true),
     "view.palette": () => setPaletteOpen(true),
   });

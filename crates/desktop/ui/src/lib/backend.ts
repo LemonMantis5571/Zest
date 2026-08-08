@@ -25,8 +25,10 @@ import type {
   ProfileStats,
   ProjectChats,
   ProviderRow,
+  RatesStatus,
   SessionInfo,
   ThreadSummary,
+  UsageReport,
   UsageSnapshot,
   UserProfile,
   WorkspacePickResult,
@@ -71,6 +73,17 @@ export type DesktopBackend = {
   }): Promise<void>;
   openProjectConfig(root: string): Promise<void>;
   usageSnapshot(): Promise<UsageSnapshot>;
+  usageReport(days: number): Promise<UsageReport>;
+  /** Open the price book in the OS editor so rates can be corrected. */
+  openPricesFile(): Promise<void>;
+  /**
+   * Fetch the published rate table if the cached copy is due.
+   *
+   * Separate from `usageReport` on purpose: the report must stay instant and
+   * must not fail because the network is down. Call both, and re-read the
+   * report only if the rates actually moved.
+   */
+  refreshRates(force: boolean): Promise<RatesStatus>;
   profileStats(): Promise<ProfileStats>;
   /** Hand core this machine's UTC offset so day boundaries match the clock. */
   setLocalOffset(): Promise<void>;
@@ -173,6 +186,9 @@ export function createTauriBackend(): DesktopBackend {
     configureAnthropicProvider: (input) => tauriApi.configureAnthropicProvider(input),
     openProjectConfig: (root) => tauriApi.openProjectConfig(root),
     usageSnapshot: () => tauriApi.usageSnapshot(),
+    usageReport: (days) => tauriApi.usageReport(days),
+    openPricesFile: () => tauriApi.openPricesFile(),
+    refreshRates: (force) => tauriApi.refreshRates(force),
     profileStats: () => tauriApi.profileStats(),
     setLocalOffset: () => tauriApi.setLocalOffset(),
     lastProvider: () => tauriApi.lastProvider(),
@@ -339,6 +355,208 @@ export function createFixtureBackend(): DesktopBackend {
           },
         ],
         externalWorkers: [],
+      };
+    },
+    async usageReport(days: number) {
+      // Shaped to exercise the parts of the screen that only appear when
+      // something is imperfect: two providers on the chart, a model with no
+      // rate, and tokens from before per-model metering. A fixture where
+      // everything is priced would leave the coverage card untested offline.
+      const day = 86_400_000;
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      const iso = (offset: number) =>
+        new Date(midnight.getTime() - offset * day).toLocaleDateString("en-CA");
+
+      const series = Array.from({ length: days }, (_, index) => {
+        const back = days - 1 - index;
+        // A calm baseline with two bursts, so the area chart has a shape to
+        // draw rather than a flat line.
+        const wave = Math.sin(index / 3) * 0.4 + 1;
+        const burst = back < 3 ? 3.2 : back < 9 ? 1.6 : 1;
+        const quiet = back % 11 === 0;
+        const costUsd = quiet ? 0 : Number((wave * burst * 4.15).toFixed(2));
+        const tokens = Math.round(costUsd * 1_180_000);
+        return {
+          date: iso(back),
+          costUsd,
+          tokens,
+          requests: quiet ? 0 : Math.round(costUsd * 2),
+          byProvider: quiet
+            ? []
+            : [
+                {
+                  providerId: "codex",
+                  costUsd: Number((costUsd * 0.61).toFixed(2)),
+                  tokens: Math.round(tokens * 0.71),
+                },
+                {
+                  providerId: "anthropic",
+                  costUsd: Number((costUsd * 0.39).toFixed(2)),
+                  tokens: Math.round(tokens * 0.29),
+                },
+              ],
+        };
+      });
+
+      const costUsd = series.reduce((sum, point) => sum + point.costUsd, 0);
+      const tokens = series.reduce((sum, point) => sum + point.tokens, 0);
+      const activeDays = series.filter((point) => point.requests > 0).length;
+      const cacheSavingsUsd = costUsd * 5.8;
+
+      return {
+        days,
+        startDate: series[0]?.date ?? iso(0),
+        endDate: series[series.length - 1]?.date ?? iso(0),
+        totals: {
+          costUsd,
+          requests: series.reduce((sum, point) => sum + point.requests, 0),
+          processedTokens: tokens,
+          uncachedInputTokens: Math.round(tokens * 0.026),
+          cachedInputTokens: Math.round(tokens * 0.947),
+          cacheWriteTokens: Math.round(tokens * 0.009),
+          outputTokens: Math.round(tokens * 0.018),
+          cacheSavingsUsd,
+          activeDays,
+          tokensPerActiveDay: activeDays ? Math.round(tokens / activeDays) : 0,
+          cacheHitPercent: 97.3,
+          unattributedTokens: Math.round(tokens * 0.01),
+        },
+        series,
+        providers: [
+          {
+            providerId: "codex",
+            costUsd: costUsd * 0.61,
+            tokens: Math.round(tokens * 0.71),
+            sharePercent: 61,
+          },
+          {
+            providerId: "anthropic",
+            costUsd: costUsd * 0.39,
+            tokens: Math.round(tokens * 0.29),
+            sharePercent: 39,
+          },
+        ],
+        models: [
+          {
+            providerId: "codex",
+            modelId: "gpt-5.6-sol",
+            costUsd: costUsd * 0.61,
+            costSource: "modelPriced" as const,
+            sharePercent: 61,
+            requests: 812,
+            tokens: Math.round(tokens * 0.71),
+            inputTokens: Math.round(tokens * 0.02),
+            outputTokens: Math.round(tokens * 0.012),
+            cacheWriteTokens: Math.round(tokens * 0.006),
+            cacheReadTokens: Math.round(tokens * 0.672),
+          },
+          {
+            providerId: "anthropic",
+            modelId: "claude-sonnet-4-6",
+            costUsd: costUsd * 0.39,
+            costSource: "providerReported" as const,
+            sharePercent: 39,
+            requests: 344,
+            tokens: Math.round(tokens * 0.28),
+            inputTokens: Math.round(tokens * 0.006),
+            outputTokens: Math.round(tokens * 0.006),
+            cacheWriteTokens: Math.round(tokens * 0.003),
+            cacheReadTokens: Math.round(tokens * 0.265),
+          },
+          {
+            providerId: "codex",
+            modelId: "gpt-5.6-terra",
+            costUsd: null,
+            costSource: "unpriced" as const,
+            sharePercent: 0,
+            requests: 12,
+            tokens: Math.round(tokens * 0.01),
+            inputTokens: Math.round(tokens * 0.004),
+            outputTokens: Math.round(tokens * 0.002),
+            cacheWriteTokens: 0,
+            cacheReadTokens: Math.round(tokens * 0.004),
+          },
+        ],
+        quality: {
+          providerReportedPercent: 12,
+          pricedPercent: 86,
+          unpricedPercent: 1,
+          unattributedPercent: 1,
+          unpricedModels: ["gpt-5.6-terra"],
+          cacheSavingsUsd,
+          savingsMultiple: 5.8,
+        },
+        scan: {
+          filesScanned: 3,
+          filesCached: 146,
+          filesSkipped: 12,
+          filesFailed: 0,
+          records: 44_325,
+          duplicatesDropped: 515,
+          roots: [
+            { providerId: "claude-cli", path: "/fixture/.claude/projects", exists: true },
+            { providerId: "codex-cli", path: "/fixture/.codex/sessions", exists: true },
+          ],
+        },
+        // One worker that reported a cost and one that stayed silent, so both
+        // the measured-cost row and the "Not reported" case are visible offline.
+        externalWorkers: [
+          {
+            workerId: "claude",
+            invocations: 3,
+            usageReports: 3,
+            tokenReports: 3,
+            inputTokens: 30,
+            outputTokens: 2213,
+            thoughtTokens: null,
+            cachedReadTokens: 593_420,
+            cachedWriteTokens: 39_235,
+            reportedTokenTotal: 634_898,
+            contextUsed: null,
+            contextSize: null,
+            lastCost: { amount: "0.1823282", currency: "USD" },
+            lastSeen: 0,
+          },
+          {
+            workerId: "gemini",
+            invocations: 1,
+            usageReports: 0,
+            tokenReports: 0,
+            inputTokens: null,
+            outputTokens: null,
+            thoughtTokens: null,
+            cachedReadTokens: null,
+            cachedWriteTokens: null,
+            reportedTokenTotal: null,
+            contextUsed: null,
+            contextSize: null,
+            lastCost: null,
+            lastSeen: 0,
+          },
+        ],
+        pricesPath: "/fixture/prices.toml",
+        rates: {
+          catalogModels: 1579,
+          overrides: 0,
+          fetchedAt: Math.floor(Date.now() / 1000) - 3 * 3600,
+          stale: false,
+          sourceUrl: "https://example.invalid/model_prices.json",
+        },
+      };
+    },
+    async openPricesFile() {
+      notAvailable("openPricesFile");
+    },
+    async refreshRates() {
+      // The fixture never reaches the network; report the same figures the
+      // canned report already carries so the two cannot disagree on screen.
+      return {
+        catalogModels: 1579,
+        overrides: 0,
+        fetchedAt: Math.floor(Date.now() / 1000) - 3 * 3600,
+        stale: false,
+        sourceUrl: "https://example.invalid/model_prices.json",
       };
     },
     async setProviderKey() {

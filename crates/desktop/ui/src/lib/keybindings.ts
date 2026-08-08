@@ -17,6 +17,7 @@ export type CommandId =
   | "focus.composer"
   | "view.sidebar"
   | "view.profile"
+  | "view.usage"
   | "view.settings"
   | "view.shortcuts"
   | "view.provider"
@@ -44,6 +45,13 @@ export const COMMANDS: CommandDef[] = [
     defaultChord: "Mod+B",
   },
   { id: "view.profile", label: "Open profile", section: "Navigation", defaultChord: "Mod+Shift+P" },
+  {
+    id: "view.usage",
+    label: "Open usage",
+    section: "Navigation",
+    defaultChord: "Mod+Shift+U",
+    hint: "Tokens and estimated cost over time",
+  },
   { id: "view.settings", label: "Open settings", section: "Navigation", defaultChord: "Mod+," },
   {
     id: "view.palette",

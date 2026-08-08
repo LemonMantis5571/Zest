@@ -243,6 +243,119 @@ export type UsageSnapshot = {
   path?: string | null;
 };
 
+export type RangeTotals = {
+  /** Priced traffic only — read it next to `CostQuality`, never alone. */
+  costUsd: number;
+  requests: number;
+  processedTokens: number;
+  uncachedInputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  cacheSavingsUsd: number;
+  activeDays: number;
+  tokensPerActiveDay: number;
+  cacheHitPercent: number;
+  /** Metered before per-model attribution existed, so unpriceable. */
+  unattributedTokens: number;
+};
+
+export type ProviderDayPoint = {
+  providerId: string;
+  costUsd: number;
+  tokens: number;
+};
+
+export type DayCostPoint = {
+  date: string;
+  costUsd: number;
+  tokens: number;
+  requests: number;
+  byProvider: ProviderDayPoint[];
+};
+
+export type ProviderCostRow = {
+  providerId: string;
+  costUsd: number;
+  tokens: number;
+  sharePercent: number;
+};
+
+/**
+ * Where a cost figure came from, in descending order of authority.
+ *
+ * `providerReported` is what a CLI recorded being charged; `modelPriced` is
+ * multiplied out of a rate table. Both are dollars, and only this tells them
+ * apart.
+ */
+export type CostSource = "providerReported" | "modelPriced" | "unpriced";
+
+export type ModelCostRow = {
+  providerId: string;
+  modelId: string;
+  /** `null` when nothing could price it. Not zero — the cost is unknown. */
+  costUsd?: number | null;
+  costSource: CostSource;
+  sharePercent: number;
+  requests: number;
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+};
+
+export type CostQuality = {
+  /** Share of tokens whose cost a CLI recorded. Measured, not estimated. */
+  providerReportedPercent: number;
+  pricedPercent: number;
+  unpricedPercent: number;
+  unattributedPercent: number;
+  unpricedModels: string[];
+  cacheSavingsUsd: number;
+  savingsMultiple?: number | null;
+};
+
+export type UsageReport = {
+  days: number;
+  startDate: string;
+  endDate: string;
+  totals: RangeTotals;
+  /** One entry per day in the window, oldest first, including quiet days. */
+  series: DayCostPoint[];
+  providers: ProviderCostRow[];
+  models: ModelCostRow[];
+  quality: CostQuality;
+  externalWorkers: ExternalWorkerUsageView[];
+  pricesPath?: string | null;
+  rates: RatesStatus;
+  scan: ScanStatus;
+};
+
+/** How the CLI-transcript scan went. All zeroes means no scan ran. */
+export type ScanStatus = {
+  filesScanned: number;
+  filesCached: number;
+  filesSkipped: number;
+  filesFailed: number;
+  records: number;
+  duplicatesDropped: number;
+  roots: { providerId: string; path: string; exists: boolean }[];
+};
+
+/** Where the rates behind a report came from, and how old they are. */
+export type RatesStatus = {
+  /** Models in the published catalogue. Zero means it has never been fetched. */
+  catalogModels: number;
+  /** Hand-set rates, which outrank the catalogue. */
+  overrides: number;
+  /** Unix seconds of the last successful fetch. */
+  fetchedAt?: number | null;
+  /** A refresh is due. Not an error — stale rates still price. */
+  stale: boolean;
+  sourceUrl: string;
+};
+
 export type ExternalCost = {
   amount: string;
   currency: string;
