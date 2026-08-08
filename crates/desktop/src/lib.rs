@@ -30,11 +30,12 @@ use zest_core::{
     start_login as core_start_login, truncate_chars, uses_gateway_auth, ApprovalDecision,
     ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts,
     ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace, GatewayState, HarnessError,
-    Ledger, LoginProcess, PersistPriority, PersistWorker, ProfileStats, ProjectSessionState,
-    ProviderConfig, ProviderRegistry, ProviderSlot, QuestionRequest, Questioner, RecoverableRun,
-    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint,
-    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageSnapshot,
-    DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    Ledger, LoginProcess, PersistPriority, PersistWorker, Prices, ProfileStats,
+    ProjectSessionState, ProviderConfig, ProviderRegistry, ProviderSlot, QuestionRequest,
+    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
+    StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError, ThreadStore, ThreadSummary,
+    ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
+    THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -1537,32 +1538,42 @@ fn open_project_config(root: String) -> Result<(), String> {
         );
     }
 
+    open_path_in_editor(&path).map_err(|e| format!("could not open project configuration: {e}"))
+}
+
+/// Hand a file to whatever the OS opens it with.
+///
+/// Shared by every "edit this yourself" affordance, so a new one cannot pick up
+/// a platform arm the others have and get it subtly wrong.
+fn open_path_in_editor(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        // The empty argument is `start`'s title parameter. Without it a quoted
+        // path is consumed as the window title and nothing opens.
         StdCommand::new("cmd")
             .args(["/C", "start", ""])
-            .arg(&path)
+            .arg(path)
             .spawn()
-            .map_err(|e| format!("could not open project configuration: {e}"))?;
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "macos")]
     {
         StdCommand::new("open")
-            .arg(&path)
+            .arg(path)
             .spawn()
-            .map_err(|e| format!("could not open project configuration: {e}"))?;
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         StdCommand::new("xdg-open")
-            .arg(&path)
+            .arg(path)
             .spawn()
-            .map_err(|e| format!("could not open project configuration: {e}"))?;
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(not(any(unix, target_os = "windows")))]
     {
         let _ = path;
-        return Err("opening project configuration is not supported on this platform".into());
+        return Err("opening a file is not supported on this platform".into());
     }
 
     Ok(())
@@ -1571,6 +1582,69 @@ fn open_project_config(root: String) -> Result<(), String> {
 #[tauri::command]
 fn usage_snapshot() -> UsageSnapshot {
     Ledger::load().snapshot()
+}
+
+/// Spend, tokens, and cost for the last `days` local days.
+///
+/// Read fresh from disk on every call rather than served from the session's
+/// in-memory ledger: a second Zest window, or a CLI run in another terminal,
+/// writes the same file, and a usage screen that silently omits them would be
+/// exactly the kind of partial figure this ledger exists to avoid.
+///
+/// The price book is loaded per call for the same reason — someone correcting a
+/// rate expects the refresh button to show it, not the next app launch.
+///
+/// Runs on a blocking thread because the transcript scan walks and reads files:
+/// a few hundred milliseconds is fine, but not on the thread serving the UI.
+#[tauri::command]
+async fn usage_report(days: u32) -> Result<UsageReport, String> {
+    // Clamped rather than trusted: `days` comes from the webview, and a wild
+    // value would allocate one series point per day of it.
+    let days = days.clamp(1, DAILY_RETENTION_DAYS as u32);
+    tauri::async_runtime::spawn_blocking(move || {
+        let scan = zest_core::transcripts::scan(days);
+        Ledger::load().report(days, &Prices::load(), Some(&scan))
+    })
+    .await
+    .map_err(|e| format!("could not read usage: {e}"))
+}
+
+/// Where the price book lives, so the usage screen can offer to open it.
+#[tauri::command]
+fn prices_path() -> Option<String> {
+    Prices::load().path().map(|p| p.display().to_string())
+}
+
+/// Fetch the published rate table if the cached copy is due for renewal.
+///
+/// Deliberately its own command rather than something `usage_report` does. The
+/// report must stay instant and must never fail because GitHub is having a bad
+/// morning; this can take a network round trip, so the front end calls it
+/// alongside the report and re-reads the report only if the rates actually
+/// moved. `force` is the Refresh button saying "I know it is not due yet".
+#[tauri::command]
+async fn refresh_rates(force: bool) -> RatesStatus {
+    let catalog = zest_core::rates::refresh(force).await;
+    RatesStatus {
+        catalog_models: catalog.len(),
+        overrides: Prices::load().models.len(),
+        fetched_at: catalog.fetched_at(),
+        stale: catalog.is_stale(),
+        source_url: zest_core::DEFAULT_RATES_URL.to_string(),
+    }
+}
+
+/// Open the price book in the OS text editor.
+///
+/// The rates are the user's to correct, which is only true if getting to them
+/// takes one click rather than a hunt through the data directory.
+#[tauri::command]
+fn open_prices_file() -> Result<(), String> {
+    let prices = Prices::load();
+    let path = prices
+        .path()
+        .ok_or_else(|| "there is no price book on this platform".to_string())?;
+    open_path_in_editor(path)
 }
 
 /// Tell core which day it is for this user.
@@ -5232,6 +5306,10 @@ pub fn run() {
             configure_anthropic_provider,
             open_project_config,
             usage_snapshot,
+            usage_report,
+            prices_path,
+            open_prices_file,
+            refresh_rates,
             profile_stats,
             set_local_offset,
             last_provider,

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use zest_core::{
-    detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, Ledger,
+    detect_all, ApprovalDecision, ApprovalRequest, Approver, AuthStatus, Config, Ledger, Prices,
     ProviderConfig, RuntimeBuilder, StreamEvent, Target, Thread, ThreadStore, ToolRisk,
     DEFAULT_MODEL, DEFAULT_SYSTEM,
 };
@@ -35,7 +35,11 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("usage") => {
-            print_usage();
+            // Refresh before printing rather than after, so the figures on
+            // screen match the rates reported beneath them. At most one request
+            // a day; a failure just prices against the cached copy.
+            let catalog = zest_core::rates::refresh(false).await;
+            print_usage(&catalog);
             return Ok(());
         }
         Some("doctor") => {
@@ -660,7 +664,7 @@ fn gateway_override() -> Option<Config> {
 
 /// Spend and headroom are printed as separate lines on purpose. They answer
 /// different questions and one of them is not ours to measure.
-fn print_usage() {
+fn print_usage(catalog: &zest_core::RateCatalog) {
     let ledger = Ledger::load();
 
     println!("\n\x1b[1mUsage\x1b[0m");
@@ -698,6 +702,110 @@ fn print_usage() {
         }
         println!();
     }
+
+    print_recent_cost(&ledger, catalog);
+}
+
+/// The last 30 days at list rates, with its own coverage stated underneath.
+///
+/// The coverage line is not optional decoration. A dollar figure derived from
+/// half the tokens looks exactly like one derived from all of them, and this is
+/// the only thing that tells them apart.
+fn print_recent_cost(ledger: &Ledger, catalog: &zest_core::RateCatalog) {
+    let scan = zest_core::transcripts::scan(30);
+    let report = ledger.report(
+        30,
+        &Prices::load().with_catalog(catalog.clone()),
+        Some(&scan),
+    );
+    if report.totals.processed_tokens == 0 {
+        return;
+    }
+
+    println!("  \x1b[1mlast 30 days\x1b[0m");
+    println!(
+        "    tokens     {} over {} active day{}",
+        compact(report.totals.processed_tokens),
+        report.totals.active_days,
+        if report.totals.active_days == 1 {
+            ""
+        } else {
+            "s"
+        },
+    );
+    println!(
+        "    cache      {} read · {:.0}% of input  \x1b[90m(saved ~${:.2} at list rates)\x1b[0m",
+        compact(report.totals.cached_input_tokens),
+        report.totals.cache_hit_percent,
+        report.totals.cache_savings_usd,
+    );
+    println!(
+        "    cost       \x1b[1m${:.2}\x1b[0m  \x1b[90m(estimate at list API rates, not a bill)\x1b[0m",
+        report.totals.cost_usd,
+    );
+    println!(
+        "    coverage   {:.0}% of tokens priced\x1b[90m{}{}\x1b[0m",
+        report.quality.priced_percent,
+        if report.quality.unpriced_percent > 0.0 {
+            format!(", {:.0}% unpriced", report.quality.unpriced_percent)
+        } else {
+            String::new()
+        },
+        if report.quality.unattributed_percent > 0.0 {
+            format!(
+                ", {:.0}% recorded before per-model metering",
+                report.quality.unattributed_percent
+            )
+        } else {
+            String::new()
+        },
+    );
+
+    if !report.quality.unpriced_models.is_empty() {
+        println!(
+            "    \x1b[90mno rate for: {}\x1b[0m",
+            report.quality.unpriced_models.join(", ")
+        );
+        if let Some(path) = &report.prices_path {
+            println!("    \x1b[90madd rates in {path}\x1b[0m");
+        }
+    }
+    println!(
+        "    rates      \x1b[90m{} models{}\x1b[0m",
+        report.rates.catalog_models,
+        match report.rates.fetched_at {
+            Some(_) if report.rates.stale => ", cached copy is due a refresh".to_string(),
+            Some(_) => String::new(),
+            None => ", never fetched".to_string(),
+        },
+    );
+    println!(
+        "    scanned    \x1b[90m{} CLI transcripts ({} parsed, {} unchanged) · {} turns, {} repeats dropped\x1b[0m",
+        report.scan.files_scanned + report.scan.files_cached,
+        report.scan.files_scanned,
+        report.scan.files_cached,
+        report.scan.records,
+        report.scan.duplicates_dropped,
+    );
+
+    println!("\n  \x1b[1mby model\x1b[0m");
+    for row in report.models.iter().take(8) {
+        println!(
+            "    {:<26} {:>10}  {:>8}  \x1b[90m{}\x1b[0m",
+            format!("{}/{}", row.provider_id, row.model_id),
+            match row.cost_usd {
+                Some(cost) => format!("${cost:.2}"),
+                None => "no rate".to_string(),
+            },
+            compact(row.tokens),
+            match row.cost_source {
+                zest_core::CostSource::ProviderReported => "reported",
+                zest_core::CostSource::ModelPriced => "priced",
+                zest_core::CostSource::Unpriced => "unpriced",
+            },
+        );
+    }
+    println!();
 }
 
 fn compact(n: u64) -> String {

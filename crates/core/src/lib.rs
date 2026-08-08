@@ -20,14 +20,17 @@ pub mod gateway;
 pub mod handoff;
 pub mod persist;
 pub mod prefs;
+pub mod pricing;
 pub mod profile;
 pub mod prompt;
 pub mod provider;
+pub mod rates;
 pub mod reading_diff;
 pub mod runtime;
 pub mod skills;
 pub mod thread;
 pub mod tools;
+pub mod transcripts;
 pub mod usage;
 
 pub use agent::Agent;
@@ -65,6 +68,7 @@ pub use gateway::{
 pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
 pub use persist::{PersistPriority, PersistWorker, DELTA_CHECKPOINT_MS};
 pub use prefs::{ProjectSessionState, ProviderSessionPrefs};
+pub use pricing::{ModelPrice, Prices};
 pub use profile::{derive as derive_profile_stats, ChatFacts, DayPoint, ProfileStats};
 pub use prompt::{
     compose_for_project, compose_system, compose_system_with_docs, custom_system_path, env_context,
@@ -79,6 +83,7 @@ pub use provider::{
     probe, Completion, ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, ResumeHandle,
     ResumeSupport, StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
+pub use rates::{RateCatalog, DEFAULT_RATES_URL};
 pub use reading_diff::{
     abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,
 };
@@ -111,7 +116,10 @@ pub use tools::{
     register_question_tool, register_read_tools, register_skill_tools, register_write_tools, Tool,
     ToolMetadata, ToolOutcome, ToolRegistry,
 };
+pub use transcripts::{CliKind, ScanResult, ScanStatus};
 pub use usage::{
-    ExternalCost, ExternalUsageReport, ExternalWorkerUsage, ExternalWorkerUsageView, HeadroomView,
-    Ledger, MeasuredUsage, ProviderUsage, ProviderUsageView, UsageSnapshot,
+    CostQuality, CostSource, DayCostPoint, ExternalCost, ExternalUsageReport, ExternalWorkerUsage,
+    ExternalWorkerUsageView, HeadroomView, Ledger, MeasuredUsage, ModelCostRow, ModelUsage,
+    ProviderCostRow, ProviderDayPoint, ProviderUsage, ProviderUsageView, RangeTotals, RatesStatus,
+    TokenCounts, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
 };

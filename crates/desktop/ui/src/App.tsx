@@ -6,6 +6,7 @@ import { ChatSkeleton } from "@/components/ChatSkeleton";
 import { ConversationRecoveryDialog } from "@/components/ConversationRecoveryDialog";
 import { ProfileScreen } from "@/components/ProfileScreen";
 import { ProviderPicker } from "@/components/ProviderPicker";
+import { UsageScreen } from "@/components/UsageScreen";
 import { WaitingScreen } from "@/components/WaitingScreen";
 import { toast, Toaster } from "@/components/ui/toast";
 import { getBackend } from "@/lib/backend";
@@ -65,7 +66,14 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type Screen = "boot" | "picker" | "waiting" | "auth-success" | "chat" | "profile";
+type Screen =
+  | "boot"
+  | "picker"
+  | "waiting"
+  | "auth-success"
+  | "chat"
+  | "profile"
+  | "usage";
 
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
@@ -1772,6 +1780,7 @@ export default function App() {
             onApprovalModeChange={onApprovalModeChange}
             onBuildPlan={() => void onBuildPlan()}
             onOpenProfile={() => setScreen("profile")}
+            onOpenUsage={() => setScreen("usage")}
             settingsRequest={settingsRequest}
             sessionWarning={sessionWarning}
             onDismissWarning={() => setSessionWarning(null)}
@@ -1791,8 +1800,11 @@ export default function App() {
               setScreen("chat");
               setSettingsRequest((n) => n + 1);
             }}
+            onOpenUsage={() => setScreen("usage")}
           />
         ) : null}
+
+        {screen === "usage" ? <UsageScreen onBack={() => setScreen("chat")} /> : null}
       </div>
 
       <ConversationRecoveryDialog

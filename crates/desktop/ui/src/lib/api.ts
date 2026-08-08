@@ -15,9 +15,11 @@ import type {
   PreparedAttachment,
   ProfileStats,
   ProviderRow,
+  RatesStatus,
   SessionInfo,
   ProjectChats,
   ThreadSummary,
+  UsageReport,
   UsageSnapshot,
   UserProfile,
   WorkspacePickResult,
@@ -86,6 +88,18 @@ export function openProjectConfig(root: string) {
 
 export function usageSnapshot() {
   return invoke<UsageSnapshot>("usage_snapshot");
+}
+
+export function usageReport(days: number) {
+  return invoke<UsageReport>("usage_report", { days });
+}
+
+export function openPricesFile() {
+  return invoke<void>("open_prices_file");
+}
+
+export function refreshRates(force: boolean) {
+  return invoke<RatesStatus>("refresh_rates", { force });
 }
 
 export function profileStats() {
