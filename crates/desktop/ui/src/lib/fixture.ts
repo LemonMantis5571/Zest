@@ -40,24 +40,35 @@ export async function runFixtureStream(
   });
   await sleep(350);
 
-  onEvent({
-    kind: "tool_call_start",
-    ...id,
-    message_id: assistantId,
-    name: "read_file",
-    id: "tool_fixture_1",
-  });
-  await sleep(500);
-
-  onEvent({
-    kind: "tool_call_result",
-    ...id,
-    message_id: assistantId,
-    name: "read_file",
-    id: "tool_fixture_1",
-    summary: "# Zest — Rust coding harness…",
-    isError: false,
-  });
+  // Several reads rather than one, so the offline fixture exercises the run
+  // grouping: they stay as separate rows while the turn works, then fold into a
+  // single summary once the last one settles.
+  const reads = [
+    { id: "tool_fixture_1", summary: "# Zest — Rust coding harness…" },
+    { id: "tool_fixture_2", summary: "[workspace] resolver = \"2\"…" },
+    { id: "tool_fixture_3", summary: "# Project Context — **Zest**…" },
+    { id: "tool_fixture_4", summary: "# Recurring Corrections…" },
+  ];
+  for (const read of reads) {
+    onEvent({
+      kind: "tool_call_start",
+      ...id,
+      message_id: assistantId,
+      name: "read_file",
+      id: read.id,
+    });
+    await sleep(180);
+    onEvent({
+      kind: "tool_call_result",
+      ...id,
+      message_id: assistantId,
+      name: "read_file",
+      id: read.id,
+      summary: read.summary,
+      isError: false,
+    });
+    await sleep(120);
+  }
   await sleep(200);
 
   const reply =

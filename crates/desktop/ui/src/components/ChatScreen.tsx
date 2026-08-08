@@ -57,7 +57,7 @@ import {
 import { ZestPulse } from "@/components/ZestPulse";
 import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
-import { groupToolRuns } from "@/lib/toolRuns";
+import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import { useKeybindings } from "@/lib/useKeybindings";
 import type {
   ApprovalChoice,
@@ -437,7 +437,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
 
           {msg.tools.length > 0 ? (
             <div className="flex w-full max-w-full flex-col gap-0.5">
-              {groupToolRuns(msg.tools).map((run) =>
+              {groupToolRuns(msg.tools, collapseThresholdFor(msg.tools)).map((run) =>
                 run.kind === "group" ? (
                   <ToolRunGroup
                     key={`group-${run.tools[0].id}`}
@@ -625,55 +625,28 @@ export function ChatScreen({
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
-  const [workbenchOpen, setWorkbenchOpen] = useState(false);
-  const [workbenchAutoOpened, setWorkbenchAutoOpened] = useState(false);
-  const lastAutoWorkbenchKey = useRef("");
   /**
-   * The user closed the Workbench, so stop opening it for them.
+   * The Workbench opens only when asked for.
    *
-   * Auto-open keys off the set of running tools, which changes on every tool
-   * call — so dismissing it only lasted until the next one, and a working turn
-   * reopened the panel over and over. Opening it by hand clears this, because
-   * that is the user asking for the automatic behaviour back.
+   * It used to open itself whenever a tool started running, which meant a
+   * working turn threw a panel over the transcript unprompted — and since the
+   * trigger changed on every tool call, closing it only lasted until the next
+   * one. A review surface is something you reach for, not something that
+   * interrupts you.
    */
-  const workbenchDismissed = useRef(false);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
   const [editingMessageBusy, setEditingMessageBusy] = useState(false);
-  const closeWorkbench = useCallback(() => {
-    workbenchDismissed.current = true;
-    setWorkbenchOpen(false);
-    setWorkbenchAutoOpened(false);
-    requestAnimationFrame(() => {
-      document.getElementById("workbench-toggle")?.focus();
-    });
-  }, []);
-  /** Manual toggle — opening by hand opts back into auto-open. */
-  const toggleWorkbench = useCallback(() => {
-    setWorkbenchAutoOpened(false);
-    setWorkbenchOpen((value) => {
-      const next = !value;
-      workbenchDismissed.current = !next;
-      return next;
-    });
-  }, []);
+  const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
+  const toggleWorkbench = useCallback(() => setWorkbenchOpen((value) => !value), []);
   const openDiff = useCallback(
     (path: string, diff: string) => setDiffTarget({ path, diff }),
     []
   );
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = shortRoot(session.root);
-  const activeWorkbenchKey = useMemo(() => {
-    const activeTools = messages.flatMap((message) =>
-      message.role === "assistant"
-        ? message.tools
-            .filter((tool) => tool.status === "running" || tool.status === "awaiting_approval")
-            .map((tool) => `${tool.id}:${tool.status}`)
-        : []
-    );
-    return [compacting ? "compacting" : "", ...activeTools].filter(Boolean).join("|");
-  }, [compacting, messages]);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
   /**
    * Every tool still waiting on a decision, oldest first.
@@ -724,17 +697,22 @@ export function ChatScreen({
     }
   }, [editingMessageBusy, editingMessageId, editingMessageText, onEditMessage, sending]);
 
+  /**
+   * Hand focus back to the toggle when the Workbench closes.
+   *
+   * In an effect rather than in the close handler: the panel holds focus while
+   * it is open, and it is only removed from the document during React's commit.
+   * Focusing from the handler raced that — the toggle was focused, the panel was
+   * then torn down, and the browser reset focus to `<body>`, stranding the
+   * keyboard at the top of the document.
+   */
+  const workbenchWasOpen = useRef(false);
   useEffect(() => {
-    if (!activeWorkbenchKey) {
-      lastAutoWorkbenchKey.current = "";
-      return;
+    if (workbenchWasOpen.current && !workbenchOpen) {
+      document.getElementById("workbench-toggle")?.focus();
     }
-    if (lastAutoWorkbenchKey.current === activeWorkbenchKey) return;
-    lastAutoWorkbenchKey.current = activeWorkbenchKey;
-    if (workbenchDismissed.current) return;
-    setWorkbenchAutoOpened(true);
-    setWorkbenchOpen(true);
-  }, [activeWorkbenchKey]);
+    workbenchWasOpen.current = workbenchOpen;
+  }, [workbenchOpen]);
 
   const jumpToMessage = useCallback((messageId: string) => {
     document.getElementById(`message-${messageId}`)?.scrollIntoView({
@@ -1173,7 +1151,6 @@ export function ChatScreen({
 
       <WorkbenchPanel
         open={workbenchOpen}
-        autoOpened={workbenchAutoOpened}
         session={session}
         messages={messages}
         sending={sending}
