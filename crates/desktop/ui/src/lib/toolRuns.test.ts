@@ -3,8 +3,10 @@ import { describe, it } from "node:test";
 
 import {
   COLLAPSE_THRESHOLD,
+  collapseThresholdFor,
   countDiffLines,
   groupToolRuns,
+  SETTLED_COLLAPSE_THRESHOLD,
   summarizeTools,
 } from "./toolRuns.ts";
 import type { ToolPart } from "./types.ts";
@@ -91,6 +93,47 @@ describe("summarizeTools", () => {
       tool({ id: "2", name: "bash", status: "error" }),
     ]);
     assert.equal(summary.errors, 1);
+  });
+});
+
+describe("collapseThresholdFor", () => {
+  it("keeps short runs expanded while anything is still live", () => {
+    // Rows folding away as each call lands makes a working turn hard to follow.
+    const working = [...many(3), tool({ id: "spin", status: "running" })];
+    assert.equal(collapseThresholdFor(working), COLLAPSE_THRESHOLD);
+    assert.equal(groupToolRuns(working, collapseThresholdFor(working)).length, 4);
+  });
+
+  it("folds a finished message's tools once nothing is live", () => {
+    // The reported case: four reads that stayed as four rows after the turn
+    // ended, because the live-turn threshold is five.
+    const finished = many(4);
+    assert.equal(collapseThresholdFor(finished), SETTLED_COLLAPSE_THRESHOLD);
+
+    const runs = groupToolRuns(finished, collapseThresholdFor(finished));
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].kind, "group");
+    if (runs[0].kind === "group") {
+      assert.equal(runs[0].tools.length, 4);
+      assert.equal(runs[0].summary.label, "Ran 4 lookups");
+    }
+  });
+
+  it("still shows a lone finished call as itself", () => {
+    // "Ran 1 lookup" is longer than the row it replaces and hides the path.
+    const runs = groupToolRuns(many(1), collapseThresholdFor(many(1)));
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].kind, "single");
+  });
+
+  it("waits for an approval that is still pending", () => {
+    // A settled-looking message with an unanswered prompt in it must not fold
+    // the prompt out of sight.
+    const pending = [
+      ...many(3),
+      tool({ id: "ask", name: "bash", status: "awaiting_approval" }),
+    ];
+    assert.equal(collapseThresholdFor(pending), COLLAPSE_THRESHOLD);
   });
 });
 
