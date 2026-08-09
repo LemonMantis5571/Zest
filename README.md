@@ -1,58 +1,94 @@
 <div align="center">
 
-<img src="./assets/logo.png" alt="Zest logo" width="128" height="128" />
+<img src="./assets/logo.png" alt="Zest logo" width="512" height="512" />
 
 # Zest
-
-**A provider-aware, local-first coding harness, built in Rust.**
-
-Run a coding agent in your project: stream responses, read and edit files, run
-commands, and delegate bounded work to external CLIs — with approvals, visible
-diffs, and honest usage accounting at every step.
 
 [![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
 [![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+**One Rust core. Two frontends. No accounts, no telemetry.**
+
+**🔧 A provider-aware, local-first coding harness, built in Rust. ⚡**
+
+Run a coding agent in your project: stream responses, read and edit files, run
+commands, and delegate bounded work to external CLIs — with approvals, visible
+diffs, and honest usage accounting at every step.
+
+[Documentation](#documentation) · [Quick start](#quick-start) · [Contributing](CONTRIBUTING.md)
+
 </div>
 
 ---
 
-## What is Zest?
+## Table of contents
 
-Zest is a coding harness: the agent loop, tools, and permission layer that sit
-between you and a large language model. One Rust core powers two frontends — a
-Tauri desktop app and a terminal REPL — so the same sessions, tools, approvals,
-and usage records work in both.
+- [What is Zest?](#what-is-zest)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Getting started](#getting-started)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Delegating to external workers](#delegating-to-external-workers)
+- [Headless mode](#headless-mode)
+- [Usage ledger](#usage-ledger)
+- [Supported platforms](#supported-platforms)
+- [Documentation](#documentation)
+- [Get involved](#get-involved)
+
+## 🎯 What is Zest?
+
+**The pain:** running a coding agent in a real project means wiring a provider,
+trusting a black-box loop, and losing track of what a session actually cost.
+
+**The solution:** Zest is the harness between you and the model. One Rust core
+drives two frontends — a Tauri desktop app and a terminal REPL — so the same
+sessions, tools, approvals, and usage records work in both.
+
+**The result:** you keep your own model account, approve every write and
+command with a diff preview, and know exactly what a session cost.
 
 You bring your own model account. Zest never routes your prompts through a
 middleman, has no accounts of its own, and records your usage locally so you
 can see what a session actually cost.
 
-## Features
+<div align="center">
 
-- **One core, two frontends** — a shared `zest-core` agent loop drives both the
-  desktop app and the `zest` terminal client.
-- **Bring your own parent session** — Codex or Claude through the bundled
+| Metric | Value |
+| --- | --- |
+| 🧩 Cores | 1 — one `zest-core` agent loop |
+| 🖥️ Frontends | 2 — desktop app + terminal client |
+| 🔒 Accounts | 0 — bring your own model |
+| 📡 Telemetry | 0 — local-first |
+| 🔧 Compaction | automatic at 80% of the context window |
+
+</div>
+
+## ✨ Features
+
+- **🧩 One core, two frontends** — a shared `zest-core` agent loop drives both
+  the desktop app and the `zest` terminal client.
+- **🔑 Bring your own parent session** — Codex or Claude through the bundled
   gateway, the native Anthropic API, or any OpenAI-compatible endpoint
   (OpenAI, DeepSeek, local servers).
-- **Streaming with effort control** — token-by-token responses with
+- **⚡ Streaming with effort control** — token-by-token responses with
   `low`–`max` reasoning effort, so you choose how much the model thinks.
-- **Approvals with diff previews** — writes, shell commands, and worker
+- **✅ Approvals with diff previews** — writes, shell commands, and worker
   delegations pause for your explicit `y/N` and show what will change.
-- **Explicit worker delegation** — hand bounded subtasks to already-authenticated
+- **🤝 Explicit worker delegation** — hand bounded subtasks to already-authenticated
   Claude Code or Gemini CLI workers, run in isolated Git worktrees, and review
   their diffs before accepting anything.
-- **Context management that is honest** — a live context meter, automatic
+- **📊 Context management that is honest** — a live context meter, automatic
   compaction at 80% of the window, and checkpoints that survive a restart.
-- **Honest usage ledger** — local token and cost records per provider and model,
+- **🧾 Honest usage ledger** — local token and cost records per provider and model,
   with estimates clearly separated from provider-reported figures.
-- **Headless JSONL protocol** — run a single deny-only turn for editors and CI
+- **📡 Headless JSONL protocol** — run a single deny-only turn for editors and CI
   with `zest run --jsonl`.
-- **Local-first** — no remote Zest servers, no telemetry, no accounts. Secrets
+- **🔒 Local-first** — no remote Zest servers, no telemetry, no accounts. Secrets
   stay in your OS credential manager.
 
-## How it works
+## 🔍 How it works
 
 ```mermaid
 flowchart LR
@@ -92,9 +128,9 @@ locally and is started and supervised by Zest. External workers are an explicit
 process boundary: they are configured, signed in, and approval-gated — never
 an automatic fallback.
 
-## Getting started
+## 🚀 Getting started
 
-### Install
+### 📦 Install
 
 Download a release for your platform from
 [GitHub Releases](https://github.com/LemonMantis5571/Zest/releases).
@@ -114,7 +150,7 @@ Download a release for your platform from
 > `Get-FileHash` (Windows) or `sha256sum` (Linux) — every release ships a
 > `SHA256SUMS` file.
 
-### Build from source
+### 🛠️ Build from source
 
 Prerequisites: **Rust 1.97.1** (pinned in `rust-toolchain.toml`), **Node.js
 24.16.0+** and **npm**, **Git**, and **PowerShell** (Windows PowerShell 5.1+ or
@@ -148,9 +184,9 @@ than the host, and `-Check` to verify an existing one.
 > Release builds bundle the gateway sidecar, so `cargo tauri build` requires
 > the pinned binary for the target platform to be present first.
 
-## Quick start
+## ⚡ Quick start
 
-### Desktop
+### 🖥️ Desktop
 
 1. Launch Zest and pick a provider — **Codex** (ChatGPT sign-in through the
    bundled gateway) or an **API key** provider configured in Settings.
@@ -168,7 +204,7 @@ Useful shortcuts (all rebindable from Settings):
 | `Ctrl+Shift+U` | Usage screen |
 | `Ctrl+Shift+M` | Switch provider |
 
-### Terminal
+### ⌨️ Terminal
 
 ```bash
 zest                  # start the interactive REPL
@@ -181,7 +217,7 @@ zest doctor --live    # opt-in live check: streaming, tools, ledger, persistence
 > `zest doctor --live` makes one real provider call and spends quota. It is a
 > manual acceptance check, not something to wire into CI.
 
-## Configuration
+## ⚙️ Configuration
 
 Zest creates the user-level config at `~/.zest/zest.toml` on first launch. A
 project can override it with a local `zest.toml` (start from
@@ -221,7 +257,7 @@ Environment overrides:
 | `ZEST_MODEL` | Default model for override sessions |
 | `ZEST_EFFORT` | Default reasoning effort (`low`–`max`) |
 
-## Delegating to external workers
+## 🤝 Delegating to external workers
 
 For bounded subtasks, Zest can delegate to an external CLI that is already
 signed in — currently Claude Code and Gemini CLI — over ACP or a headless
@@ -247,7 +283,7 @@ to let the vendor CLI decide.
 > servers already configured in its own CLI; Zest does not manage those servers
 > or review individual MCP calls.
 
-## Headless mode
+## 📡 Headless mode
 
 `zest run` executes one turn over a line-delimited JSON protocol
 (`zest-jsonl-v1`), designed for editors and CI. Approvals are reported and
@@ -261,7 +297,7 @@ Events on stdout: `session`, `text`, `thinking`, `tool_call_start`,
 `tool_call_update`, `tool_call_result`, `approval_needed`, `question_needed`,
 `model_substituted`, `done`, `error`.
 
-## Usage ledger
+## 🧾 Usage ledger
 
 Every turn is metered locally per provider and model: requests, input and
 output tokens, and cache hits. Cost is priced from a local rate table (the
@@ -273,7 +309,7 @@ Cost figures are an **estimate at list API rates**, not a bill — Zest has no
 billing relationship with any provider. Where a CLI records what it was
 actually charged, that figure is used and labelled as reported.
 
-## Supported platforms
+## 🗺️ Supported platforms
 
 | Platform | Status |
 | --- | --- |
@@ -281,10 +317,20 @@ actually charged, that figure is used and labelled as reported.
 | Linux (x64, ARM64) | Supported, verified on every push |
 | macOS | Keychain and file-open paths exist; not yet CI-verified |
 
-## Documentation
+## 📚 Documentation
 
 - [Design](DESIGN.md) — product and architecture notes
 - [Project context](PROJECT_CONTEXT.md) — goals, constraints, and glossary
 - [Contributing](CONTRIBUTING.md) — development and verification workflow
 - [Changelog](CHANGELOG.md) — user-facing changes
 - [Security](SECURITY.md) — reporting vulnerabilities
+
+## 🙌 Get involved
+
+- **Try it** — head to [Quick start](#quick-start) or grab a release from
+  [GitHub Releases](https://github.com/LemonMantis5571/Zest/releases).
+- **Learn** — read the [Design](DESIGN.md) and
+  [project context](PROJECT_CONTEXT.md) docs.
+- **Support** — useful? Give the repo a star ⭐
+- **Contribute** — see [Contributing](CONTRIBUTING.md) for the verification
+  workflow and good first issues.
