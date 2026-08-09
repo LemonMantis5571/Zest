@@ -13,6 +13,7 @@ npm ci
 npm run ui:build      # tsc + vite -> dist/
 npm run ui:test
 npm run desktop:dev   # Tauri + Vite HMR
+npm run ui:dev        # browser-only UI preview; Tauri APIs are unavailable
 ```
 
 For a reproducible checkout, use `npm ci` from the repository root. A full
