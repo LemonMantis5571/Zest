@@ -1,7 +1,9 @@
 # Contributing
 
-Zest is a Windows-first beta. Small, focused changes are easier to review than
-large refactors, especially around the provider, approval, gateway, and ACP
+Zest is Windows-first, with Linux coverage in CI and cross-platform code paths
+throughout core, CLI, and desktop. macOS keychain and file-open paths exist but
+are not yet CI-verified. Small, focused changes are easier to review than large
+refactors, especially around the provider, approval, gateway, and ACP
 boundaries.
 
 ## Before you start
