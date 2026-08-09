@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::error::{HarnessError, Result};
 use crate::prompt::{
     compose_system_with_docs, env_context, load_custom_system, load_project_docs, DEFAULT_SYSTEM,
+    LOCAL_BROWSER_SYSTEM,
 };
 use crate::provider::normalize_effort;
 use crate::provider::registry::{ProviderRegistry, Skipped};
@@ -20,8 +21,8 @@ use crate::tools::approval::{ApprovalPolicy, Approver, DenyApprover};
 use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::{
-    register_exec_tools, register_question_tool, register_read_tools, register_skill_tools,
-    register_write_tools, ToolRegistry,
+    register_browser_tool, register_exec_tools, register_question_tool, register_read_tools,
+    register_skill_tools, register_write_tools, BrowserAdapter, ToolRegistry,
 };
 use crate::usage::Ledger;
 
@@ -62,6 +63,7 @@ pub struct RuntimeBuilder {
     approver: Option<Arc<dyn Approver>>,
     questioner: Option<Arc<dyn Questioner>>,
     policy: Option<Arc<Mutex<ApprovalPolicy>>>,
+    browser: Option<Arc<dyn BrowserAdapter>>,
     enable_external_agents: bool,
     register_write: bool,
     register_exec: bool,
@@ -81,6 +83,7 @@ impl RuntimeBuilder {
             approver: None,
             questioner: None,
             policy: None,
+            browser: None,
             enable_external_agents: true,
             register_write: true,
             register_exec: true,
@@ -149,6 +152,14 @@ impl RuntimeBuilder {
     /// Omitted means [`ApprovalMode::Manual`](crate::ApprovalMode::Manual).
     pub fn with_policy(mut self, policy: Arc<Mutex<ApprovalPolicy>>) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Attach a local browser session to the parent agent. The adapter is
+    /// deliberately optional so the CLI and headless callers do not acquire a
+    /// desktop dependency or advertise a tool they cannot execute.
+    pub fn with_browser_adapter(mut self, browser: Arc<dyn BrowserAdapter>) -> Self {
+        self.browser = Some(browser);
         self
     }
 
@@ -291,6 +302,10 @@ impl RuntimeBuilder {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::INTERACTIVE_QUESTION_SYSTEM);
         }
+        if self.browser.is_some() {
+            base_system.push_str("\n\n");
+            base_system.push_str(LOCAL_BROWSER_SYSTEM);
+        }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
         let skills = Arc::new(RwLock::new(SkillSet::discover(&root)));
@@ -318,6 +333,9 @@ impl RuntimeBuilder {
         // also run shell commands widens the blast radius for no benefit that
         // the parent conversation cannot already provide.
         let mut tools = worker_tools.clone();
+        if let Some(browser) = self.browser {
+            register_browser_tool(&mut tools, browser);
+        }
         if self.register_exec && config.tools.bash.enabled {
             register_exec_tools(&mut tools, &root, config.tools.bash.settings())
                 .map_err(|e| HarnessError::Other(format!("register exec tools: {e}")))?;
@@ -414,6 +432,18 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    struct StubBrowser;
+
+    #[async_trait::async_trait]
+    impl crate::tools::BrowserAdapter for StubBrowser {
+        async fn execute(
+            &self,
+            _request: crate::tools::BrowserRequest,
+        ) -> std::result::Result<serde_json::Value, String> {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("zest-runtime-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -456,6 +486,28 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("# Asking the user"));
+    }
+
+    #[test]
+    fn browser_is_parent_runtime_only_and_adds_its_guidance() {
+        let dir = two_provider_dir("browser-runtime");
+        let runtime = RuntimeBuilder::new(&dir)
+            .with_config(Config::find(&dir).unwrap())
+            .with_provider("codex")
+            .with_browser_adapter(Arc::new(StubBrowser))
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        assert!(runtime.agent.tool_names().contains(&"browser"));
+        assert!(runtime
+            .agent
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("# Local browser"));
     }
 
     #[test]
