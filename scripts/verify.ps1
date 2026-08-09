@@ -14,30 +14,26 @@ function Step($name, $scriptBlock) {
 }
 
 $env:CARGO_TARGET_DIR = Join-Path $Root "target"
-$BindingFiles = @(
-  "crates/desktop/ui/src/lib/generated/ChatEvent.ts",
-  "crates/desktop/ui/src/lib/generated/SessionInfo.ts",
-  "crates/desktop/ui/src/lib/generated/ProviderView.ts",
-  "crates/desktop/ui/src/lib/generated/ExternalAgentView.ts",
-  "crates/desktop/ui/src/lib/generated/ExternalAgentCheckView.ts",
-  "crates/desktop/ui/src/lib/generated/ModelCapability.ts",
-  "crates/desktop/ui/src/lib/generated/ToolMetaView.ts"
-)
+
+# The whole directory, not a hand-kept list. The list had drifted to 7 of 11
+# files, so ThreadCheckpoint, TurnRecovery, WorkspaceReview and CommandView
+# could change shape without the gate noticing — and nothing about adding a
+# binding reminds you to add it here.
+$BindingDir = "crates/desktop/ui/src/lib/generated"
 
 function Normalize-BindingWhitespace {
+  # ts-rs versions differ only in trailing spaces on a few generated lines.
+  # Strip that generator noise everywhere it can appear rather than from three
+  # named files, so a new binding cannot silently opt out. Trailing whitespace
+  # is never meaningful in the generated TypeScript, so this can only remove
+  # false failures, never mask a real change.
   $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-  $normalizationRules = @{
-    "ChatEvent.ts" = '(?m)[ \t]+(?=\r?$)'
-    "ExternalAgentView.ts" = '(?m)[ \t]+(?=\r?$)'
-    "SessionInfo.ts" = '(?m)^(defaultModel:.*checkpoints:.*?)[ \t]+(?=\r?$)'
-  }
-  foreach ($entry in $normalizationRules.GetEnumerator()) {
-    $path = Join-Path $Root (Join-Path "crates/desktop/ui/src/lib/generated" $entry.Key)
-    $text = [System.IO.File]::ReadAllText($path)
-    $replacement = if ($entry.Key -eq "SessionInfo.ts") { '$1' } else { '' }
-    $clean = [regex]::Replace($text, $entry.Value, $replacement)
+  $dir = Join-Path $Root $BindingDir
+  foreach ($file in Get-ChildItem -Path $dir -Filter *.ts -File) {
+    $text = [System.IO.File]::ReadAllText($file.FullName)
+    $clean = [regex]::Replace($text, '(?m)[ \t]+(?=\r?$)', '')
     if ($clean -ne $text) {
-      [System.IO.File]::WriteAllText($path, $clean, $utf8NoBom)
+      [System.IO.File]::WriteAllText($file.FullName, $clean, $utf8NoBom)
     }
   }
 }
@@ -63,6 +59,24 @@ Step "npm ci" {
   npm ci --no-fund --no-audit
 }
 
+# Ahead of every UI step, on purpose. Generating after the UI had already
+# compiled meant `ui build` type-checked against whatever was committed, so a
+# Rust type change could pass the build and only be caught — if at all — by a
+# gate several steps later.
+Step "binding drift (ts-rs)" {
+  cargo test -p zest-desktop --features export-bindings --lib export_bindings
+  Normalize-BindingWhitespace
+  git diff --exit-code -- $BindingDir
+  if ($LASTEXITCODE -ne 0) { throw "Generated bindings are stale. Commit the regenerated files." }
+
+  # `git diff` cannot see a file that has never been tracked, and a brand new
+  # binding is exactly the drift most worth catching.
+  $untracked = git ls-files --others --exclude-standard -- $BindingDir
+  if ($untracked) {
+    throw "New generated bindings are not committed:`n$($untracked -join "`n")"
+  }
+}
+
 Step "ui test" {
   npm run ui:test
 }
@@ -86,14 +100,6 @@ Step "cargo clippy (strict)" {
 Step "cargo test" {
   # --lib: avoid executing Tauri bin test harnesses (WDAC/App Control can block them).
   cargo test --workspace --lib
-}
-
-Step "binding drift (ts-rs)" {
-  cargo test -p zest-desktop --features export-bindings --lib export_bindings
-  # ts-rs versions differ only in trailing spaces on a few generated lines;
-  # normalize that generator noise while keeping type and field changes strict.
-  Normalize-BindingWhitespace
-  git diff --exit-code -- $BindingFiles
 }
 
 Step "npm audit" {
