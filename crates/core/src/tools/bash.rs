@@ -20,6 +20,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,7 +47,9 @@ const MAX_OUTPUT_BYTES: usize = 30 * 1024;
 /// Generous enough that the clip below still has more than it needs.
 const MAX_STREAM_BYTES: usize = 2 * MAX_OUTPUT_BYTES;
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_BACKGROUND_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
+const MAX_BACKGROUND_PROCESSES: usize = 8;
 
 /// Characters that hand control back to a shell. Presence of any one of these
 /// disqualifies a command from the auto-run path — no exceptions, no escaping
@@ -172,9 +178,34 @@ impl Default for BashSettings {
     }
 }
 
+#[derive(Debug)]
+struct ParsedCommand {
+    command: String,
+    timeout: Duration,
+    background: bool,
+    ready_url: Option<String>,
+}
+
+struct BackgroundProcess {
+    id: u64,
+    child: tokio::process::Child,
+}
+
+impl Drop for BackgroundProcess {
+    fn drop(&mut self) {
+        let Some(pid) = self.child.id() else {
+            return;
+        };
+
+        terminate_process_tree(pid);
+    }
+}
+
 pub struct Bash {
     root: PathBuf,
     settings: BashSettings,
+    background: Mutex<Vec<BackgroundProcess>>,
+    next_background_id: AtomicU64,
 }
 
 impl Bash {
@@ -182,6 +213,8 @@ impl Bash {
         Ok(Self {
             root: std::fs::canonicalize(root)?,
             settings: BashSettings::default(),
+            background: Mutex::new(Vec::new()),
+            next_background_id: AtomicU64::new(1),
         })
     }
 
@@ -190,7 +223,7 @@ impl Bash {
         self
     }
 
-    fn parse(&self, input: &Value) -> Result<(String, Duration), String> {
+    fn parse(&self, input: &Value) -> Result<ParsedCommand, String> {
         let command = input
             .get("command")
             .and_then(Value::as_str)
@@ -201,8 +234,41 @@ impl Bash {
             return Err("`command` must not be empty".into());
         }
 
+        let background = match input.get("background") {
+            None | Some(Value::Null) => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "`background` must be a boolean".to_string())?,
+        };
+
+        let ready_url = match input.get("ready_url") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let url = value
+                    .as_str()
+                    .ok_or_else(|| "`ready_url` must be a string".to_string())?
+                    .trim()
+                    .to_string();
+                if url.is_empty() {
+                    return Err("`ready_url` must not be empty".into());
+                }
+                Some(url)
+            }
+        };
+        if ready_url.is_some() && !background {
+            return Err("`ready_url` requires `background: true`".into());
+        }
+        if let Some(url) = ready_url.as_deref() {
+            validate_ready_url(url)?;
+        }
+
+        let default_timeout = if background {
+            self.settings.timeout_ms.min(DEFAULT_BACKGROUND_TIMEOUT_MS)
+        } else {
+            self.settings.timeout_ms
+        };
         let timeout_ms = match input.get("timeout_ms") {
-            None | Some(Value::Null) => self.settings.timeout_ms,
+            None | Some(Value::Null) => default_timeout,
             Some(v) => v
                 .as_u64()
                 .filter(|n| *n >= 1)
@@ -210,7 +276,12 @@ impl Bash {
         }
         .min(MAX_TIMEOUT_MS);
 
-        Ok((command, Duration::from_millis(timeout_ms)))
+        Ok(ParsedCommand {
+            command,
+            timeout: Duration::from_millis(timeout_ms),
+            background,
+            ready_url,
+        })
     }
 }
 
@@ -226,7 +297,11 @@ impl Tool for Bash {
          state — rather than assuming a change compiles. Read-only commands \
          (cargo check/clippy/test, cargo fmt --check, git status/diff/log, npm \
          test) run immediately; anything else asks the user first, showing the \
-         exact command. Output is truncated in the middle if very long. Not for \
+         exact command. For a long-running local dev server, set `background` to \
+         true and provide a loopback `ready_url`; the tool returns once the \
+         endpoint accepts connections and keeps the process scoped to this \
+         session. Do not run a dev server in the foreground. Output is truncated \
+         in the middle if very long. Not for \
          reading or editing files — use read_file and edit_file, which are far \
          cheaper. For source inspection, use grep/read_file; in particular avoid \
          Windows `findstr` and `Select-String`."
@@ -251,6 +326,14 @@ impl Tool for Bash {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Milliseconds before the command is killed. Defaults to 120000, capped at 600000."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Keep a long-running local process alive for this session; use with ready_url for a dev server"
+                },
+                "ready_url": {
+                    "type": "string",
+                    "description": "Loopback HTTP URL to probe before returning from a background process, e.g. http://localhost:1420"
                 }
             },
             "required": ["command"],
@@ -259,12 +342,27 @@ impl Tool for Bash {
     }
 
     fn prepare(&self, input: Value) -> Result<PreparedToolCall, String> {
-        let (command, _) = self.parse(&input)?;
-        let clearance = classify(
-            &command,
-            &self.settings.extra_allowlist,
-            &self.settings.denylist,
-        );
+        let parsed = self.parse(&input)?;
+        let clearance = if parsed.background {
+            Clearance::NeedsApproval
+        } else {
+            classify(
+                &parsed.command,
+                &self.settings.extra_allowlist,
+                &self.settings.denylist,
+            )
+        };
+        let summary = if parsed.background {
+            match parsed.ready_url.as_deref() {
+                Some(url) => format!(
+                    "Start `{}` in the background and wait for {}",
+                    parsed.command, url
+                ),
+                None => format!("Start `{}` in the background", parsed.command),
+            }
+        } else {
+            format!("Run `{}` in {}", parsed.command, self.root.display())
+        };
 
         // Risk stays Exec whatever the allowlist says. Clearing the allowlist
         // is a statement about the command, not about whether the user wants to
@@ -276,8 +374,8 @@ impl Tool for Bash {
             ApprovalPreview {
                 // The command itself is the thing being approved, so it goes in
                 // the field the UI renders most prominently.
-                path: command.clone(),
-                summary: format!("Run `{command}` in {}", self.root.display()),
+                path: parsed.command,
+                summary,
                 diff: String::new(),
             },
         )
@@ -285,7 +383,13 @@ impl Tool for Bash {
     }
 
     async fn run(&self, input: Value) -> std::result::Result<super::ToolOutcome, String> {
-        let (command, timeout) = self.parse(&input)?;
+        let parsed = self.parse(&input)?;
+        if parsed.background {
+            return self.run_background(parsed).await;
+        }
+
+        let command = parsed.command;
+        let timeout = parsed.timeout;
         let clearance = classify(
             &command,
             &self.settings.extra_allowlist,
@@ -352,6 +456,9 @@ impl Tool for Bash {
                 // Dropping the timed-out future only releases the borrow on
                 // `child` — it does not stop the process. Without this kill a
                 // runaway build would keep burning CPU after the turn moved on.
+                if let Some(pid) = child.id() {
+                    terminate_process_tree(pid);
+                }
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 return Err(format!(
@@ -372,6 +479,131 @@ impl Tool for Bash {
     }
 }
 
+impl Bash {
+    async fn run_background(
+        &self,
+        parsed: ParsedCommand,
+    ) -> std::result::Result<super::ToolOutcome, String> {
+        self.reap_background();
+        {
+            let processes = self
+                .background
+                .lock()
+                .map_err(|_| "background process state is unavailable".to_string())?;
+            if processes.len() >= MAX_BACKGROUND_PROCESSES {
+                return Err(format!(
+                    "too many background processes are already running (max {MAX_BACKGROUND_PROCESSES})"
+                ));
+            }
+        }
+
+        let mut cmd = shell_command(&parsed.command);
+        cmd.current_dir(&self.root)
+            .stdin(Stdio::null())
+            // Dev servers are long-lived. Keep draining both streams so a
+            // verbose watcher cannot block on a full pipe, while startup
+            // failures can still be reported before the process is stored.
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|error| format!("cannot start background `{}`: {error}", parsed.command))?;
+        let pid = child.id();
+        let mut stdout = child.stdout.take();
+        let mut stderr = child.stderr.take();
+        let output_task = tokio::spawn(async move {
+            let read_out = drain_bounded(stdout.as_mut(), MAX_STREAM_BYTES);
+            let read_err = drain_bounded(stderr.as_mut(), MAX_STREAM_BYTES);
+            tokio::join!(read_out, read_err)
+        });
+
+        let deadline = tokio::time::Instant::now() + parsed.timeout;
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("could not inspect background process: {error}"))?
+            {
+                let (out, err) = output_task
+                    .await
+                    .map_err(|error| format!("could not collect startup output: {error}"))?;
+                let output = render_output(&parsed.command, status.code(), &out, &err);
+                return Err(format!(
+                    "background process exited before it became ready:\n\n{output}"
+                ));
+            }
+
+            let ready = match parsed.ready_url.as_deref() {
+                Some(url) => probe_ready_url(url).await,
+                None => true,
+            };
+            if ready {
+                let id = self.next_background_id.fetch_add(1, Ordering::Relaxed);
+                let process = BackgroundProcess { id, child };
+                let process_id = process.id;
+                let mut processes = self
+                    .background
+                    .lock()
+                    .map_err(|_| "background process state is unavailable".to_string())?;
+                processes.push(process);
+                // The capture task remains detached and keeps the pipes drained
+                // until the server exits; the process itself is owned by the
+                // session and killed when this tool is dropped.
+                drop(output_task);
+                let ready = parsed
+                    .ready_url
+                    .map(|url| format!("\nready: {url}"))
+                    .unwrap_or_default();
+                let pid = pid.map(|pid| format!("\npid: {pid}")).unwrap_or_default();
+                return Ok(super::ToolOutcome::text(format!(
+                    "$ {}\nbackground process started\nserver_id: {process_id}{pid}{ready}",
+                    parsed.command
+                )));
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                if let Some(pid) = child.id() {
+                    terminate_process_tree(pid);
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let (out, err) = output_task
+                    .await
+                    .map_err(|error| format!("could not collect startup output: {error}"))?;
+                let output = render_output(&parsed.command, None, &out, &err);
+                return Err(format!(
+                    "`{}` did not become ready within {}s and was stopped.{}",
+                    parsed.command,
+                    parsed.timeout.as_secs(),
+                    if output.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n\n{output}")
+                    }
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn reap_background(&self) {
+        let Ok(mut processes) = self.background.lock() else {
+            return;
+        };
+        processes.retain_mut(|process| match process.child.try_wait() {
+            Ok(Some(_)) => false,
+            Ok(None) | Err(_) => true,
+        });
+    }
+}
+
 #[cfg(windows)]
 fn shell_command(command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("cmd");
@@ -384,6 +616,71 @@ fn shell_command(command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c").arg(command);
     cmd
+}
+
+fn validate_ready_url(raw: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw).map_err(|error| format!("invalid `ready_url`: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("`ready_url` must use http or https".into());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "`ready_url` must include a host".to_string())?;
+    if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return Err("`ready_url` must point to localhost, 127.0.0.1, or ::1".into());
+    }
+    if url.port_or_known_default().is_none() {
+        return Err("`ready_url` must include a known port".into());
+    }
+    Ok(())
+}
+
+async fn probe_ready_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return false;
+    };
+    let Ok(addresses) = tokio::net::lookup_host((host, port)).await else {
+        return false;
+    };
+    for address in addresses {
+        if tokio::time::timeout(
+            Duration::from_millis(250),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn terminate_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(windows))]
+    {
+        // `kill_on_drop` handles the child on Unix. Keep this function shared
+        // so the Windows tree-kill path remains explicit and testable.
+        let _ = pid;
+    }
 }
 
 /// Format a finished command for the model: exit status first, then output with
@@ -610,6 +907,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn background_requests_require_approval_and_local_readiness() {
+        let dir = scratch("background-prep");
+        let tool = Bash::new(&dir).unwrap();
+        let prepared = tool
+            .prepare(json!({
+                "command": "npm run dev",
+                "background": true,
+                "ready_url": "http://localhost:1420"
+            }))
+            .unwrap();
+        assert!(!prepared.auto_eligible);
+        assert!(prepared.preview.summary.contains("localhost:1420"));
+
+        let error = tool
+            .parse(&json!({
+                "command": "npm run dev",
+                "background": true,
+                "ready_url": "https://example.com"
+            }))
+            .unwrap_err();
+        assert!(error.contains("localhost"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_background_process_returns_without_waiting_for_exit() {
+        let dir = scratch("background-run");
+        let tool = Bash::new(&dir).unwrap();
+        let command = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        };
+        let output = tool
+            .run(json!({
+                "command": command,
+                "background": true,
+                "timeout_ms": 1_000
+            }))
+            .await
+            .unwrap()
+            .body;
+        assert!(output.contains("background process started"), "{output}");
+        assert!(output.contains("server_id:"), "{output}");
+        drop(tool);
+    }
+
     #[tokio::test]
     async fn runs_a_command_and_reports_exit_status() {
         let dir = scratch("run");
@@ -732,10 +1076,10 @@ mod tests {
     async fn timeout_is_capped() {
         let dir = scratch("cap");
         let tool = Bash::new(&dir).unwrap();
-        let (_, timeout) = tool
+        let parsed = tool
             .parse(&json!({ "command": "cargo check", "timeout_ms": 99_999_999u64 }))
             .unwrap();
-        assert_eq!(timeout, Duration::from_millis(MAX_TIMEOUT_MS));
+        assert_eq!(parsed.timeout, Duration::from_millis(MAX_TIMEOUT_MS));
     }
 
     #[test]
