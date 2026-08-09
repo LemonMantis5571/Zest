@@ -48,6 +48,14 @@ pub fn local_offset_minutes() -> i32 {
     LOCAL_OFFSET_MINUTES.load(Ordering::Relaxed)
 }
 
+/// Serialises tests that move the process-wide offset.
+///
+/// The offset is a global, so two tests changing it under `cargo test`'s thread
+/// pool can read each other's value and fail for reasons unrelated to what they
+/// assert. Any test that calls [`set_local_offset_minutes`] must hold this.
+#[cfg(test)]
+pub(crate) static LOCAL_OFFSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `YYYY-MM-DD` for a unix timestamp, in the configured local zone.
 ///
 /// ISO order is lexicographic order, which is why the daily map can be a
@@ -1534,6 +1542,7 @@ mod daily_tests {
 
     #[test]
     fn the_local_offset_decides_which_day_a_turn_lands_on() {
+        let _guard = LOCAL_OFFSET_TEST_LOCK.lock();
         // 2026-01-01T02:00:00Z is still 2025-12-31 in UTC-6. A user's late
         // evening belongs to their day, not to tomorrow.
         let two_am_utc = 1_767_232_800;
@@ -1546,6 +1555,7 @@ mod daily_tests {
 
     #[test]
     fn an_absurd_offset_is_refused() {
+        let _guard = LOCAL_OFFSET_TEST_LOCK.lock();
         set_local_offset_minutes(0);
         set_local_offset_minutes(99_999);
         assert_eq!(local_offset_minutes(), 0, "kept the sane value");
