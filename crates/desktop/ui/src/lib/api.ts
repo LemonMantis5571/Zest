@@ -284,16 +284,32 @@ export function setUserProfile(profile: UserProfile) {
   return invoke<UserProfile>("set_user_profile", { profile });
 }
 
-export function cancelTurn() {
-  return invoke<void>("cancel_turn");
+export function cancelTurn(threadId?: string) {
+  return invoke<void>("cancel_turn", { threadId: threadId ?? null });
 }
 
-export function resolveApproval(approvalId: string, decision: ApprovalChoice) {
-  return invoke<void>("resolve_approval", { approvalId, decision });
+export function resolveApproval(
+  approvalId: string,
+  decision: ApprovalChoice,
+  threadId?: string
+) {
+  return invoke<void>("resolve_approval", {
+    approvalId,
+    decision,
+    threadId: threadId ?? null,
+  });
 }
 
-export function resolveQuestion(questionId: string, answer: string) {
-  return invoke<void>("resolve_question", { questionId, answer });
+export function resolveQuestion(
+  questionId: string,
+  answer: string,
+  threadId?: string
+) {
+  return invoke<void>("resolve_question", {
+    questionId,
+    answer,
+    threadId: threadId ?? null,
+  });
 }
 
 export type ReadingDiffView = {

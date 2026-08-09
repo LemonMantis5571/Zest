@@ -1,15 +1,18 @@
-//! Session controller: monotonic session identity, one active turn, cancel.
+//! Session controller: monotonic identities, chat-scoped turns, and cancel.
 //!
-//! Replaces `Mutex<Option<Session>>` + `AtomicBool`. An old turn finishing after
-//! `end_session` / a newer session must never restore into the live slot.
-//!
-//! Detached / ended turns stay registered until they quiesce (`finish_turn`) so
-//! cancel and busy checks remain authoritative until the worker exits.
+//! A turn belongs to the chat that started it, not to the window's current
+//! route. Idle sessions can be replaced when the user navigates, while a
+//! running session stays registered until its worker quiesces. That lets the
+//! desktop continue a response in the background without allowing a stale turn
+//! to restore over a newer chat.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use zest_core::{new_id, Agent, CancelToken, RecoverableRun, SkillSet, Thread};
+
+use super::{ApprovalHub, QuestionHub};
 
 pub struct Session {
     pub session_id: String,
@@ -29,6 +32,10 @@ pub struct Session {
     pub base_system: String,
     /// Shared with `read_skill` for hot-reload.
     pub skills: Arc<RwLock<SkillSet>>,
+    /// Approval/question waiters are owned by this chat so parallel turns do
+    /// not resolve or clear one another's prompts.
+    pub(crate) approval_hub: Arc<ApprovalHub>,
+    pub(crate) question_hub: Arc<QuestionHub>,
 }
 
 #[derive(Clone)]
@@ -38,19 +45,25 @@ pub struct ActiveTurn {
     pub thread_id: String,
     pub root: PathBuf,
     pub cancel: CancelToken,
+    pub(crate) approval_hub: Arc<ApprovalHub>,
+    pub(crate) question_hub: Arc<QuestionHub>,
+}
+
+struct SessionSlot {
+    /// Idle body. It is taken while a worker owns the turn and restored by
+    /// `finish_turn` if this slot has not been ended.
+    session: Option<Session>,
+    turn: Option<ActiveTurn>,
+    ended: bool,
 }
 
 struct Inner {
     next_seq: u64,
-    /// Session the UI currently owns. Cleared by `end_session`.
-    live_session_id: Option<String>,
-    /// Idle session body. Absent while a turn holds it or when empty.
-    session: Option<Session>,
-    /// In-flight turn. Stays set until [`SessionController::finish_turn`] even
-    /// after `end_session` cancelled it (quiesce).
-    turn: Option<ActiveTurn>,
-    /// When true, `finish_turn` must not restore the session body.
-    session_ended: bool,
+    /// Session currently shown by the desktop route.
+    active_session_id: Option<String>,
+    /// Idle and in-flight chats. A running chat remains here after navigation
+    /// so its turn can finish and restore its agent state safely.
+    sessions: HashMap<String, SessionSlot>,
 }
 
 pub struct SessionController {
@@ -77,7 +90,7 @@ impl SessionError {
         match self {
             // Reaches the UI verbatim, so it has to say what to do rather than
             // describe internal state.
-            Self::Busy => "the assistant is still working — stop it or wait for it to finish",
+            Self::Busy => "this chat is still working — switch chats or wait for it to finish",
             Self::NoSession => "no active session — choose a provider first",
             Self::Poisoned => "session lock poisoned",
         }
@@ -89,40 +102,76 @@ impl SessionController {
         Self {
             inner: Mutex::new(Inner {
                 next_seq: 1,
-                live_session_id: None,
-                session: None,
-                turn: None,
-                session_ended: false,
+                active_session_id: None,
+                sessions: HashMap::new(),
             }),
         }
     }
 
     pub fn is_busy(&self) -> Result<bool, SessionError> {
         let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        Ok(g.turn.is_some())
+        Ok(g.sessions.values().any(|slot| slot.turn.is_some()))
     }
 
     pub fn require_idle(&self) -> Result<(), SessionError> {
-        if self.is_busy()? {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        let id = g
+            .active_session_id
+            .as_ref()
+            .ok_or(SessionError::NoSession)?;
+        let slot = g.sessions.get(id).ok_or(SessionError::NoSession)?;
+        if slot.turn.is_some() {
             Err(SessionError::Busy)
-        } else {
+        } else if slot.session.is_some() {
             Ok(())
+        } else {
+            Err(SessionError::NoSession)
         }
     }
 
     pub fn set_session(&self, mut session: Session) -> Result<(), SessionError> {
         let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        if g.turn.is_some() {
-            return Err(SessionError::Busy);
+        // An idle route no longer needs to stay resident once another chat is
+        // opened. In-flight routes are retained until their worker finishes.
+        if let Some(previous_id) = g.active_session_id.take() {
+            let remove_previous = g
+                .sessions
+                .get(&previous_id)
+                .is_some_and(|slot| slot.turn.is_none());
+            if remove_previous {
+                g.sessions.remove(&previous_id);
+            } else {
+                g.active_session_id = Some(previous_id);
+            }
         }
         let seq = g.next_seq;
         g.next_seq = g.next_seq.saturating_add(1);
         let session_id = format!("session-{seq}");
         session.session_id = session_id.clone();
-        g.live_session_id = Some(session_id);
-        g.session = Some(session);
-        g.session_ended = false;
+        g.sessions.insert(
+            session_id.clone(),
+            SessionSlot {
+                session: Some(session),
+                turn: None,
+                ended: false,
+            },
+        );
+        g.active_session_id = Some(session_id);
         Ok(())
+    }
+
+    fn active_id(g: &Inner) -> Result<String, SessionError> {
+        g.active_session_id.clone().ok_or(SessionError::NoSession)
+    }
+
+    fn active_slot_mut(g: &mut Inner) -> Result<&mut SessionSlot, SessionError> {
+        let id = Self::active_id(g)?;
+        g.sessions.get_mut(&id).ok_or(SessionError::NoSession)
+    }
+
+    fn active_slot(g: &Inner) -> Result<&SessionSlot, SessionError> {
+        let id = Self::active_id(g)?;
+        g.sessions.get(&id).ok_or(SessionError::NoSession)
     }
 
     pub fn with_session_mut<R>(
@@ -130,10 +179,11 @@ impl SessionController {
         f: impl FnOnce(&mut Session) -> R,
     ) -> Result<R, SessionError> {
         let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        if g.turn.is_some() {
+        let slot = Self::active_slot_mut(&mut g)?;
+        if slot.turn.is_some() {
             return Err(SessionError::Busy);
         }
-        let session = g.session.as_mut().ok_or(SessionError::NoSession)?;
+        let session = slot.session.as_mut().ok_or(SessionError::NoSession)?;
         Ok(f(session))
     }
 
@@ -142,24 +192,82 @@ impl SessionController {
         f: impl FnOnce(&Session) -> R,
     ) -> Result<Option<R>, SessionError> {
         let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        Ok(g.session.as_ref().map(f))
+        let slot = match Self::active_slot(&g) {
+            Ok(slot) => slot,
+            Err(SessionError::NoSession) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(slot.session.as_ref().map(f))
+    }
+
+    /// Root for the active route, including while its session body is held by
+    /// a background turn.
+    pub fn active_root(&self) -> Result<Option<PathBuf>, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        let slot = match Self::active_slot(&g) {
+            Ok(slot) => slot,
+            Err(SessionError::NoSession) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(slot
+            .session
+            .as_ref()
+            .map(|session| session.root.clone())
+            .or_else(|| slot.turn.as_ref().map(|turn| turn.root.clone())))
+    }
+
+    pub fn has_active_session(&self) -> Result<bool, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        Ok(Self::active_slot(&g).is_ok())
     }
 
     /// Take the session for a turn. Records active turn metadata for cancel.
     pub fn begin_turn(&self) -> Result<(Session, ActiveTurn), SessionError> {
         let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        if g.turn.is_some() {
+        let active_id = Self::active_id(&g)?;
+        let target_thread = g
+            .sessions
+            .get(&active_id)
+            .and_then(|slot| slot.session.as_ref())
+            .map(|session| session.thread_id.clone())
+            .ok_or_else(|| {
+                if g.sessions
+                    .get(&active_id)
+                    .is_some_and(|slot| slot.turn.is_some())
+                {
+                    SessionError::Busy
+                } else {
+                    SessionError::NoSession
+                }
+            })?;
+        // Reopening a chat while its old runtime is still finishing creates a
+        // second idle session object, but it must not start a second turn on
+        // the same transcript.
+        if g.sessions.values().any(|slot| {
+            slot.turn
+                .as_ref()
+                .is_some_and(|turn| turn.thread_id == target_thread)
+        }) {
             return Err(SessionError::Busy);
         }
-        let session = g.session.take().ok_or(SessionError::NoSession)?;
+        let slot = g
+            .sessions
+            .get_mut(&active_id)
+            .ok_or(SessionError::NoSession)?;
+        if slot.turn.is_some() {
+            return Err(SessionError::Busy);
+        }
+        let session = slot.session.take().ok_or(SessionError::NoSession)?;
         let turn = ActiveTurn {
             turn_id: new_id("turn"),
             session_id: session.session_id.clone(),
             thread_id: session.thread_id.clone(),
             root: session.root.clone(),
             cancel: CancelToken::new(),
+            approval_hub: session.approval_hub.clone(),
+            question_hub: session.question_hub.clone(),
         };
-        g.turn = Some(turn.clone());
+        slot.turn = Some(turn.clone());
         Ok((session, turn))
     }
 
@@ -167,7 +275,8 @@ impl SessionController {
     /// for [`Self::finish_turn`] (quiesce).
     pub fn cancel_turn(&self) -> Result<bool, SessionError> {
         let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        if let Some(turn) = &g.turn {
+        let slot = Self::active_slot(&g)?;
+        if let Some(turn) = &slot.turn {
             turn.cancel.cancel();
             Ok(true)
         } else {
@@ -179,36 +288,109 @@ impl SessionController {
     /// need the project root while the session body is temporarily in flight.
     pub fn active_turn(&self) -> Result<Option<ActiveTurn>, SessionError> {
         let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        Ok(g.turn.clone())
+        let slot = match Self::active_slot(&g) {
+            Ok(slot) => slot,
+            Err(SessionError::NoSession) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(slot.turn.clone())
+    }
+
+    /// Find a running turn by its durable chat id, even if the user has
+    /// reopened that chat into a newer idle route.
+    pub fn active_turn_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ActiveTurn>, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        Ok(g.sessions.values().find_map(|slot| {
+            slot.turn
+                .as_ref()
+                .filter(|turn| turn.thread_id == thread_id)
+                .cloned()
+        }))
+    }
+
+    pub fn cancel_turn_for_thread(&self, thread_id: &str) -> Result<bool, SessionError> {
+        let g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
+        let Some(turn) = g.sessions.values().find_map(|slot| {
+            slot.turn
+                .as_ref()
+                .filter(|turn| turn.thread_id == thread_id)
+        }) else {
+            return Ok(false);
+        };
+        turn.cancel.cancel();
+        Ok(true)
     }
 
     /// Return the session after a turn. No-ops when the live session changed
     /// (end/start) so a stale turn cannot overwrite newer state.
     pub fn finish_turn(&self, turn: &ActiveTurn, session: Session) -> Result<bool, SessionError> {
         let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        if g.turn.as_ref().is_some_and(|t| t.turn_id == turn.turn_id) {
-            g.turn = None;
+        let Some(slot) = g.sessions.get_mut(&turn.session_id) else {
+            return Ok(false);
+        };
+        if !slot
+            .turn
+            .as_ref()
+            .is_some_and(|active| active.turn_id == turn.turn_id)
+        {
+            return Ok(false);
         }
-        let restore = !g.session_ended
-            && g.live_session_id.as_deref() == Some(turn.session_id.as_str())
-            && g.session.is_none();
-        if restore {
-            g.session = Some(session);
-            Ok(true)
-        } else {
-            Ok(false)
+        let restore = !slot.ended && slot.session.is_none();
+        slot.turn = None;
+        if !restore {
+            return Ok(false);
         }
+
+        // If the user reopened this same chat while it was running, move the
+        // finished runtime into that visible idle slot. This keeps its agent
+        // history current instead of letting a duplicate route send from a
+        // stale transcript after the background turn completes.
+        let replacement_id = g.active_session_id.clone().filter(|id| {
+            id != &turn.session_id
+                && g.sessions.get(id).is_some_and(|candidate| {
+                    candidate.turn.is_none()
+                        && candidate
+                            .session
+                            .as_ref()
+                            .is_some_and(|active| active.thread_id == turn.thread_id)
+                })
+        });
+        if let Some(replacement_id) = replacement_id {
+            let mut session = session;
+            session.session_id = replacement_id.clone();
+            if let Some(replacement) = g.sessions.get_mut(&replacement_id) {
+                replacement.session = Some(session);
+                replacement.ended = false;
+            }
+            g.sessions.remove(&turn.session_id);
+        } else if let Some(slot) = g.sessions.get_mut(&turn.session_id) {
+            slot.session = Some(session);
+        }
+        Ok(true)
     }
 
     pub fn end_session(&self) -> Result<(), SessionError> {
         let mut g = self.inner.lock().map_err(|_| SessionError::Poisoned)?;
-        if let Some(turn) = &g.turn {
-            turn.cancel.cancel();
-            // Keep `turn` registered until the worker calls finish_turn.
+        let Some(id) = g.active_session_id.take() else {
+            return Ok(());
+        };
+        let remove = if let Some(slot) = g.sessions.get_mut(&id) {
+            if let Some(turn) = &slot.turn {
+                turn.cancel.cancel();
+                slot.ended = true;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        if remove {
+            g.sessions.remove(&id);
         }
-        g.session_ended = true;
-        g.live_session_id = None;
-        g.session = None;
         Ok(())
     }
 }
@@ -267,6 +449,8 @@ mod tests {
             recovery: None,
             base_system: "test".into(),
             skills: Arc::new(RwLock::new(SkillSet::default())),
+            approval_hub: Arc::new(ApprovalHub::new()),
+            question_hub: Arc::new(QuestionHub::new()),
         }
     }
 
@@ -290,5 +474,36 @@ mod tests {
         let (_session, turn) = ctl.begin_turn().unwrap();
         assert!(ctl.cancel_turn().unwrap());
         assert!(turn.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn background_turn_survives_navigation_to_another_chat() {
+        let ctl = SessionController::new();
+        ctl.set_session(dummy_session("a")).unwrap();
+        let (first, first_turn) = ctl.begin_turn().unwrap();
+
+        ctl.set_session(dummy_session("b")).unwrap();
+        let (second, second_turn) = ctl.begin_turn().unwrap();
+
+        assert!(ctl.active_turn_for_thread("thread-a").unwrap().is_some());
+        assert!(ctl.cancel_turn_for_thread("thread-a").unwrap());
+        assert!(first_turn.cancel.is_cancelled());
+        assert!(ctl.finish_turn(&first_turn, first).unwrap());
+        assert!(ctl.finish_turn(&second_turn, second).unwrap());
+        assert!(!ctl.is_busy().unwrap());
+    }
+
+    #[test]
+    fn finishing_a_background_turn_refreshes_a_reopened_chat_slot() {
+        let ctl = SessionController::new();
+        ctl.set_session(dummy_session("a")).unwrap();
+        let (first, first_turn) = ctl.begin_turn().unwrap();
+
+        // This is what navigation does when the user returns to a chat whose
+        // original runtime is still streaming.
+        ctl.set_session(dummy_session("a")).unwrap();
+        assert!(ctl.finish_turn(&first_turn, first).unwrap());
+        let (reopened, _) = ctl.begin_turn().unwrap();
+        assert_eq!(reopened.thread_id, "thread-a");
     }
 }

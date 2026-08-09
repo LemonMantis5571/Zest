@@ -120,7 +120,9 @@ impl Tool for Grep {
          Optional `path` scopes to a file or directory; optional `glob` filters \
          by filename pattern (e.g. `*.rs`). Results are capped. Respects \
          `.gitignore` and skips `.git`, `.zest`, `target`, and `node_modules`. \
-         Direct search of likely-secret files requires user approval."
+         Direct search of likely-secret files requires user approval. Prefer this \
+         over shell search commands so paths, quoting, encoding, and output limits \
+         are handled consistently across platforms."
     }
 
     fn input_schema(&self) -> Value {

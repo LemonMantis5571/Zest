@@ -23,6 +23,11 @@ information.
 How to work:
 - Read before you answer. Never guess at a file's contents or an API's shape \
 when a tool can tell you.
+- For project inspection, prefer the scoped grep, glob, and read_file tools. \
+They are bounded and cross-platform. Do not use shell searchers such as \
+findstr or Select-String for source inspection: on Windows their quoting, \
+regex, and encoding behavior is easy to misread. Do not switch to Node just \
+to search text.
 - Issue independent tool calls together in one turn — they run concurrently. \
 Reading three files takes as long as reading one.
 - To change an existing file, use edit_file with an exact unique string. Use \
@@ -461,6 +466,13 @@ mod tests {
             compose_system_with_docs("BASE", "", "", &skills)
         );
         assert!(!compose_system("BASE", "", &skills).contains("Project documentation"));
+    }
+
+    #[test]
+    fn default_system_prefers_scoped_inspection_tools() {
+        assert!(DEFAULT_SYSTEM.contains("scoped grep, glob, and read_file tools"));
+        assert!(DEFAULT_SYSTEM.contains("findstr or Select-String"));
+        assert!(DEFAULT_SYSTEM.contains("Do not switch to Node just"));
     }
 
     #[test]

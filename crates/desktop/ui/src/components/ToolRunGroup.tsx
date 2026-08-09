@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRightIcon, XIcon } from "lucide-react";
+import { ChevronRightIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 
 import { ToolCallRow } from "@/components/ToolCallRow";
 import type { ToolRunSummary } from "@/lib/toolRuns";
@@ -30,6 +30,8 @@ export function ToolRunGroup({
   onOpenDiff,
 }: Props) {
   const hasChanges = summary.added > 0 || summary.removed > 0;
+  const totalFailure = summary.errors > 0 && summary.errors === tools.length;
+  const partialFailure = summary.errors > 0 && !totalFailure;
   // Completed edits contain the user's most important review surface. Keep
   // those cards visible; inspection-only runs can still collapse to one line.
   const [open, setOpen] = useState(hasChanges);
@@ -70,8 +72,10 @@ export function ToolRunGroup({
       )}
     >
       <span className="grid size-4 shrink-0 place-items-center">
-        {summary.errors > 0 ? (
+        {totalFailure ? (
           <XIcon className="size-3 text-destructive" />
+        ) : partialFailure ? (
+          <TriangleAlertIcon className="size-3 text-amber-400" />
         ) : (
           <span className="size-1.5 rounded-full bg-muted-foreground/40" />
         )}
@@ -91,7 +95,12 @@ export function ToolRunGroup({
         </span>
       ) : null}
       {summary.errors > 0 ? (
-        <span className="shrink-0 text-[11px] text-destructive">
+        <span
+          className={cn(
+            "shrink-0 text-[11px]",
+            totalFailure ? "text-destructive" : "text-amber-400"
+          )}
+        >
           {summary.errors} failed
         </span>
       ) : null}

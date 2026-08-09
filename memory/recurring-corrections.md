@@ -4,6 +4,12 @@ Track corrections that apply across the whole workspace.
 
 ## Corrections
 
+- **Windows source inspection** — `findstr` and `Select-String` are fragile for
+  repository text inspection because quoting, regex, and encoding behavior can
+  be misread. Prefer the scoped `grep`, `glob`, and `read_file` tools; reserve
+  `bash` for builds, tests, and other verification commands. Do not switch to
+  Node merely to search text.
+
 - **User-facing copy** — describe the user's outcome and next action, not Zest's
   implementation. Do not expose workers, chat shells, local gateway ports, script paths,
   cache internals, or raw debugging details in the UI; keep only technical information users
