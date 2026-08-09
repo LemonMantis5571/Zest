@@ -150,6 +150,20 @@ impl ToolRegistry {
         self.tools.iter().any(|tool| tool.uses_context())
     }
 
+    /// Whether any of the tools about to run actually consumes conversation
+    /// context.
+    ///
+    /// Distinct from [`Self::uses_context`], which answers "is such a tool
+    /// registered at all". Preparing the context means cloning and redacting the
+    /// whole conversation, so doing it because delegation is *configured* — as
+    /// opposed to because it is *about to happen* — pays that cost on every tool
+    /// round of every turn, in sessions that may never delegate once.
+    pub fn round_uses_context(&self, called: &[&str]) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| tool.uses_context() && called.contains(&tool.name()))
+    }
+
     pub fn prepare(&self, name: &str, input: Value) -> Result<PreparedToolCall, String> {
         match self.tools.iter().find(|t| t.name() == name) {
             Some(tool) => tool.prepare(input),

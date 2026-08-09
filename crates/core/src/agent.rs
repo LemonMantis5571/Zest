@@ -363,7 +363,16 @@ impl Agent {
                     }
 
                     Self::check_cancel(cancel)?;
-                    if self.tools.uses_context() {
+                    // Only when a tool in *this* round will read it. Building it
+                    // clones the entire conversation and walks it to redact
+                    // sensitive tool bodies; doing that on every tool round
+                    // because delegation happens to be configured spends a
+                    // transcript-sized copy per file read, in sessions that may
+                    // never delegate at all. It still runs immediately before
+                    // the call that consumes it, so what the worker sees is
+                    // exactly as fresh as it was.
+                    let called: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
+                    if self.tools.round_uses_context(&called) {
                         let mut sensitive_ids = self.sensitive_tool_ids.clone();
                         sensitive_ids.extend(turn_sensitive.iter().cloned());
                         let handoff_messages =
@@ -1400,6 +1409,37 @@ mod tests {
         ) -> std::result::Result<crate::tools::ToolOutcome, String> {
             Ok(crate::tools::ToolOutcome::text("captured"))
         }
+    }
+
+    #[tokio::test]
+    async fn a_round_without_a_contextual_tool_does_not_build_the_context() {
+        // Building it clones and redacts the whole conversation. Doing that
+        // because a contextual tool is *registered*, rather than because one is
+        // about to run, spends a transcript-sized copy on every file read in
+        // sessions that never delegate.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(ContextCaptureTool { seen: seen.clone() }));
+        tools.register(Arc::new(NoopTool));
+
+        // The model calls the plain tool; the contextual one is registered but
+        // not invoked.
+        let provider: Arc<dyn Provider> = Arc::new(ToolCallingProvider {
+            calls: AtomicUsize::new(0),
+            tools: vec!["noop"],
+        });
+        let mut agent = Agent::new(provider, tools);
+
+        let mut sink = |_ev: StreamEvent<'_>| {};
+        agent
+            .send("do something ordinary", &mut sink)
+            .await
+            .unwrap();
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no contextual tool ran, so no context should have been built"
+        );
     }
 
     #[tokio::test]
