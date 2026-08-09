@@ -75,7 +75,8 @@ pub use profile::{derive as derive_profile_stats, ChatFacts, DayPoint, ProfileSt
 pub use prompt::{
     compose_for_project, compose_system, compose_system_with_docs, custom_system_path, env_context,
     load_custom_system, load_project_docs, save_custom_system, truncate_chars, DEFAULT_SYSTEM,
-    EXTERNAL_DELEGATION_SYSTEM, MAX_CUSTOM_PROMPT_BYTES, MAX_PROJECT_DOCS_BYTES, PROJECT_DOC_FILES,
+    EXTERNAL_DELEGATION_SYSTEM, LOCAL_BROWSER_SYSTEM, MAX_CUSTOM_PROMPT_BYTES,
+    MAX_PROJECT_DOCS_BYTES, PROJECT_DOC_FILES,
 };
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::registry::{ProviderRegistry, Skipped};
@@ -103,6 +104,7 @@ pub use tools::approval::{
     AllowApprover, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalPreview,
     ApprovalRequest, Approver, DenyApprover, PolicyOutcome, ToolRisk,
 };
+pub use tools::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
 pub use tools::external_agent::{prepare_external_command, ExternalAgent, EXTERNAL_AGENT_TOOL};
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
@@ -115,8 +117,8 @@ pub use tools::read_file::ReadFile;
 pub use tools::sensitive::is_sensitive_path;
 pub use tools::write_file::WriteFile;
 pub use tools::{
-    register_question_tool, register_read_tools, register_skill_tools, register_write_tools, Tool,
-    ToolMetadata, ToolOutcome, ToolRegistry,
+    register_browser_tool, register_question_tool, register_read_tools, register_skill_tools,
+    register_write_tools, Tool, ToolMetadata, ToolOutcome, ToolRegistry,
 };
 pub use transcripts::{CliKind, ScanResult, ScanStatus};
 pub use usage::{
