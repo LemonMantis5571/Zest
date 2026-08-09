@@ -10,6 +10,7 @@
     "npm": "11.13.0"
   },
   "scripts": {
+    "dev": "npm run desktop:dev",
     "ui:dev": "npm run dev -w ui",
     "ui:build": "npm run build -w ui",
     "ui:lint": "npm run lint -w ui",
