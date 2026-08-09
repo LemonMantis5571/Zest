@@ -57,6 +57,14 @@ import {
   reduceThreadActivity,
   type ThreadActivityMap,
 } from "@/lib/threadActivity";
+import {
+  enqueueThreadTurn as appendQueuedTurn,
+  peekThreadTurn,
+  removeThreadTurn,
+  updateThreadTurn,
+  type QueuedTurn,
+  type ThreadQueueMap,
+} from "@/lib/threadQueue";
 import type {
   ApprovalChoice,
   ApprovalMode,
@@ -329,6 +337,7 @@ export default function App() {
   });
   const [sending, setSending] = useState(false);
   const [threadActivity, setThreadActivity] = useState<ThreadActivityMap>({});
+  const [threadQueues, setThreadQueues] = useState<ThreadQueueMap>({});
   const [compacting, setCompacting] = useState(false);
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
   const [effort, setEffort] = useState<EffortId>(DEFAULT_EFFORT);
@@ -356,6 +365,13 @@ export default function App() {
   const sendingRef = useRef(sending);
   sendingRef.current = sending;
   const threadActivityRef = useRef<ThreadActivityMap>({});
+  const threadQueuesRef = useRef<ThreadQueueMap>({});
+  const queueDrainInFlightRef = useRef(new Set<string>());
+  const queueDrainTimersRef = useRef(new Map<string, number>());
+  const drainQueuedTurnRef = useRef<(threadId: string) => void>(() => {});
+  const scheduleQueuedTurnRef = useRef<
+    (threadId: string, delay?: number) => void
+  >(() => {});
   const threadIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const currentTurnIdRef = useRef<string | null>(null);
@@ -386,6 +402,38 @@ export default function App() {
     threadActivityRef.current = next;
     setThreadActivity(next);
   }, []);
+
+  const publishThreadQueues = useCallback((next: ThreadQueueMap) => {
+    threadQueuesRef.current = next;
+    setThreadQueues(next);
+  }, []);
+
+  const enqueueTurn = useCallback(
+    (threadId: string, turn: QueuedTurn) => {
+      publishThreadQueues(
+        appendQueuedTurn(threadQueuesRef.current, threadId, turn)
+      );
+    },
+    [publishThreadQueues]
+  );
+
+  const updateQueuedTurn = useCallback(
+    (threadId: string, turnId: string, text: string) => {
+      publishThreadQueues(
+        updateThreadTurn(threadQueuesRef.current, threadId, turnId, text)
+      );
+    },
+    [publishThreadQueues]
+  );
+
+  const discardQueuedTurn = useCallback(
+    (threadId: string, turnId: string) => {
+      publishThreadQueues(
+        removeThreadTurn(threadQueuesRef.current, threadId, turnId)
+      );
+    },
+    [publishThreadQueues]
+  );
 
   const loadProviders = useCallback(async (prefer?: string | null) => {
     const rows = await backend.listProviders();
@@ -708,6 +756,16 @@ export default function App() {
       turnStartedAtByThreadRef.current.delete(threadKey);
       notifiedApprovalIdsByThreadRef.current.delete(threadKey);
     }
+
+    if (
+      event.kind === "done" ||
+      event.kind === "error" ||
+      event.kind === "cancelled"
+    ) {
+      // Rust emits the terminal event just before releasing its turn slot.
+      // Defer the drain a beat so the queued send cannot race that release.
+      scheduleQueuedTurnRef.current(threadKey, 80);
+    }
   }, [maybeAutoCompact, refreshCheckpointMetadata]);
 
   const flushDeltaQueue = useCallback(
@@ -849,6 +907,7 @@ export default function App() {
 
     setPickerError(null);
     setScreen("chat");
+    scheduleQueuedTurnRef.current(info.threadId, 80);
   }, []);
 
   /**
@@ -1481,15 +1540,34 @@ export default function App() {
         a.status === "done" &&
         (Boolean(a.content?.trim()) || (a.kind === "image" && Boolean(a.dataBase64)))
     );
-    if ((!text && !hasOk) || sending || compacting || compactionInFlightRef.current) {
+    if ((!text && !hasOk) || compacting || compactionInFlightRef.current) {
       return;
     }
-    const chips: UserAttachmentChip[] = pending
-      .filter((a) => a.status === "done")
-      .map((a) => ({ name: a.name, kind: a.kind }));
-    if (session?.threadId && chips.length > 0) {
-      pendingUserAttachmentsRef.current.set(session.threadId, chips);
+    const queueThreadId = threadIdRef.current;
+    const shouldQueue =
+      queueThreadId !== null &&
+      (sendingRef.current ||
+        peekThreadTurn(threadQueuesRef.current, queueThreadId) !== undefined);
+
+    if (shouldQueue && queueThreadId) {
+      enqueueTurn(queueThreadId, {
+        id: newId("queued"),
+        threadId: queueThreadId,
+        text,
+        attachments: pending.map((attachment) => ({ ...attachment })),
+        createdAt: Date.now(),
+      });
+      if (!directAnswer) {
+        setDraft("");
+        setAttachments([]);
+        saveDraft(queueThreadId, "");
+      }
+      if (!sendingRef.current) {
+        scheduleQueuedTurnRef.current(queueThreadId, 80);
+      }
+      return;
     }
+
     if (!directAnswer) {
       setDraft("");
       setAttachments([]);
@@ -1509,9 +1587,17 @@ export default function App() {
     text: string,
     pending: PreparedAttachment[],
     { restoreDraftOnFailure }: { restoreDraftOnFailure: boolean }
-  ) {
-    if (compactionInFlightRef.current) return;
+  ): Promise<{ accepted: boolean; retryable: boolean }> {
+    if (compactionInFlightRef.current) {
+      return { accepted: false, retryable: false };
+    }
     const turnThreadId = threadIdRef.current;
+    const chips: UserAttachmentChip[] = pending
+      .filter((a) => a.status === "done")
+      .map((a) => ({ name: a.name, kind: a.kind }));
+    if (turnThreadId && chips.length > 0) {
+      pendingUserAttachmentsRef.current.set(turnThreadId, chips);
+    }
     // Stay busy until an authoritative done/cancelled/error chat-event arrives.
     setSending(true);
     sendingRef.current = true;
@@ -1539,6 +1625,7 @@ export default function App() {
           dataBase64: a.dataBase64,
         }))
       );
+      return { accepted: true, retryable: false };
     } catch (err) {
       if (turnThreadId) {
         pendingUserAttachmentsRef.current.delete(turnThreadId);
@@ -1568,6 +1655,9 @@ export default function App() {
         }
       }
       const message = formatInvokeError(err);
+      const retryable =
+        message.toLowerCase().includes("busy") ||
+        message.includes("already in progress");
       if (!message.includes("already in progress") && !message.includes('"busy"')) {
         toast.add({
           type: "error",
@@ -1581,8 +1671,56 @@ export default function App() {
           description: message,
         });
       }
+      return { accepted: false, retryable };
     }
   }
+
+  async function drainQueuedTurn(threadId: string) {
+    if (
+      threadId !== threadIdRef.current ||
+      sendingRef.current ||
+      compactionInFlightRef.current ||
+      queueDrainInFlightRef.current.has(threadId)
+    ) {
+      return;
+    }
+
+    const queued = peekThreadTurn(threadQueuesRef.current, threadId);
+    if (!queued) return;
+
+    queueDrainInFlightRef.current.add(threadId);
+    try {
+      const result = await submitTurn(
+        queued.text,
+        [...queued.attachments],
+        { restoreDraftOnFailure: false }
+      );
+      const current = peekThreadTurn(threadQueuesRef.current, threadId);
+      if (current?.id !== queued.id) return;
+
+      if (result.accepted || !result.retryable) {
+        publishThreadQueues(
+          removeThreadTurn(threadQueuesRef.current, threadId, queued.id)
+        );
+      } else {
+        // A terminal event can race Rust's turn-slot release. Keep the item
+        // queued and retry after the short backoff instead of dropping it.
+        scheduleQueuedTurnRef.current(threadId, 250);
+      }
+    } finally {
+      queueDrainInFlightRef.current.delete(threadId);
+    }
+  }
+
+  drainQueuedTurnRef.current = drainQueuedTurn;
+  scheduleQueuedTurnRef.current = (threadId, delay = 0) => {
+    if (queueDrainTimersRef.current.has(threadId)) return;
+    const timer = window.setTimeout(() => {
+      queueDrainTimersRef.current.delete(threadId);
+      void drainQueuedTurnRef.current(threadId);
+    }, delay);
+    queueDrainTimersRef.current.set(threadId, timer);
+  };
 
   /**
    * Leave Plan mode and tell the model to build what it just planned.
@@ -1819,6 +1957,13 @@ export default function App() {
             branch={branch}
             profile={profile}
             sending={sending}
+            queuedMessages={threadQueues[session.threadId] ?? []}
+            onUpdateQueuedMessage={(turnId, text) =>
+              updateQueuedTurn(session.threadId, turnId, text)
+            }
+            onRemoveQueuedMessage={(turnId) =>
+              discardQueuedTurn(session.threadId, turnId)
+            }
             threadActivity={threadActivity}
             model={model}
             effort={effort}

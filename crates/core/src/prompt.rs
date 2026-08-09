@@ -41,6 +41,16 @@ compiles.
 Keep responses focused. State what you verified and what you did not — \
 \"it compiles\" and \"it works\" are different claims.";
 
+/// Added only for the desktop parent runtime, which owns a local webview.
+pub const LOCAL_BROWSER_SYSTEM: &str = "\\
+# Local browser
+
+Use `browser` when a task requires inspecting or operating a live web page. \
+Open a URL first, then use `snapshot` to discover accessible controls before \
+clicking or typing. Prefer role/name or visible text locators over CSS. \
+Click, type, and press are permission-gated; do not enter secrets unless the \
+user explicitly supplied them for that page.";
+
 /// Max bytes for `.zest/system.md` (checked before allocating the full body).
 pub const MAX_CUSTOM_PROMPT_BYTES: usize = 32 * 1024;
 
