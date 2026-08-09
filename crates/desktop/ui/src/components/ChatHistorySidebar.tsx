@@ -319,7 +319,7 @@ export function ChatHistorySidebar({
             >
               {/* The name still reaches a screen reader through the title
                   above, so the glyph itself stays decorative. */}
-              <ProviderIcon providerId={owner} className="size-3" />
+              <ProviderIcon providerId={owner} className="size-4 opacity-80" />
             </span>
           ) : null}
           {age ? (

@@ -30,54 +30,71 @@ type Props = {
   label?: string;
 };
 
-/** Two overlapping strokes — the gateway/relay shape Codex is reached through. */
+/**
+ * OpenAI's knot, reduced to a six-lobed rosette.
+ *
+ * The real mark is a single interlaced ribbon whose crossings vanish below
+ * about 20px. Six lobes on a hexagonal rhythm keeps the silhouette people
+ * recognise at the size this actually renders.
+ */
 function CodexMark() {
+  // Three nested subpaths under `evenodd`: hexagonal ring, then a solid core.
+  // Sized to the full viewBox — an inset glyph reads as smaller still once it
+  // sits at 16px in a sidebar.
   return (
-    <>
-      <path d="M4 8.5 8 6l4 2.5v3L8 14l-4-2.5z" />
-      <path d="M8 6v8" />
-    </>
+    <path d="M8 1 14.1 4.5v7L8 15 1.9 11.5v-7zM8 3.1 3.7 5.55v4.9L8 12.9l4.3-2.45v-4.9zM8 5.6a2.4 2.4 0 1 0 0 4.8 2.4 2.4 0 0 0 0-4.8z" />
   );
 }
 
-/** A radial burst, echoing Anthropic's spoked mark without reproducing it. */
+/** Anthropic's burst: an even radial star, filled so it survives small sizes. */
 function ClaudeMark() {
+  const spokes = Array.from({ length: 8 }, (_, index) => (index * 180) / 8);
   return (
-    <>
-      <path d="M8 2.5v11" />
-      <path d="M3.2 5.2l9.6 5.6" />
-      <path d="M3.2 10.8l9.6-5.6" />
-    </>
+    <g>
+      {spokes.map((angle) => (
+        <rect
+          key={angle}
+          x="7.05"
+          y="1.2"
+          width="1.9"
+          height="13.6"
+          rx="0.95"
+          transform={`rotate(${angle} 8 8)`}
+        />
+      ))}
+    </g>
   );
 }
 
-/** A stylised whale tail. */
+/** DeepSeek's whale, as a filled silhouette. */
 function DeepSeekMark() {
   return (
-    <>
-      <path d="M2.5 10.5c3 0 5-1.5 6.5-4" />
-      <path d="M9 6.5c1.5 1 3 1.5 4.5 1.5-.5 2.5-2.5 4-5 4" />
-    </>
+    <path d="M1.6 8.4c2.9.5 5-.4 6.7-2.6.5-.7 1-1.4 1.7-1.9.2-.2.5 0 .4.3-.2.7-.3 1.4-.2 2 1.3.2 2.6.1 3.9-.3.3-.1.5.2.3.4-.6.7-.9 1.5-1.1 2.4-.5 2.2-2.4 3.7-4.9 3.7-3 0-5.6-1.5-6.9-3.6-.1-.2 0-.4.1-.4z" />
   );
 }
 
-/** Four points converging — Gemini's twin-spark idea, redrawn. */
+/** Gemini's four-point spark. */
 function GeminiMark() {
   return (
-    <>
-      <path d="M8 2.5c0 3-2.5 5.5-5.5 5.5 3 0 5.5 2.5 5.5 5.5 0-3 2.5-5.5 5.5-5.5-3 0-5.5-2.5-5.5-5.5z" />
-    </>
+    <path d="M8 1c.3 3.6 3.4 6.7 7 7-3.6.3-6.7 3.4-7 7-.3-3.6-3.4-6.7-7-7 3.6-.3 6.7-3.4 7-7z" />
   );
 }
 
-/** A plain server/endpoint outline for anything unmapped. */
+/**
+ * Anything unmapped: a plain endpoint.
+ *
+ * Deliberately the dullest of the set — a local model is not a lesser thing,
+ * but it has no mark of its own and pretending otherwise would be inventing a
+ * brand for it.
+ */
 function GenericMark() {
   return (
-    <>
-      <rect x="2.75" y="3.25" width="10.5" height="4" rx="1" />
-      <rect x="2.75" y="8.75" width="10.5" height="4" rx="1" />
-      <path d="M5 5.25h.01M5 10.75h.01" />
-    </>
+    <g>
+      <rect x="2" y="3" width="12" height="4.4" rx="1.3" />
+      <rect x="2" y="8.6" width="12" height="4.4" rx="1.3" />
+      <circle cx="4.6" cy="5.2" r="0.85" className="text-background" fill="currentColor" />
+      <circle cx="4.6" cy="10.8" r="0.85" className="text-background" fill="currentColor" />
+    </g>
   );
 }
 
@@ -96,12 +113,11 @@ export function ProviderIcon({ providerId, className, label }: Props) {
   return (
     <svg
       viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.4}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={cn("size-3.5 shrink-0", className)}
+      // Filled, not stroked. A 1.4px outline at 12px is a grey smudge — solid
+      // shapes are the only thing that reads at sidebar size.
+      fill="currentColor"
+      fillRule="evenodd"
+      className={cn("size-4 shrink-0", className)}
       role={label ? "img" : undefined}
       aria-label={label}
       aria-hidden={label ? undefined : true}
