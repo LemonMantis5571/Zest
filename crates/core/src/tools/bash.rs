@@ -1,4 +1,4 @@
-//! Run a shell command in the project directory, behind the approval gate.
+//! Run a shell command in an explicit working directory, behind the approval gate.
 //!
 //! A coding harness that cannot run `cargo check` writes code it can never
 //! verify. This tool closes that gap without waiting for an OS-level sandbox,
@@ -181,6 +181,8 @@ impl Default for BashSettings {
 #[derive(Debug)]
 struct ParsedCommand {
     command: String,
+    cwd: PathBuf,
+    external_cwd: bool,
     timeout: Duration,
     background: bool,
     ready_url: Option<String>,
@@ -234,6 +236,35 @@ impl Bash {
             return Err("`command` must not be empty".into());
         }
 
+        let raw_cwd = input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "missing required field `cwd`; use `.` for the active project or an absolute path for another project".to_string()
+            })?
+            .trim();
+        if raw_cwd.is_empty() {
+            return Err("`cwd` must not be empty; use `.` for the active project".into());
+        }
+        let raw_cwd_path = Path::new(raw_cwd);
+        let cwd_candidate = if raw_cwd_path.is_absolute() {
+            raw_cwd_path.to_path_buf()
+        } else {
+            self.root.join(raw_cwd_path)
+        };
+        let cwd = std::fs::canonicalize(&cwd_candidate).map_err(|error| {
+            format!("cannot resolve `cwd` `{raw_cwd}` from the active project: {error}")
+        })?;
+        if !cwd.is_dir() {
+            return Err(format!("`cwd` is not a directory: {}", cwd.display()));
+        }
+        if !raw_cwd_path.is_absolute() && !cwd.starts_with(&self.root) {
+            return Err(format!(
+                "relative `cwd` `{raw_cwd}` escapes the active project; use an absolute path for an external project"
+            ));
+        }
+        let external_cwd = !cwd.starts_with(&self.root);
+
         let background = match input.get("background") {
             None | Some(Value::Null) => false,
             Some(value) => value
@@ -278,6 +309,8 @@ impl Bash {
 
         Ok(ParsedCommand {
             command,
+            cwd,
+            external_cwd,
             timeout: Duration::from_millis(timeout_ms),
             background,
             ready_url,
@@ -292,12 +325,15 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &str {
-        "Run a command in the project directory and return its combined output. \
+        "Run a command in an explicit working directory and return its combined output. \
          Use this to verify your work — build, lint, run tests, inspect git \
          state — rather than assuming a change compiles. Read-only commands \
          (cargo check/clippy/test, cargo fmt --check, git status/diff/log, npm \
          test) run immediately; anything else asks the user first, showing the \
-         exact command. For a long-running local dev server, set `background` to \
+         exact command. Every call must set `cwd`: use `.` for the active project \
+         or an absolute path for another project. External directories are shown \
+         in the approval preview and are never auto-run. For a long-running local \
+         dev server, set `background` to \
          true and provide a loopback `ready_url`; the tool returns once the \
          endpoint accepts connections and keeps the process scoped to this \
          session. Do not run a dev server in the foreground. Output is truncated \
@@ -320,7 +356,11 @@ impl Tool for Bash {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command line to run, e.g. `cargo check --all-targets`. Runs in the project root."
+                    "description": "The command line to run, e.g. `cargo check --all-targets`."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Required working directory. Use `.` for the active project or an absolute path for another project."
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -336,14 +376,14 @@ impl Tool for Bash {
                     "description": "Loopback HTTP URL to probe before returning from a background process, e.g. http://localhost:1420"
                 }
             },
-            "required": ["command"],
+            "required": ["command", "cwd"],
             "additionalProperties": false
         })
     }
 
     fn prepare(&self, input: Value) -> Result<PreparedToolCall, String> {
         let parsed = self.parse(&input)?;
-        let clearance = if parsed.background {
+        let clearance = if parsed.background || parsed.external_cwd {
             Clearance::NeedsApproval
         } else {
             classify(
@@ -355,13 +395,19 @@ impl Tool for Bash {
         let summary = if parsed.background {
             match parsed.ready_url.as_deref() {
                 Some(url) => format!(
-                    "Start `{}` in the background and wait for {}",
-                    parsed.command, url
+                    "Start `{}` in `{}` in the background and wait for {}",
+                    parsed.command,
+                    parsed.cwd.display(),
+                    url
                 ),
-                None => format!("Start `{}` in the background", parsed.command),
+                None => format!(
+                    "Start `{}` in `{}` in the background",
+                    parsed.command,
+                    parsed.cwd.display()
+                ),
             }
         } else {
-            format!("Run `{}` in {}", parsed.command, self.root.display())
+            format!("Run `{}` in `{}`", parsed.command, parsed.cwd.display())
         };
 
         // Risk stays Exec whatever the allowlist says. Clearing the allowlist
@@ -390,11 +436,15 @@ impl Tool for Bash {
 
         let command = parsed.command;
         let timeout = parsed.timeout;
-        let clearance = classify(
-            &command,
-            &self.settings.extra_allowlist,
-            &self.settings.denylist,
-        );
+        let clearance = if parsed.external_cwd {
+            Clearance::NeedsApproval
+        } else {
+            classify(
+                &command,
+                &self.settings.extra_allowlist,
+                &self.settings.denylist,
+            )
+        };
 
         let mut cmd = match clearance {
             // Auto-run commands never touch a shell: the metacharacter check
@@ -410,7 +460,7 @@ impl Tool for Bash {
             Clearance::NeedsApproval => shell_command(&command),
         };
 
-        cmd.current_dir(&self.root)
+        cmd.current_dir(&parsed.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -469,7 +519,11 @@ impl Tool for Bash {
         };
 
         let status = status.map_err(|e| format!("`{command}` failed to complete: {e}"))?;
-        let body = render_output(&command, status.code(), &out, &err);
+        let body = format!(
+            "cwd: `{}`\n{}",
+            parsed.cwd.display(),
+            render_output(&command, status.code(), &out, &err)
+        );
 
         // A non-zero exit is information, not a harness failure: the model
         // asked what happens and this is what happened. Returning it as an
@@ -498,7 +552,7 @@ impl Bash {
         }
 
         let mut cmd = shell_command(&parsed.command);
-        cmd.current_dir(&self.root)
+        cmd.current_dir(&parsed.cwd)
             .stdin(Stdio::null())
             // Dev servers are long-lived. Keep draining both streams so a
             // verbose watcher cannot block on a full pipe, while startup
@@ -563,8 +617,9 @@ impl Bash {
                     .unwrap_or_default();
                 let pid = pid.map(|pid| format!("\npid: {pid}")).unwrap_or_default();
                 return Ok(super::ToolOutcome::text(format!(
-                    "$ {}\nbackground process started\nserver_id: {process_id}{pid}{ready}",
-                    parsed.command
+                    "$ {}\ncwd: `{}`\nbackground process started\nserver_id: {process_id}{pid}{ready}",
+                    parsed.command,
+                    parsed.cwd.display()
                 )));
             }
 
@@ -882,11 +937,15 @@ mod tests {
 
         // Risk stays Exec either way — whether the user is asked is the mode's
         // decision, and Manual mode must still be able to ask about `cargo check`.
-        let safe = tool.prepare(json!({ "command": "cargo check" })).unwrap();
+        let safe = tool
+            .prepare(json!({ "command": "cargo check", "cwd": "." }))
+            .unwrap();
         assert_eq!(safe.risk, ToolRisk::Exec);
         assert!(safe.auto_eligible);
 
-        let risky = tool.prepare(json!({ "command": "rm -rf target" })).unwrap();
+        let risky = tool
+            .prepare(json!({ "command": "rm -rf target", "cwd": "." }))
+            .unwrap();
         assert_eq!(risky.risk, ToolRisk::Exec);
         assert!(!risky.auto_eligible);
         // The card must show the command verbatim, not a paraphrase.
@@ -894,12 +953,70 @@ mod tests {
         assert!(risky.preview.summary.contains("rm -rf target"));
     }
 
+    #[test]
+    fn cwd_is_required_and_relative_paths_cannot_escape() {
+        let dir = scratch("cwd-required");
+        let tool = Bash::new(&dir).unwrap();
+
+        let missing = tool
+            .parse(&json!({ "command": "npm run dev" }))
+            .unwrap_err();
+        assert!(missing.contains("cwd"), "{missing}");
+
+        let escaping = tool
+            .parse(&json!({ "command": "npm run dev", "cwd": ".." }))
+            .unwrap_err();
+        assert!(escaping.contains("escapes"), "{escaping}");
+
+        let required = tool.input_schema()["required"].clone();
+        assert_eq!(required, json!(["command", "cwd"]));
+    }
+
+    #[test]
+    fn external_cwd_is_visible_and_never_auto_eligible() {
+        let root = scratch("cwd-root");
+        let external = scratch("cwd-external");
+        let tool = Bash::new(&root).unwrap();
+        let cwd = external.display().to_string();
+        let prepared = tool
+            .prepare(json!({
+                "command": "npm run dev",
+                "cwd": cwd,
+            }))
+            .unwrap();
+
+        assert!(!prepared.auto_eligible);
+        assert!(prepared.preview.summary.contains(&cwd));
+    }
+
+    #[tokio::test]
+    async fn a_command_writes_to_its_explicit_external_cwd() {
+        let root = scratch("cwd-write-root");
+        let external = scratch("cwd-write-external");
+        let tool = Bash::new(&root).unwrap();
+        let command = if cfg!(windows) {
+            "echo external > marker.txt"
+        } else {
+            "printf external > marker.txt"
+        };
+        let cwd = external.display().to_string();
+        let output = tool
+            .run(json!({ "command": command, "cwd": cwd }))
+            .await
+            .unwrap()
+            .body;
+
+        assert!(output.contains(&cwd), "{output}");
+        assert!(external.join("marker.txt").is_file());
+        assert!(!root.join("marker.txt").exists());
+    }
+
     #[tokio::test]
     async fn a_chained_command_is_never_auto_eligible() {
         let dir = scratch("prep-chain");
         let tool = Bash::new(&dir).unwrap();
         let prepared = tool
-            .prepare(json!({ "command": "cargo check && rm -rf /" }))
+            .prepare(json!({ "command": "cargo check && rm -rf /", "cwd": "." }))
             .unwrap();
         assert!(
             !prepared.auto_eligible,
@@ -914,6 +1031,7 @@ mod tests {
         let prepared = tool
             .prepare(json!({
                 "command": "npm run dev",
+                "cwd": ".",
                 "background": true,
                 "ready_url": "http://localhost:1420"
             }))
@@ -924,6 +1042,7 @@ mod tests {
         let error = tool
             .parse(&json!({
                 "command": "npm run dev",
+                "cwd": ".",
                 "background": true,
                 "ready_url": "https://example.com"
             }))
@@ -943,6 +1062,7 @@ mod tests {
         let output = tool
             .run(json!({
                 "command": command,
+                "cwd": ".",
                 "background": true,
                 "timeout_ms": 1_000
             }))
@@ -963,7 +1083,11 @@ mod tests {
         } else {
             "echo hello"
         };
-        let out = tool.run(json!({ "command": command })).await.unwrap().body;
+        let out = tool
+            .run(json!({ "command": command, "cwd": "." }))
+            .await
+            .unwrap()
+            .body;
         assert!(out.contains("hello"), "{out}");
         assert!(out.contains("exit 0"), "{out}");
     }
@@ -1001,7 +1125,7 @@ mod tests {
         // the suite for the default timeout.
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            tool.run(json!({ "command": command, "timeout_ms": 20_000 })),
+            tool.run(json!({ "command": command, "cwd": ".", "timeout_ms": 20_000 })),
         )
         .await
         .expect("must not hang")
@@ -1024,7 +1148,11 @@ mod tests {
         } else {
             "exit 3"
         };
-        let out = tool.run(json!({ "command": command })).await.unwrap().body;
+        let out = tool
+            .run(json!({ "command": command, "cwd": "." }))
+            .await
+            .unwrap()
+            .body;
         assert!(out.contains("exit 3"), "{out}");
     }
 
@@ -1039,7 +1167,7 @@ mod tests {
         };
         let started = std::time::Instant::now();
         let err = tool
-            .run(json!({ "command": command, "timeout_ms": 300 }))
+            .run(json!({ "command": command, "cwd": ".", "timeout_ms": 300 }))
             .await
             .unwrap_err();
         assert!(err.contains("did not finish"), "{err}");
@@ -1059,7 +1187,7 @@ mod tests {
             "sleep 3; echo done > marker.txt"
         };
         let err = tool
-            .run(json!({ "command": command, "timeout_ms": 300 }))
+            .run(json!({ "command": command, "cwd": ".", "timeout_ms": 300 }))
             .await
             .unwrap_err();
         assert!(err.contains("did not finish"), "{err}");
@@ -1077,7 +1205,11 @@ mod tests {
         let dir = scratch("cap");
         let tool = Bash::new(&dir).unwrap();
         let parsed = tool
-            .parse(&json!({ "command": "cargo check", "timeout_ms": 99_999_999u64 }))
+            .parse(&json!({
+                "command": "cargo check",
+                "cwd": ".",
+                "timeout_ms": 99_999_999u64
+            }))
             .unwrap();
         assert_eq!(parsed.timeout, Duration::from_millis(MAX_TIMEOUT_MS));
     }
