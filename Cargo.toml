@@ -6,7 +6,7 @@ members = ["crates/core", "crates/cli", "crates/desktop"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "A provider-aware, local-first coding harness, built in Rust."
+description = "Plan with a frontier model, delegate the execution to the model that does each task best."
 
 [workspace.lints.rust]
 linker_messages = "allow"
