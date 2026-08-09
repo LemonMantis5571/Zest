@@ -452,7 +452,10 @@ export function createFixtureBackend(): DesktopBackend {
         model: options.model ?? session.model,
         effort: options.effort ?? session.effort,
       };
-      return { ...session, messages: [] };
+      // Metadata only, matching Rust: options do not touch the transcript, so
+      // the reply does not carry one.
+      const { messages: _messages, ...meta } = session;
+      return meta;
     },
     async listThreads() {
       return [

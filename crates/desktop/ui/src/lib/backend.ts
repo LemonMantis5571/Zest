@@ -20,6 +20,7 @@ import type {
   ProviderRow,
   RatesStatus,
   SessionInfo,
+  SessionMeta,
   ThreadSummary,
   UsageReport,
   UsageSnapshot,
@@ -83,7 +84,7 @@ export type DesktopBackend = {
   updateSessionOptions(options: {
     model?: string;
     effort?: string;
-  }): Promise<SessionInfo>;
+  }): Promise<SessionMeta>;
   listThreads(): Promise<ThreadSummary[]>;
   listChatProjects(): Promise<ProjectChats[]>;
   openProjectChat(options: {

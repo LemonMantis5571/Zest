@@ -6,7 +6,7 @@ import {
   mergeSessionOptions,
   rollbackSessionOptions,
 } from "./sessionOptions.ts";
-import type { SessionInfo } from "./types.ts";
+import type { SessionInfo, SessionMeta } from "./types.ts";
 
 const base: SessionInfo = {
   sessionId: "s1",
@@ -37,18 +37,31 @@ const base: SessionInfo = {
   messages: [{ id: "u1", role: "user", text: "hi" }],
 };
 
+/** What Rust now replies with when only options changed: no transcript. */
+const meta: SessionMeta = (() => {
+  const { messages: _messages, ...rest } = base;
+  return rest;
+})();
+
 describe("session options authority", () => {
-  it("merges Rust session info but keeps local messages", () => {
-    const info: SessionInfo = {
-      ...base,
+  it("takes the authoritative options and leaves the transcript alone", () => {
+    const merged = mergeSessionOptions(base, {
+      ...meta,
       model: "gpt-5.3",
       effort: "medium",
-      messages: [],
-    };
-    const merged = mergeSessionOptions(base, info);
-    assert.equal(merged.model, "gpt-5.3");
-    assert.equal(merged.effort, "medium");
-    assert.equal(merged.messages.length, 1);
+    });
+    assert.ok(merged);
+    assert.equal(merged?.model, "gpt-5.3");
+    assert.equal(merged?.effort, "medium");
+    // The messages were never in the reply; they come from the session already
+    // held, which is the whole point of not shipping them.
+    assert.equal(merged?.messages.length, 1);
+    assert.equal(merged?.messages[0].id, "u1");
+  });
+
+  it("has nothing to update when no session is open", () => {
+    // A reply about options cannot conjure a conversation that was not open.
+    assert.equal(mergeSessionOptions(null, meta), null);
   });
 
   it("rolls back optimistic model/effort on failure", () => {
