@@ -3,7 +3,7 @@ import type { ModelCapability } from "./ModelCapability";
 import type { ThreadCheckpointView } from "./ThreadCheckpoint";
 import type { TurnRecoveryView } from "./TurnRecovery";
 
-export type SessionInfo = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, threadId: string, 
+export type SessionInfo = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, threadId: string,
 /**
  * Rust-authoritative catalogue for the active provider (UI may only add labels).
  */
