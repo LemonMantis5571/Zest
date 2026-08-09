@@ -109,9 +109,17 @@ export type DesktopBackend = {
   ): Promise<void>;
   sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
-  cancelTurn(): Promise<void>;
-  resolveApproval(approvalId: string, decision: ApprovalChoice): Promise<void>;
-  resolveQuestion(questionId: string, answer: string): Promise<void>;
+  cancelTurn(threadId?: string): Promise<void>;
+  resolveApproval(
+    approvalId: string,
+    decision: ApprovalChoice,
+    threadId?: string
+  ): Promise<void>;
+  resolveQuestion(
+    questionId: string,
+    answer: string,
+    threadId?: string
+  ): Promise<void>;
   setApprovalMode(mode: ApprovalMode): Promise<string>;
   approvalMode(): Promise<string>;
   verifyProvider(id: string): Promise<void>;
@@ -181,11 +189,11 @@ export function createTauriBackend(): DesktopBackend {
     sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
     saveMarkdown: (suggestedName, markdown) =>
       tauriApi.saveMarkdown(suggestedName, markdown),
-    cancelTurn: () => tauriApi.cancelTurn(),
-    resolveApproval: (approvalId, decision) =>
-      tauriApi.resolveApproval(approvalId, decision),
-    resolveQuestion: (questionId, answer) =>
-      tauriApi.resolveQuestion(questionId, answer),
+    cancelTurn: (threadId) => tauriApi.cancelTurn(threadId),
+    resolveApproval: (approvalId, decision, threadId) =>
+      tauriApi.resolveApproval(approvalId, decision, threadId),
+    resolveQuestion: (questionId, answer, threadId) =>
+      tauriApi.resolveQuestion(questionId, answer, threadId),
     setApprovalMode: (mode) => tauriApi.setApprovalMode(mode),
     approvalMode: () => tauriApi.approvalMode(),
     verifyProvider: (id) => tauriApi.verifyProvider(id),

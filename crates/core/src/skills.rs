@@ -113,10 +113,26 @@ impl SkillSet {
 
     /// Discover skills: user home first, then project (project wins on name clash).
     pub fn discover(project_root: &Path) -> Self {
+        // Two roots per scope, and the order matters because a later scan
+        // overwrites an earlier one by name.
+        //
+        // `.agents/skills` is where the wider ecosystem installs these — it is
+        // what `skills.sh` writes and what Claude Code reads. Zest looked only
+        // at its own directory, so a skill installed the ordinary way sat on
+        // disk, recorded in `skills-lock.json`, and was invisible here.
+        //
+        // It is scanned *before* `.zest/skills` in each scope, so a skill a user
+        // deliberately put in Zest's own directory still wins over one that
+        // arrived with a package.
         let mut set = SkillSet::default();
         if let Some(home) = dirs::home_dir() {
+            set.scan_dir(&home.join(".agents").join("skills"), SkillSource::User);
             set.scan_dir(&home.join(".zest").join("skills"), SkillSource::User);
         }
+        set.scan_dir(
+            &project_root.join(".agents").join("skills"),
+            SkillSource::Project,
+        );
         set.scan_dir(
             &project_root.join(".zest").join("skills"),
             SkillSource::Project,
@@ -306,6 +322,48 @@ mod tests {
         assert_eq!(skill.description, "Does a thing");
         assert!(skill.body.contains("# Hello"));
         assert!(skill.inlined());
+    }
+
+    /// The reported bug:  and Claude Code install into
+    /// , and Zest read only its own directory — so an
+    /// installed skill existed on disk, was recorded in ,
+    /// and never appeared.
+    #[test]
+    fn skills_installed_the_ecosystem_way_are_discovered() {
+        let root = scratch("agents-dir");
+        let agents = root
+            .join("proj")
+            .join(".agents")
+            .join("skills")
+            .join("ai-seo");
+        fs::create_dir_all(&agents).unwrap();
+        write_skill(&agents.join("SKILL.md"), "ai-seo", "from skills.sh", "body");
+
+        let set = SkillSet::discover(&root.join("proj"));
+        let skill = set.get("ai-seo").expect("installed skill must be visible");
+        assert_eq!(skill.description, "from skills.sh");
+    }
+
+    /// Both roots are read, and a skill deliberately placed in Zest's own
+    /// directory outranks one that merely arrived with a package.
+    #[test]
+    fn a_zest_skill_wins_over_a_packaged_one_of_the_same_name() {
+        let root = scratch("agents-precedence");
+        let proj = root.join("proj");
+        let agents = proj.join(".agents").join("skills").join("shared");
+        let zest = proj.join(".zest").join("skills").join("shared");
+        fs::create_dir_all(&agents).unwrap();
+        fs::create_dir_all(&zest).unwrap();
+        write_skill(
+            &agents.join("SKILL.md"),
+            "shared",
+            "packaged",
+            "packaged body",
+        );
+        write_skill(&zest.join("SKILL.md"), "shared", "hand placed", "zest body");
+
+        let set = SkillSet::discover(&proj);
+        assert_eq!(set.get("shared").unwrap().description, "hand placed");
     }
 
     #[test]

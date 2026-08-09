@@ -228,7 +228,8 @@ impl Tool for Bash {
          test) run immediately; anything else asks the user first, showing the \
          exact command. Output is truncated in the middle if very long. Not for \
          reading or editing files — use read_file and edit_file, which are far \
-         cheaper."
+         cheaper. For source inspection, use grep/read_file; in particular avoid \
+         Windows `findstr` and `Select-String`."
     }
 
     /// The declared risk is the ceiling. [`Self::prepare`] downgrades a command

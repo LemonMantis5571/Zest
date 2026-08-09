@@ -297,7 +297,7 @@ export function ChatHistorySidebar({
       <li key={key} className="group/thread relative">
         <button
           type="button"
-          disabled={sending || active}
+          disabled={active}
           onClick={() => {
             void openThread(project, thread).catch(() => {
               /* Parent handlers surface the actionable error. */
@@ -424,7 +424,6 @@ export function ChatHistorySidebar({
                 variant="ghost"
                 size="icon-sm"
                 title="Open project folder"
-                disabled={sending}
                 onClick={onOpenFolder}
               >
                 <FolderOpenIcon />
@@ -462,7 +461,6 @@ export function ChatHistorySidebar({
             variant="ghost"
             size="icon-sm"
             title="New chat (Ctrl+N)"
-            disabled={sending}
             onClick={onNewChat}
           >
             <PlusIcon />
@@ -472,7 +470,6 @@ export function ChatHistorySidebar({
             variant="ghost"
             size="icon-sm"
             title="Open project folder"
-            disabled={sending}
             onClick={onOpenFolder}
           >
             <FolderOpenIcon />
@@ -485,7 +482,6 @@ export function ChatHistorySidebar({
           <nav aria-label="Primary" className="flex flex-col gap-0.5">
             <button
               type="button"
-              disabled={sending}
               onClick={onNewChat}
               className={cn(
                 navItemClass(),
@@ -571,7 +567,6 @@ export function ChatHistorySidebar({
                     size="icon-xs"
                     title="Open project folder"
                     aria-label="Open project folder"
-                    disabled={sending}
                     onClick={onOpenFolder}
                   >
                     <PlusIcon />
@@ -618,7 +613,6 @@ export function ChatHistorySidebar({
                             variant="ghost"
                             size="icon-xs"
                             title={`New chat in ${project.name}`}
-                            disabled={sending}
                             className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-100 focus-visible:opacity-100"
                             onClick={() => {
                               void onOpenProjectChat({

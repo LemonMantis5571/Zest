@@ -728,9 +728,7 @@ export function ChatScreen({
         label: "New chat",
         description: "Start a fresh conversation in this project",
         shortcut: "Ctrl+N",
-        run: () => {
-          if (!sending) onNewChat();
-        },
+        run: onNewChat,
       },
       {
         id: "toggle-workbench",
@@ -756,7 +754,7 @@ export function ChatScreen({
         },
       },
     ],
-    [onNewChat, sending, toggleWorkbench, workbenchOpen]
+    [onNewChat, toggleWorkbench, workbenchOpen]
   );
 
   // A bump means "open the User section". Zero is the initial value, so the
@@ -819,9 +817,7 @@ export function ChatScreen({
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.
   useKeybindings({
-    "chat.new": () => {
-      if (!sending) onNewChat();
-    },
+    "chat.new": onNewChat,
     "chat.stop": () => {
       if (sending) onStop?.();
     },
