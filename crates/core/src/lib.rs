@@ -66,7 +66,9 @@ pub use gateway::{
     GATEWAY_KEY_ENV,
 };
 pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
-pub use persist::{PersistPriority, PersistWorker, DELTA_CHECKPOINT_MS};
+pub use persist::{
+    PersistPriority, PersistWorker, Snapshot as PersistSnapshot, DELTA_CHECKPOINT_MS,
+};
 pub use prefs::{ProjectSessionState, ProviderSessionPrefs};
 pub use pricing::{ModelPrice, Prices};
 pub use profile::{derive as derive_profile_stats, ChatFacts, DayPoint, ProfileStats};
