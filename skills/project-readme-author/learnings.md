@@ -22,6 +22,12 @@
 - GitHub strips emoji from heading anchors (`## 🚀 Quick Start` →
   `#quick-start`): TOC links must use emoji-free anchors.
 - README has no social preview configured; repo settings need one (1280×640).
+- 2026-02 reposition: README leads with delegation — "Plan with a frontier
+  model, delegate the execution to the model that does each task best" — per
+  author direction (Zest was built for delegation; frontier models plan,
+  specialists like Gemini 3.5 Flash handle frontend; the pain points are
+  bloat, telemetry, and one-model lock-in). Tagline synced to
+  `[workspace.package].description` in Cargo.toml.
 - The README is a Rust workspace app + CLI: treat as "CLI + desktop app"
   project type — terminal GIF aha ideal but no demo GIF exists yet; the
   mermaid diagram fills the visual slot until one is added.
