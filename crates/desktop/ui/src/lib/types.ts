@@ -5,6 +5,7 @@ import type { ExternalAgentCheckView } from "./generated/ExternalAgentCheckView.
 import type { ExternalAgentView } from "./generated/ExternalAgentView.ts";
 import type { ProviderView as GeneratedProviderView } from "./generated/ProviderView.ts";
 import type { SessionInfo as GeneratedSessionInfo } from "./generated/SessionInfo.ts";
+import type { SessionMeta as GeneratedSessionMeta } from "./generated/SessionMeta.ts";
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
 import type { TurnRecoveryView } from "./generated/TurnRecovery.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
@@ -133,6 +134,15 @@ export type ChatEvent = GeneratedChatEvent;
 export type SessionInfo = Omit<GeneratedSessionInfo, "messages"> & {
   messages: ChatMessage[];
 };
+
+/**
+ * A session without its transcript.
+ *
+ * What operations that do not touch the conversation reply with — changing a
+ * model or effort level, for instance. Structurally a subset of SessionInfo,
+ * so spreading one over the other is well defined.
+ */
+export type SessionMeta = GeneratedSessionMeta;
 
 export type ThreadCheckpoint = ThreadCheckpointView;
 export type TurnRecovery = TurnRecoveryView;
