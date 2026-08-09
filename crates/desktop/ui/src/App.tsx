@@ -9,6 +9,7 @@ import { ProviderPicker } from "@/components/ProviderPicker";
 import { UsageScreen } from "@/components/UsageScreen";
 import { WaitingScreen } from "@/components/WaitingScreen";
 import { toast, Toaster } from "@/components/ui/toast";
+import { admitAttachments } from "@/lib/attachmentLimits";
 import { getBackend } from "@/lib/backend";
 import {
   findApprovalTool,
@@ -1313,14 +1314,26 @@ export default function App() {
   }
 
   function mergeAttachments(files: PreparedAttachment[]) {
+    // Rust caps each batch, which is all it can see. The ceiling that matters
+    // is across batches — ten single-file picks are ten batches — and the list
+    // only exists here.
+    const { accepted, rejected } = admitAttachments(attachments, files);
+    for (const refusal of rejected) {
+      toast.add({
+        type: "error",
+        title: refusal.name,
+        description: refusal.reason,
+      });
+    }
+
     setAttachments((prev) => {
       const seen = new Set(prev.map((a) => a.path + a.name + (a.dataBase64?.slice(0, 32) ?? "")));
-      const next = files.filter(
+      const next = accepted.filter(
         (f) => !seen.has(f.path + f.name + (f.dataBase64?.slice(0, 32) ?? ""))
       );
       return [...prev, ...next];
     });
-    for (const file of files) {
+    for (const file of accepted) {
       if (file.status === "error") {
         toast.add({
           type: "error",
