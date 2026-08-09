@@ -50,6 +50,7 @@ function notAvailable(op: string): never {
 export function createFixtureBackend(): DesktopBackend {
   let session: SessionInfo = { ...FIXTURE_SESSION, messages: [] };
   let chatHandler: ((event: ChatEvent) => void) | null = null;
+  let chatHandlerGeneration = 0;
   let workspace = ".";
   let fixturePinned = false;
   const enabledExternalAgents = new Set<string>();
@@ -742,12 +743,19 @@ export function createFixtureBackend(): DesktopBackend {
       return profile;
     },
     async onChatEvent(handler) {
+      const generation = ++chatHandlerGeneration;
       chatHandler = handler;
       return () => {
-        if (chatHandler === handler) chatHandler = null;
+        // React Strict Mode can overlap an old async subscription cleanup
+        // with a newer registration of the same function. Only the latest
+        // registration is allowed to clear the fixture event sink.
+        if (chatHandlerGeneration === generation && chatHandler === handler) {
+          chatHandler = null;
+        }
       };
     },
     async boot(handler) {
+      chatHandlerGeneration += 1;
       chatHandler = handler;
       await runFixtureStream(handler);
     },

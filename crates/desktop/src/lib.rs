@@ -5,6 +5,7 @@
 //! Thread projection is persisted under `<workspace>/.zest/threads/`.
 
 mod attachments;
+mod browser;
 mod context_meter;
 mod session;
 
@@ -18,7 +19,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 #[cfg(feature = "export-bindings")]
@@ -42,6 +43,7 @@ use attachments::{
     build_user_content, format_display_message, has_images, has_usable_attachment,
     prepare_image_bytes, prepare_paths, AttachmentInput, PreparedAttachment,
 };
+use browser::BrowserHost;
 use context_meter::{estimate_context, ContextUsageView};
 use session::{Session, SessionController, SessionError};
 
@@ -267,6 +269,7 @@ const PLAN_SKILL: &str = "plan";
 
 struct AppState {
     sessions: SessionController,
+    browser: Arc<BrowserHost>,
     login: Mutex<Option<LoginProcess>>,
     /// One coalescing transcript worker per open project. A background turn
     /// must keep its writer after the user navigates to another root.
@@ -2606,6 +2609,7 @@ async fn start_session_inner(
         .with_approver(approver)
         .with_questioner(questioner)
         .with_policy(state.policy.clone())
+        .with_browser_adapter(state.browser.adapter())
         .with_remembered_options(prefs.model, prefs.effort)
         .enable_external_agents(true)
         .register_write_tools(true)
@@ -5460,6 +5464,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             sessions: SessionController::new(),
+            browser: Arc::new(BrowserHost::new()),
             login: Mutex::new(None),
             persist: Mutex::new(HashMap::new()),
             // Validated here too: seeding the cache with a remembered folder
@@ -5471,6 +5476,10 @@ pub fn run() {
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
             config_edit: Mutex::new(()),
             chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
+        })
+        .setup(|app| {
+            app.state::<AppState>().browser.attach(app.handle().clone());
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_providers,
