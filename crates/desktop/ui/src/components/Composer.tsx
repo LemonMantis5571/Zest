@@ -1,13 +1,16 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   ArrowUpIcon,
+  CheckIcon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
   GitBranchIcon,
   ImageIcon,
+  PencilIcon,
   PlusIcon,
   SquareIcon,
+  Trash2Icon,
   XIcon,
 } from "lucide-react";
 
@@ -35,6 +38,7 @@ import {
 } from "@/lib/models";
 import { getBackend } from "@/lib/backend";
 import type { ApprovalMode, CommandView, PreparedAttachment } from "@/lib/types";
+import type { QueuedTurn } from "@/lib/threadQueue";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -48,6 +52,9 @@ type Props = {
   approvalMode: ApprovalMode;
   contextRefreshKey: string | number;
   sending: boolean;
+  queuedMessages: ReadonlyArray<QueuedTurn>;
+  onUpdateQueuedMessage: (turnId: string, text: string) => void;
+  onRemoveQueuedMessage: (turnId: string) => void;
   showModelPicker: boolean;
   optionsDisabled?: boolean;
   attachments: PreparedAttachment[];
@@ -82,6 +89,9 @@ export function Composer({
   approvalMode,
   contextRefreshKey,
   sending,
+  queuedMessages,
+  onUpdateQueuedMessage,
+  onRemoveQueuedMessage,
   showModelPicker,
   optionsDisabled = false,
   attachments,
@@ -107,6 +117,8 @@ export function Composer({
   const [commands, setCommands] = useState<CommandView[]>([]);
   const [commandIndex, setCommandIndex] = useState(0);
   const [commandsDismissed, setCommandsDismissed] = useState(false);
+  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null);
+  const [editingQueuedText, setEditingQueuedText] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -182,12 +194,155 @@ export function Composer({
         (a.kind === "image" && Boolean(a.dataBase64)))
   );
   const canSend =
-    !sending && !compacting && (value.trim().length > 0 || hasOkAttachment);
+    !compacting && (value.trim().length > 0 || hasOkAttachment);
+
+  useEffect(() => {
+    if (
+      editingQueuedId &&
+      !queuedMessages.some((turn) => turn.id === editingQueuedId)
+    ) {
+      setEditingQueuedId(null);
+      setEditingQueuedText("");
+    }
+  }, [editingQueuedId, queuedMessages]);
+
+  function beginQueuedEdit(turn: QueuedTurn) {
+    setEditingQueuedId(turn.id);
+    setEditingQueuedText(turn.text);
+  }
+
+  function cancelQueuedEdit() {
+    setEditingQueuedId(null);
+    setEditingQueuedText("");
+  }
+
+  function saveQueuedEdit() {
+    if (!editingQueuedId) return;
+    const current = queuedMessages.find((turn) => turn.id === editingQueuedId);
+    if (!current) {
+      cancelQueuedEdit();
+      return;
+    }
+
+    const text = editingQueuedText.trim();
+    if (!text && current.attachments.length === 0) return;
+    onUpdateQueuedMessage(editingQueuedId, text);
+    cancelQueuedEdit();
+  }
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-3 pt-20">
       <div className="pointer-events-auto mx-auto w-full max-w-[var(--chat-max)]">
         {aboveComposer}
+        {queuedMessages.length > 0 ? (
+          <div
+            className="pointer-events-auto mb-2 rounded-xl border border-border/80 bg-[color-mix(in_srgb,var(--card)_92%,transparent)] p-2 shadow-lg backdrop-blur-xl"
+            aria-live="polite"
+          >
+            <div className="flex items-center justify-between gap-2 px-1 pb-1.5 text-[11px] text-muted-foreground">
+              <span className="font-medium uppercase tracking-wide">
+                Queued messages
+              </span>
+              <span className="tabular-nums">{queuedMessages.length}</span>
+            </div>
+            <div className="space-y-1">
+              {queuedMessages.map((turn, index) => {
+                const editing = editingQueuedId === turn.id;
+                return (
+                  <div
+                    key={turn.id}
+                    className="rounded-lg border border-border/60 bg-background/30 p-1.5"
+                  >
+                    {editing ? (
+                      <div className="flex items-end gap-1.5">
+                        <textarea
+                          rows={2}
+                          value={editingQueuedText}
+                          aria-label={`Edit queued message ${index + 1}`}
+                          className="min-h-10 flex-1 resize-none rounded-md bg-transparent px-2 py-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+                          onChange={(event) =>
+                            setEditingQueuedText(event.target.value)
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelQueuedEdit();
+                            } else if (
+                              event.key === "Enter" &&
+                              !event.shiftKey &&
+                              !event.nativeEvent.isComposing
+                            ) {
+                              event.preventDefault();
+                              saveQueuedEdit();
+                            }
+                          }}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Save queued message ${index + 1}`}
+                          title="Save queued message"
+                          onClick={saveQueuedEdit}
+                        >
+                          <CheckIcon className="size-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Cancel editing queued message ${index + 1}`}
+                          title="Cancel editing"
+                          onClick={cancelQueuedEdit}
+                        >
+                          <XIcon className="size-3.5" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <div
+                          className="min-w-0 flex-1 truncate text-xs text-foreground"
+                          title={turn.text || "Attachment-only message"}
+                        >
+                          <span className="mr-1 text-muted-foreground">
+                            {index + 1}.
+                          </span>
+                          {turn.text || "Attachment-only message"}
+                          {turn.attachments.length > 0 ? (
+                            <span className="ml-1 text-[10px] text-muted-foreground">
+                              · {turn.attachments.length} attachment
+                              {turn.attachments.length === 1 ? "" : "s"}
+                            </span>
+                          ) : null}
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Edit queued message ${index + 1}`}
+                          title="Edit queued message"
+                          onClick={() => beginQueuedEdit(turn)}
+                        >
+                          <PencilIcon className="size-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Remove queued message ${index + 1}`}
+                          title="Remove queued message"
+                          onClick={() => onRemoveQueuedMessage(turn.id)}
+                        >
+                          <Trash2Icon className="size-3.5" />
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
         <div className="overflow-visible rounded-2xl border border-border bg-[color-mix(in_srgb,var(--card)_92%,transparent)] shadow-[0_16px_48px_rgba(0,0,0,0.55)] backdrop-blur-xl">
           {attachments.length > 0 ? (
             <AttachmentGroup className="px-3 pt-3">
