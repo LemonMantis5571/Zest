@@ -1,9 +1,8 @@
 # Zest starter configuration.
 #
 # Copy this file to `zest.toml` only when you intentionally want project-local
-# provider settings. Otherwise Zest creates and manages
-# `%USERPROFILE%/.zest/zest.toml` for the machine. Credentials never belong in
-# this file.
+# provider settings. Otherwise Zest creates and manages `~/.zest/zest.toml`
+# for the machine. Credentials never belong in this file.
 
 [providers.codex]
 kind = "gateway"
