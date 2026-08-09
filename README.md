@@ -1,174 +1,208 @@
 <div align="center">
 
-<img src="./assets/logo.png" alt="Zest Logo" width="128" height="128" />
+<img src="./assets/logo.png" alt="Zest logo" width="128" height="128" />
 
-# Zest Harness
+# Zest
 
-**The provider-aware, local-first coding harness built in Rust.**
+**A provider-aware, local-first coding harness, built in Rust.**
 
-Zest gives coding AI models a focused, secure execution workspace on your machine. Stream responses, run terminal commands, view real-time diffs, and delegate complex tasks to external tools—all while keeping full control over your code, your secrets, and your quota.
+Run a coding agent in your project: stream responses, read and edit files, run
+commands, and delegate bounded work to external CLIs — with approvals, visible
+diffs, and honest usage accounting at every step.
 
 [![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
 [![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
 
 ---
 
-## Why Zest Harness?
+## What is Zest?
 
-Most AI coding tools lock you into proprietary SaaS subscriptions, hide token usage under opaque telemetry, or attempt to auto-route your prompts through middleman services.
+Zest is a coding harness: the agent loop, tools, and permission layer that sit
+between you and a large language model. One Rust core powers two frontends — a
+Tauri desktop app and a terminal REPL — so the same sessions, tools, approvals,
+and usage records work in both.
 
-**Zest is built differently:**
+You bring your own model account. Zest never routes your prompts through a
+middleman, has no accounts of its own, and records your usage locally so you
+can see what a session actually cost.
 
-- ⚡ **Blazing-Fast Rust Core**: Powered by `zest-core`, an ultra-lightweight, multi-threaded agent engine that drives both our sleek desktop app and terminal CLI.
-- 🔌 **Provider-Aware Freedom**: Bring your own parent session: Codex or Claude subscriptions, the Anthropic API, or any OpenAI-compatible endpoint (OpenAI, DeepSeek, local Ollama, …). You choose the exact model and provider for every session.
-- 🤝 **Explicit Worker Delegation (ACP)**: Offload heavy subtasks to already-authenticated external CLIs (such as Claude Code or Gemini CLI). Workers run in isolated Git worktrees and return diffs for your review.
-- 🔒 **Zero Lock-In & Local-First**: No remote Zest servers, no user accounts, and zero telemetry. Sensitive credentials stay in your OS credential manager — Windows Credential Manager, macOS Keychain, or Linux Secret Service (GNOME Keyring / KWallet).
-- 🛡️ **Human-in-the-Loop Safety**: Irreversible actions—like file writes, terminal executions, or subagent tasks—require your explicit approval with clear diff previews.
-- 📊 **Honest Usage Ledger & Auto-Compaction**: Real-time context tracking and automatic compaction (at 80% context window) with persistent conversation checkpoints so you never lose context or spend quota blindly.
+## Features
 
----
+- **One core, two frontends** — a shared `zest-core` agent loop drives both the
+  desktop app and the `zest` terminal client.
+- **Bring your own parent session** — Codex or Claude through the bundled
+  gateway, the native Anthropic API, or any OpenAI-compatible endpoint
+  (OpenAI, DeepSeek, local servers).
+- **Streaming with effort control** — token-by-token responses with
+  `low`–`max` reasoning effort, so you choose how much the model thinks.
+- **Approvals with diff previews** — writes, shell commands, and worker
+  delegations pause for your explicit `y/N` and show what will change.
+- **Explicit worker delegation** — hand bounded subtasks to already-authenticated
+  Claude Code or Gemini CLI workers, run in isolated Git worktrees, and review
+  their diffs before accepting anything.
+- **Context management that is honest** — a live context meter, automatic
+  compaction at 80% of the window, and checkpoints that survive a restart.
+- **Honest usage ledger** — local token and cost records per provider and model,
+  with estimates clearly separated from provider-reported figures.
+- **Headless JSONL protocol** — run a single deny-only turn for editors and CI
+  with `zest run --jsonl`.
+- **Local-first** — no remote Zest servers, no telemetry, no accounts. Secrets
+  stay in your OS credential manager.
 
-## Supported Platforms
+## How it works
 
-| Platform | Status |
+```mermaid
+flowchart LR
+    subgraph Frontends
+        Desktop[Tauri desktop app]
+        CLI[zest terminal client]
+    end
+    subgraph Core
+        Loop[Agent loop + tools]
+        Approve[Approval layer]
+        Ledger[Usage ledger]
+    end
+    subgraph Providers
+        Gateway[Bundled gateway sidecar]
+        Anthropic[Anthropic API]
+        Compat[OpenAI-compatible API]
+    end
+    subgraph Workers
+        CC[Claude Code]
+        GC[Gemini CLI]
+    end
+
+    Desktop --> Loop
+    CLI --> Loop
+    Loop --> Approve
+    Loop --> Ledger
+    Loop --> Gateway
+    Loop --> Anthropic
+    Loop --> Compat
+    Loop -- delegate_external --> CC
+    Loop -- delegate_external --> GC
+```
+
+The parent conversation runs against the provider you selected. The bundled
+`CLIProxyAPI` sidecar translates subscription-backed providers (Codex, Claude)
+locally and is started and supervised by Zest. External workers are an explicit
+process boundary: they are configured, signed in, and approval-gated — never
+an automatic fallback.
+
+## Getting started
+
+### Install
+
+Download a release for your platform from
+[GitHub Releases](https://github.com/LemonMantis5571/Zest/releases).
+
+- **Windows** — the `.msi` or `.exe` installer. If Windows Firewall prompts,
+  allow local loopback so the desktop app can talk to its bundled gateway.
+- **Linux** — the `.deb`, `.rpm`, or AppImage package:
+
+  ```bash
+  sudo dpkg -i ./zest_0.1.0_amd64.deb    # Debian / Ubuntu
+  sudo rpm -i ./zest-0.1.0-1.x86_64.rpm  # Fedora / openSUSE
+  ./Zest_0.1.0_amd64.AppImage
+  ```
+
+> [!TIP]
+> Verify a downloaded artifact against the release checksums with
+> `Get-FileHash` (Windows) or `sha256sum` (Linux) — every release ships a
+> `SHA256SUMS` file.
+
+### Build from source
+
+Prerequisites: **Rust 1.97.1** (pinned in `rust-toolchain.toml`), **Node.js
+24.16.0+** and **npm**, **Git**, and **PowerShell** (Windows PowerShell 5.1+ or
+`pwsh` 7+) for the gateway and verify scripts.
+
+- **Windows** — Visual Studio Build Tools (C++ workload with Windows SDK) and
+  the WebView2 Evergreen runtime (included with Windows 10/11).
+- **Linux** (Debian/Ubuntu names; other distros ship the same libraries):
+
+  ```bash
+  sudo apt install build-essential pkg-config libssl-dev cmake \
+    libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+    libdbus-1-dev libxdo-dev patchelf tar
+  ```
+
+Then, from the repository root:
+
+```bash
+npm ci                                  # JavaScript dependencies
+./scripts/fetch-gateway.ps1             # fetch the pinned gateway sidecar
+npm run ui:build                        # build the web UI
+cargo run -p zest-desktop               # desktop app
+cargo run -p zest                       # terminal client
+```
+
+On Linux or macOS, invoke the PowerShell scripts with `pwsh ./scripts/...`.
+Use `-Target <rust-target-triple>` to fetch the sidecar for a platform other
+than the host, and `-Check` to verify an existing one.
+
+> [!NOTE]
+> Release builds bundle the gateway sidecar, so `cargo tauri build` requires
+> the pinned binary for the target platform to be present first.
+
+## Quick start
+
+### Desktop
+
+1. Launch Zest and pick a provider — **Codex** (ChatGPT sign-in through the
+   bundled gateway) or an **API key** provider configured in Settings.
+2. Open a project folder, start a chat, and ask for a change. Writes and shell
+   commands pause for your approval with a diff preview.
+3. Keep an eye on the context meter; compaction is automatic at 80%.
+
+Useful shortcuts (all rebindable from Settings):
+
+| Shortcut | Action |
 | --- | --- |
-| **Windows 10/11** (x64, ARM64) | Primary target. Verified on every push. |
-| **Linux** (x64, ARM64) | Supported. Verified on every push. Requires the system packages listed under [Building from source](#how-to-build-from-source). |
-| **macOS** | Keychain and file-open code paths exist, but not yet covered by CI. |
+| `Ctrl+K` | Command palette |
+| `Ctrl+N` | New chat |
+| `Ctrl+B` | Toggle chat history |
+| `Ctrl+Shift+U` | Usage screen |
+| `Ctrl+Shift+M` | Switch provider |
 
----
-
-## Interfaces
-
-| Interface | Description | Ideal For |
-| --- | --- | --- |
-| **Zest Desktop** | Sleek Tauri + React desktop shell with visual diffs, provider pickers, and transcript outlines. | Rich interactive pair-programming sessions. |
-| **Zest CLI** | Lightweight REPL running directly in your terminal using the exact same Rust agent core. | Quick terminal runs, SSH sessions, and scriptable workflows. |
-
----
-
-## How to Install
-
-### Windows
-
-1. Download the latest `.msi` or `.exe` installer from [GitHub Releases](https://github.com/LemonMantis5571/Zest/releases).
-2. *(Optional)* Verify the installer checksum using PowerShell:
-
-   ```powershell
-   Get-FileHash ./Zest_0.1.0_x64-setup.exe -Algorithm SHA256
-   ```
-
-3. Run the installer and launch Zest.
-4. If Windows Firewall prompts for permissions, allow local loopback access so the desktop application can communicate with its bundled local gateway.
-
-### Linux
-
-1. Download the `.deb`, `.rpm`, or AppImage package for your distribution from [GitHub Releases](https://github.com/LemonMantis5571/Zest/releases).
-2. Install with your distribution's tooling:
-
-   ```bash
-   sudo dpkg -i ./zest_0.1.0_amd64.deb    # Debian / Ubuntu
-   sudo rpm -i ./zest-0.1.0-1.x86_64.rpm  # Fedora / openSUSE
-   chmod +x ./Zest_0.1.0_amd64.AppImage && ./Zest_0.1.0_amd64.AppImage
-   ```
-
-3. *(Optional)* Verify the package checksum with `sha256sum`.
-
----
-
-## How to Build from Source
-
-### Prerequisites
-
-- **Rust**: 1.97.1 (managed via `rustup`; pinned in `rust-toolchain.toml`)
-- **Node.js**: 24.16.0+ & **npm** (pinned in `.nvmrc` / `package.json`)
-- **Git**
-- **PowerShell** to run the gateway fetch and verify scripts: Windows PowerShell 5.1+ on Windows, PowerShell 7+ (`pwsh`) on Linux.
-
-**Windows**
-
-- **WebView2**: Evergreen runtime (included with Windows 10/11)
-- **Visual Studio Build Tools**: C++ workload with Windows SDK
-
-**Linux** (Debian/Ubuntu package names; other distributions ship the same libraries under different names)
+### Terminal
 
 ```bash
-sudo apt install build-essential pkg-config libssl-dev cmake \
-  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-  libdbus-1-dev libxdo-dev patchelf tar
+zest                  # start the interactive REPL
+zest auth             # show provider authentication status
+zest usage            # show local usage totals and last-30-day cost
+zest doctor --live    # opt-in live check: streaming, tools, ledger, persistence
 ```
 
-- `libwebkit2gtk-4.1-dev` — the WebView used by Tauri (required to build the desktop app).
-- `libdbus-1-dev` + `pkg-config` — required by `keyring`'s Secret Service backend, which stores API keys in GNOME Keyring / KWallet.
-- `cmake` — required to build `aws-lc-rs` (TLS).
-- `patchelf` — used by Tauri when bundling AppImages.
+> [!WARNING]
+> `zest doctor --live` makes one real provider call and spends quota. It is a
+> manual acceptance check, not something to wire into CI.
 
-### Build & Run Steps
+## Configuration
 
-1. **Clone the repository**:
+Zest creates the user-level config at `~/.zest/zest.toml` on first launch. A
+project can override it with a local `zest.toml` (start from
+`zest.toml.example`). Secrets never belong in either file — API keys live in
+your OS credential manager (Windows Credential Manager, macOS Keychain, or
+Linux Secret Service), and subscription sign-ins stay with the vendor CLI.
 
-   ```bash
-   git clone https://github.com/LemonMantis5571/Zest.git
-   cd Zest
-   ```
+```toml
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+api_key_env = "ZEST_GATEWAY_KEY"
+model = "gpt-5.6-terra"
 
-2. **Install JavaScript dependencies**:
-
-   ```bash
-   npm ci
-   ```
-
-3. **Fetch the pinned gateway sidecar** (the bundled local gateway binary Zest ships for provider sign-in):
-
-   ```bash
-   ./scripts/fetch-gateway.ps1        # Windows
-   pwsh ./scripts/fetch-gateway.ps1   # Linux / macOS
-   ```
-
-   Use `-Target <rust-target-triple>` to fetch the sidecar for a platform other than the host, and `-Check` to verify an existing one.
-
-4. **Build the web UI**:
-
-   ```bash
-   npm run ui:build
-   ```
-
-5. **Run Zest Desktop**:
-
-   ```bash
-   cargo run -p zest-desktop
-   ```
-
-6. *(Optional)* **Run Zest CLI**:
-
-   ```bash
-   cargo run -p zest
-   ```
-
-### Building Installers
-
-```bash
-npm run desktop:build
+[default]
+provider = "codex"
+model = "gpt-5.6-terra"
 ```
 
-Generated artifacts:
-
-- Windows: `target/release/bundle/msi/` and `target/release/bundle/nsis/`
-- Linux: `target/release/bundle/deb/`, `target/release/bundle/rpm/`, and `target/release/bundle/appimage/`
-
-Release builds require the pinned gateway sidecar for the target platform; `scripts/fetch-gateway.ps1 -Target <triple>` fetches it.
-
----
-
-## Quick Setup & Configuration
-
-### 1. Provider Setup (API Keys)
-
-Configure model providers via **Settings > Add API provider** in Zest Desktop. Advanced users can use a local `zest.toml`; the repository ships only `zest.toml.example`. Keys are stored securely in your OS credential manager — Windows Credential Manager, macOS Keychain, or Linux Secret Service (GNOME Keyring / KWallet).
-
-Zest creates the user-level configuration at `~/.zest/zest.toml` on first launch. You do not need to create a project `zest.toml` unless you want provider or worker settings that apply only to that project.
+OpenAI-compatible providers are configured the same way, with their keys stored
+in the credential manager instead of the file:
 
 ```toml
 [providers.deepseek]
@@ -178,9 +212,22 @@ model = "deepseek-v4-flash"
 credential = "deepseek"
 ```
 
-### 2. External Workers (Claude Code & Gemini CLI)
+Environment overrides:
 
-Delegate bounded subtasks to external CLI tools without re-authenticating. Sign into the vendor CLI on your machine and declare it in your local `zest.toml` or Desktop Settings. MCP pass-through is off by default; enable it per worker only if you want that CLI to use its own configured MCP servers. Zest does not manage those servers or review individual MCP calls.
+| Variable | Purpose |
+| --- | --- |
+| `ZEST_GATEWAY_KEY` | Client token the bundled gateway accepts |
+| `ZEST_BASE_URL` | One-off gateway origin override (no `zest.toml` edit) |
+| `ZEST_MODEL` | Default model for override sessions |
+| `ZEST_EFFORT` | Default reasoning effort (`low`–`max`) |
+
+## Delegating to external workers
+
+For bounded subtasks, Zest can delegate to an external CLI that is already
+signed in — currently Claude Code and Gemini CLI — over ACP or a headless
+invocation. The worker runs in an isolated Git worktree by default and its
+answer and diff come back for your review; the delegation itself still needs
+your approval.
 
 ```toml
 [agents.claude]
@@ -192,26 +239,52 @@ allow_mcp = false
 workspace = "isolated"
 ```
 
-When enabled, Claude uses its existing MCP configuration and Gemini uses its existing MCP server
-configuration. The same settings are available from Settings > CLI delegation. The worker model is
-independent from Zest's selected chat model; choose **CLI default** to let the vendor CLI decide.
-The delegation approval still applies before the worker starts, but MCP calls remain controlled by
-the external CLI.
+The worker model is independent of Zest's chat model — choose **CLI default**
+to let the vendor CLI decide.
 
----
+> [!WARNING]
+> MCP pass-through is off by default. Enabling it lets a worker use the MCP
+> servers already configured in its own CLI; Zest does not manage those servers
+> or review individual MCP calls.
 
-## Verifying a Build
+## Headless mode
 
-The same gate Windows and Linux CI run is available locally:
+`zest run` executes one turn over a line-delimited JSON protocol
+(`zest-jsonl-v1`), designed for editors and CI. Approvals are reported and
+denied rather than waiting on a prompt, so the run is deterministic.
 
 ```bash
-npm run verify
+echo "Summarize README.md" | zest run --jsonl
 ```
 
-It checks the gateway release pin and sidecar, installs npm dependencies, runs UI tests/lint/build, strict Rust clippy, workspace library tests, generated-binding drift, npm audit, RustSec, and whitespace hygiene.
+Events on stdout: `session`, `text`, `thinking`, `tool_call_start`,
+`tool_call_update`, `tool_call_result`, `approval_needed`, `question_needed`,
+`model_substituted`, `done`, `error`.
 
----
+## Usage ledger
 
-## License
+Every turn is metered locally per provider and model: requests, input and
+output tokens, and cache hits. Cost is priced from a local rate table (the
+published LiteLLM table, cached for a day, with a `prices.toml` override
+layer) and from token counts that Claude Code and Codex record in their own
+transcripts.
 
-Zest is open source software released under the [MIT License](LICENSE).
+Cost figures are an **estimate at list API rates**, not a bill — Zest has no
+billing relationship with any provider. Where a CLI records what it was
+actually charged, that figure is used and labelled as reported.
+
+## Supported platforms
+
+| Platform | Status |
+| --- | --- |
+| Windows 10/11 (x64, ARM64) | Primary target, verified on every push |
+| Linux (x64, ARM64) | Supported, verified on every push |
+| macOS | Keychain and file-open paths exist; not yet CI-verified |
+
+## Documentation
+
+- [Design](DESIGN.md) — product and architecture notes
+- [Project context](PROJECT_CONTEXT.md) — goals, constraints, and glossary
+- [Contributing](CONTRIBUTING.md) — development and verification workflow
+- [Changelog](CHANGELOG.md) — user-facing changes
+- [Security](SECURITY.md) — reporting vulnerabilities
