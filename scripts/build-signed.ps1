@@ -110,14 +110,17 @@ if (-not $VerifyOnly) {
     }
     $payload | ConvertTo-Json -Depth 6 | Out-File -LiteralPath $overlay -Encoding utf8
 
-    Write-Host "`nBuilding UI ..."
-    & npm run --prefix "$root/crates/desktop/ui" build
-    if ($LASTEXITCODE -ne 0) { throw "UI build failed" }
-
-    Write-Host "`nBuilding signed bundles ..."
+    # One entry point, on purpose.
+    #
+    # This used to build the UI here and then call `npx tauri build`, which runs
+    # `beforeBuildCommand` and builds the same 4,400 modules a second time.
+    # Going through the package script instead also restores the `postbuild`
+    # hook — `npx tauri build` skips it, so signed releases were the one build
+    # that never ran the bundle verifier.
+    Write-Host "`nBuilding signed bundles (UI included) ..."
     Push-Location $desktop
     try {
-        & npx tauri build --config tauri.signing.conf.json
+        & npm run build -- --config tauri.signing.conf.json
         if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
     } finally {
         Pop-Location
