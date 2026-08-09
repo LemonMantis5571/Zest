@@ -267,15 +267,15 @@ const PLAN_SKILL: &str = "plan";
 
 struct AppState {
     sessions: SessionController,
-    approvals: Arc<ApprovalHub>,
-    questions: Arc<QuestionHub>,
     login: Mutex<Option<LoginProcess>>,
-    persist: Mutex<Option<PersistWorker>>,
+    /// One coalescing transcript worker per open project. A background turn
+    /// must keep its writer after the user navigates to another root.
+    persist: Mutex<HashMap<PathBuf, PersistWorker>>,
     /// Preferred project root (folder picker / last-workspace). Falls back to cwd.
     workspace_root: Mutex<Option<PathBuf>>,
-    /// The last working provider configuration. A folder switch ends the old
-    /// runtime before the new one is built; keep its provider entry available
-    /// when the destination is an ordinary folder with no zest.toml yet.
+    /// The last working provider configuration. Keep its provider entry
+    /// available when the destination is an ordinary folder with no zest.toml
+    /// yet; an in-flight runtime may still be finishing in the old folder.
     workspace_config: Mutex<Option<Config>>,
     /// Mode + session grants. Outlives any one project so switching folders
     /// does not silently reset the user's chosen permission level.
@@ -2170,10 +2170,6 @@ fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String
     if let Ok(mut guard) = state.workspace_root.lock() {
         *guard = Some(root.clone());
     }
-    // Drop any stale persist worker bound to the previous project.
-    if let Ok(mut guard) = state.persist.lock() {
-        *guard = None;
-    }
     Ok(root)
 }
 
@@ -2223,11 +2219,12 @@ fn ensure_persist(state: &AppState, root: &std::path::Path) -> Result<PersistWor
         .persist
         .lock()
         .map_err(|_| "persist lock poisoned".to_string())?;
-    if let Some(worker) = guard.as_ref() {
+    let key = root.to_path_buf();
+    if let Some(worker) = guard.get(&key) {
         return Ok(worker.clone());
     }
     let worker = PersistWorker::spawn(root).map_err(|e| e.to_string())?;
-    *guard = Some(worker.clone());
+    guard.insert(key, worker.clone());
     Ok(worker)
 }
 
@@ -2505,9 +2502,6 @@ async fn start_session_inner(
     thread_override: Option<(Thread, Option<String>)>,
 ) -> Result<SessionInfo, String> {
     zest_core::load_env();
-    state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
 
     let root = resolve_workspace_root(&state)?;
     let config = config_for_session(&state, &root)?;
@@ -2567,32 +2561,41 @@ async fn start_session_inner(
             (resolved.thread, resolved.warning, resolved.created)
         }
     };
+    // Opening a chat while its existing turn is still live must not run the
+    // restart reconciler: that reconciler quite correctly closes unfinished
+    // runs after a process crash, but this is an in-process navigation.
+    let live_turn = state
+        .sessions
+        .active_turn_for_thread(&thread.id)
+        .map_err(map_session_err)?
+        .is_some();
     let claiming_legacy_thread = thread.provider_id.is_none();
-    let (recovery_warning, recovery) = match recover_chat_on_load(
-        &root,
-        &store,
-        &thread.id,
-        load_warning.is_some(),
-    ) {
-        Ok((recovered_thread, warning, recovery)) => {
-            thread = recovered_thread;
-            (warning, recovery)
-        }
-        Err(_) => (
-            Some(
-                "Chat recovery state could not be checked; the saved transcript is still available."
-                    .into(),
+    let (recovery_warning, recovery) = if live_turn {
+        (None, None)
+    } else {
+        match recover_chat_on_load(&root, &store, &thread.id, load_warning.is_some()) {
+            Ok((recovered_thread, warning, recovery)) => {
+                thread = recovered_thread;
+                (warning, recovery)
+            }
+            Err(_) => (
+                Some(
+                    "Chat recovery state could not be checked; the saved transcript is still available."
+                        .into(),
+                ),
+                None,
             ),
-            None,
-        ),
+        }
     };
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
 
+    let approval_hub = Arc::new(ApprovalHub::new());
+    let question_hub = Arc::new(QuestionHub::new());
     let approver: Arc<dyn Approver> = Arc::new(HubApprover {
-        hub: state.approvals.clone(),
+        hub: approval_hub.clone(),
     });
     let questioner: Arc<dyn Questioner> = Arc::new(HubQuestioner {
-        hub: state.questions.clone(),
+        hub: question_hub.clone(),
     });
     let session_config = config.clone();
 
@@ -2677,6 +2680,8 @@ async fn start_session_inner(
         recovery,
         base_system: runtime.base_system,
         skills: runtime.skills,
+        approval_hub,
+        question_hub,
     };
 
     if let Err(error) = state.sessions.set_session(session) {
@@ -2883,11 +2888,10 @@ fn list_cached_threads(
 fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, String> {
     let active_root = state
         .sessions
-        .with_session_mut(|session| {
-            remember_workspace(&session.root);
-            session.root.clone()
-        })
-        .map_err(map_session_err)?;
+        .active_root()
+        .map_err(map_session_err)?
+        .unwrap_or(resolve_workspace_root(&state)?);
+    remember_workspace(&active_root);
 
     let mut roots = load_known_workspaces();
     if !roots.iter().any(|p| p == &active_root) {
@@ -3310,8 +3314,6 @@ async fn open_project_chat(
     provider_id: Option<String>,
     copy_thread: Option<bool>,
 ) -> Result<SessionInfo, String> {
-    state.sessions.require_idle().map_err(map_session_err)?;
-
     let requested_provider = state
         .sessions
         .session_info_snapshot(|s| s.provider_id.clone())
@@ -3420,9 +3422,9 @@ async fn open_project_chat(
 
     set_workspace_root(&state, root)?;
 
-    // `set_session` replaces an idle session, so keep the old one alive until
-    // the new runtime has been built. A failed project switch must not leave
-    // the UI pointing at a session that the backend already discarded.
+    // Keep the old route alive until the new runtime has been built. If it is
+    // still running, its worker continues in the background; if it is idle,
+    // `set_session` removes it after the new runtime is ready.
     let result = start_session_inner(
         state.clone(),
         provider_id.clone(),
@@ -3448,8 +3450,6 @@ async fn open_project_chat(
 #[tauri::command]
 fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
 
     let root = state
         .sessions
@@ -3509,8 +3509,6 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
 #[tauri::command]
 fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
 
     state
         .sessions
@@ -3535,8 +3533,6 @@ fn new_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
 #[tauri::command]
 fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
 
     state
         .sessions
@@ -3567,8 +3563,6 @@ fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
 #[tauri::command]
 fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
 
     state
         .sessions
@@ -3604,8 +3598,6 @@ fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<Se
 #[tauri::command]
 fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
 
     let message_id = message_id.trim().to_string();
     if message_id.is_empty() {
@@ -3641,8 +3633,6 @@ fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<Sessio
 #[tauri::command]
 async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
 
     let (mut session, turn) = state.sessions.begin_turn().map_err(map_session_err)?;
     let store = match open_store(&session.root) {
@@ -3693,20 +3683,45 @@ fn delete_thread(
     project_path: Option<String>,
 ) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
+
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err(desktop_err("invalid", "chat id is empty"));
+    }
+
+    let target_root = match project_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+        None => state
+            .sessions
+            .active_root()
+            .map_err(map_session_err)?
+            .ok_or_else(|| desktop_err("no_session", "open a project before deleting a chat"))?,
+    };
+
+    // A background turn still owns the authoritative transcript. Refuse to
+    // delete it from a different route, otherwise its final save could
+    // recreate the chat after the sidebar reports success.
+    if state
+        .sessions
+        .active_turn_for_thread(&id)
+        .map_err(map_session_err)?
+        .is_some_and(|turn| {
+            turn.root == target_root || display_path(&turn.root) == display_path(&target_root)
+        })
+    {
+        return Err(desktop_err(
+            "busy",
+            "this chat is still working — stop it before deleting it",
+        ));
+    }
 
     state
         .sessions
         .with_session_mut(|session| -> Result<SessionInfo, String> {
-            let target_root = match project_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
-                None => session.root.clone(),
-            };
             let store = open_store(&target_root)?;
             // Deletion is allowed across providers: the sidebar intentionally
             // lists every provider's chats, and removing a chat does not
@@ -3815,8 +3830,8 @@ async fn send_message(
     // from a previous process. The durable run record remains available for
     // diagnostics, but the session no longer advertises the stale action.
     session.recovery = None;
-    state.approvals.begin_turn(&turn.turn_id);
-    state.questions.begin_turn(&turn.turn_id);
+    turn.approval_hub.begin_turn(&turn.turn_id);
+    turn.question_hub.begin_turn(&turn.turn_id);
 
     // Every non-empty turn gets a rewind point before the UI projection changes.
     // The first empty draft does not need a snapshot and should not create
@@ -3825,15 +3840,15 @@ async fn send_message(
         let store = match open_store(&session.root) {
             Ok(store) => store,
             Err(error) => {
-                state.approvals.clear();
-                state.questions.clear();
+                turn.approval_hub.clear();
+                turn.question_hub.clear();
                 let _ = state.sessions.finish_turn(&turn, session);
                 return Err(error);
             }
         };
         if let Err(error) = store.create_checkpoint(&mut session.thread, "Before turn") {
-            state.approvals.clear();
-            state.questions.clear();
+            turn.approval_hub.clear();
+            turn.question_hub.clear();
             let _ = state.sessions.finish_turn(&turn, session);
             return Err(error.to_string());
         }
@@ -3870,8 +3885,8 @@ async fn send_message(
     let worker = match ensure_persist(&state, &session.root) {
         Ok(w) => w,
         Err(e) => {
-            state.approvals.clear();
-            state.questions.clear();
+            turn.approval_hub.clear();
+            turn.question_hub.clear();
             let _ = state.sessions.finish_turn(&turn, session);
             return Err(desktop_err("persistence", e));
         }
@@ -3879,8 +3894,8 @@ async fn send_message(
     let persistence = match ChatPersistence::open(&session.root) {
         Ok(persistence) => persistence,
         Err(error) => {
-            state.approvals.clear();
-            state.questions.clear();
+            turn.approval_hub.clear();
+            turn.question_hub.clear();
             let _ = state.sessions.finish_turn(&turn, session);
             return Err(desktop_err("persistence", error.to_string()));
         }
@@ -3964,6 +3979,15 @@ async fn send_message(
         let live_thread = live_thread.clone();
         let worker = worker.clone();
         let persistence = persistence.clone();
+        // Whether a tool has run since the last thing the model said.
+        //
+        // A tool-using turn is several provider rounds, and all of them write
+        // into one assistant message. Without this, the sentence that closes one
+        // round and the sentence that opens the next are concatenated with
+        // nothing between them — "…survey the current state first.Now I have the
+        // full picture." — which reads as one long malformed paragraph rather
+        // than as the several separate remarks it actually is.
+        let mut round_break_pending = false;
         let mut on_event = move |ev: StreamEvent<'_>| {
             let ev = match ev {
                 StreamEvent::ResumeHandle(handle) => {
@@ -3975,13 +3999,29 @@ async fn send_message(
                 other => other,
             };
             let event = match ev {
-                StreamEvent::Text(t) => ChatEvent::TextDelta {
-                    session_id: session_id.clone(),
-                    thread_id: thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    message_id: assistant_message_id.clone(),
-                    text: t.to_string(),
-                },
+                StreamEvent::Text(t) => {
+                    // Only at a real seam: the break is inserted where a tool
+                    // actually ran, never between chunks of one continuous
+                    // reply, and never when the model already started its own
+                    // paragraph.
+                    let text = if round_break_pending && !t.trim_start().is_empty() {
+                        round_break_pending = false;
+                        if t.starts_with('\n') {
+                            t.to_string()
+                        } else {
+                            format!("\n\n{t}")
+                        }
+                    } else {
+                        t.to_string()
+                    };
+                    ChatEvent::TextDelta {
+                        session_id: session_id.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        message_id: assistant_message_id.clone(),
+                        text,
+                    }
+                }
                 StreamEvent::Thinking(t) => ChatEvent::ThinkingDelta {
                     session_id: session_id.clone(),
                     thread_id: thread_id.clone(),
@@ -4015,19 +4055,23 @@ async fn send_message(
                     path,
                     diff,
                     metadata,
-                } => ChatEvent::ToolCallResult {
-                    session_id: session_id.clone(),
-                    thread_id: thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    message_id: assistant_message_id.clone(),
-                    name: name.to_string(),
-                    id: id.to_string(),
-                    summary: summary.to_string(),
-                    is_error,
-                    path: path.map(str::to_string),
-                    diff: diff.map(str::to_string),
-                    metadata: metadata.map(ToolMetaView::from),
-                },
+                } => {
+                    // Whatever the model says next belongs to a new round.
+                    round_break_pending = true;
+                    ChatEvent::ToolCallResult {
+                        session_id: session_id.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        message_id: assistant_message_id.clone(),
+                        name: name.to_string(),
+                        id: id.to_string(),
+                        summary: summary.to_string(),
+                        is_error,
+                        path: path.map(str::to_string),
+                        diff: diff.map(str::to_string),
+                        metadata: metadata.map(ToolMetaView::from),
+                    }
+                }
                 StreamEvent::ApprovalNeeded {
                     approval_id,
                     tool_name,
@@ -4324,8 +4368,8 @@ async fn send_message(
     }
     let _ = app.emit("chat-event", &final_event);
 
-    state.approvals.clear();
-    state.questions.clear();
+    turn.approval_hub.clear();
+    turn.question_hub.clear();
     let _ = state.sessions.finish_turn(&turn, session);
 
     // Error/cancel already emitted as chat-events; keep invoke Ok to avoid
@@ -4334,21 +4378,37 @@ async fn send_message(
 }
 
 #[tauri::command]
-fn cancel_turn(state: State<'_, AppState>) -> Result<(), String> {
+fn cancel_turn(state: State<'_, AppState>, thread_id: Option<String>) -> Result<(), String> {
     // Cancel token first so in-flight select! races abort before waiters clear.
-    let active_turn = state.sessions.active_turn().map_err(map_session_err)?;
-    let cancelled = state.sessions.cancel_turn().map_err(map_session_err)?;
+    let requested_thread = thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let active_turn = match requested_thread {
+        Some(id) => state
+            .sessions
+            .active_turn_for_thread(id)
+            .map_err(map_session_err)?,
+        None => state.sessions.active_turn().map_err(map_session_err)?,
+    };
+    let cancelled = match requested_thread {
+        Some(id) => state
+            .sessions
+            .cancel_turn_for_thread(id)
+            .map_err(map_session_err)?,
+        None => state.sessions.cancel_turn().map_err(map_session_err)?,
+    };
     if !cancelled {
         return Err(desktop_err("no_turn", "no turn in progress"));
     }
     if let Some(turn) = active_turn {
+        turn.approval_hub.clear();
+        turn.question_hub.clear();
         if let Ok(persistence) = ChatPersistence::open(&turn.root) {
             let _ = persistence.interrupts.cancel_pending_by_run(&turn.turn_id);
             let _ = persistence.runs.mark_aborted(&turn.turn_id);
         }
     }
-    state.approvals.clear();
-    state.questions.clear();
     Ok(())
 }
 
@@ -4357,6 +4417,7 @@ fn resolve_approval(
     state: State<'_, AppState>,
     approval_id: String,
     decision: String,
+    thread_id: Option<String>,
 ) -> Result<(), String> {
     // Unknown strings deny rather than default to allow: a UI/backend version
     // skew must fail closed.
@@ -4371,8 +4432,22 @@ fn resolve_approval(
         ApprovalDecision::AllowSession => "session",
         ApprovalDecision::Deny => "deny",
     };
-    let active_turn = state.sessions.active_turn().map_err(map_session_err)?;
-    let result = state.approvals.resolve(&approval_id, decision);
+    let active_turn = match thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => state
+            .sessions
+            .active_turn_for_thread(id)
+            .map_err(map_session_err)?,
+        None => state.sessions.active_turn().map_err(map_session_err)?,
+    };
+    let result = active_turn
+        .as_ref()
+        .ok_or_else(|| desktop_err("no_turn", "no turn in progress"))?
+        .approval_hub
+        .resolve(&approval_id, decision);
     if result.is_ok() {
         if let Some(turn) = active_turn {
             if let Ok(persistence) = ChatPersistence::open(&turn.root) {
@@ -4394,14 +4469,29 @@ fn resolve_question(
     state: State<'_, AppState>,
     question_id: String,
     answer: String,
+    thread_id: Option<String>,
 ) -> Result<(), String> {
     let answer = answer.trim().to_string();
     if answer.is_empty() {
         return Err("answer cannot be empty".into());
     }
     let question_id = question_id.trim().to_string();
-    let active_turn = state.sessions.active_turn().map_err(map_session_err)?;
-    let result = state.questions.resolve(&question_id, answer.clone());
+    let active_turn = match thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => state
+            .sessions
+            .active_turn_for_thread(id)
+            .map_err(map_session_err)?,
+        None => state.sessions.active_turn().map_err(map_session_err)?,
+    };
+    let result = active_turn
+        .as_ref()
+        .ok_or_else(|| desktop_err("no_turn", "no turn in progress"))?
+        .question_hub
+        .resolve(&question_id, answer.clone());
     if result.is_ok() {
         if let Some(turn) = active_turn {
             if let Ok(persistence) = ChatPersistence::open(&turn.root) {
@@ -4474,10 +4564,14 @@ async fn generate_reading_diff(
 
 #[tauri::command]
 fn end_session(state: State<'_, AppState>) -> Result<(), String> {
-    // end_session cancels the turn token; clear waiters after.
+    // Cancel only the route currently shown. Turns in other chats remain
+    // registered and continue in the background.
+    let active_turn = state.sessions.active_turn().map_err(map_session_err)?;
     state.sessions.end_session().map_err(map_session_err)?;
-    state.approvals.clear();
-    state.questions.clear();
+    if let Some(turn) = active_turn {
+        turn.approval_hub.clear();
+        turn.question_hub.clear();
+    }
     Ok(())
 }
 
@@ -4817,13 +4911,12 @@ struct WorkspacePickResult {
 }
 
 /// Native folder picker. Stores preference for the next `start_session`.
-/// Returns `null` when the user cancels. Ends an idle open session so tools
-/// stay scoped to the new root.
+/// Returns `null` when the user cancels. Ends an idle open session; a running
+/// chat stays registered so its turn can finish against its original root.
 #[tauri::command]
 fn pick_workspace_folder(
     state: State<'_, AppState>,
 ) -> Result<Option<WorkspacePickResult>, String> {
-    state.sessions.require_idle().map_err(map_session_err)?;
     let mut dialog = rfd::FileDialog::new().set_title("Open project folder");
     if let Ok(current) = resolve_workspace_root(&state) {
         dialog = dialog.set_directory(current);
@@ -4834,14 +4927,11 @@ fn pick_workspace_folder(
     let root = set_workspace_root(&state, folder)?;
     let had_session = state
         .sessions
-        .session_info_snapshot(|_| ())
-        .ok()
-        .flatten()
-        .is_some();
-    let session_ended = if had_session {
+        .has_active_session()
+        .map_err(map_session_err)?;
+    let was_busy = state.sessions.is_busy().map_err(map_session_err)?;
+    let session_ended = if had_session && !was_busy {
         state.sessions.end_session().map_err(map_session_err)?;
-        state.approvals.clear();
-        state.questions.clear();
         true
     } else {
         false
@@ -5370,10 +5460,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             sessions: SessionController::new(),
-            approvals: Arc::new(ApprovalHub::new()),
-            questions: Arc::new(QuestionHub::new()),
             login: Mutex::new(None),
-            persist: Mutex::new(None),
+            persist: Mutex::new(HashMap::new()),
             // Validated here too: seeding the cache with a remembered folder
             // that has since become unwritable would let it skip the checks in
             // `resolve_workspace_root` entirely. `None` just means the first

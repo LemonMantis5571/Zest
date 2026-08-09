@@ -13,9 +13,11 @@ import { admitAttachments } from "@/lib/attachmentLimits";
 import { getBackend } from "@/lib/backend";
 import {
   findApprovalTool,
+  initialChatUiState,
   markApprovalRunning,
   reduceChatEvent,
   restoreApprovalCard,
+  type ChatUiState,
 } from "@/lib/chatReducer";
 import { loadDraft, saveDraft } from "@/lib/drafts";
 import {
@@ -342,6 +344,8 @@ export default function App() {
   selectedIdRef.current = selectedId;
   const pollRef = useRef<number | null>(null);
   const activeAssistantId = useRef<string | null>(null);
+  /** Live UI projections for chats that continue while another one is open. */
+  const chatStatesRef = useRef(new Map<string, ChatUiState>());
   const messagesRef = useRef<ChatMessage[]>([]);
   messagesRef.current = messages;
   const sendingRef = useRef(sending);
@@ -349,8 +353,8 @@ export default function App() {
   const threadIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const currentTurnIdRef = useRef<string | null>(null);
-  const turnStartedAtRef = useRef<number | null>(null);
-  const notifiedApprovalIdsRef = useRef(new Set<string>());
+  const turnStartedAtByThreadRef = useRef(new Map<string, number>());
+  const notifiedApprovalIdsByThreadRef = useRef(new Map<string, Set<string>>());
   const compactionInFlightRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -362,7 +366,7 @@ export default function App() {
   const effortRef = useRef(effort);
   effortRef.current = effort;
   /** Set just before send; applied when the matching user_message event arrives. */
-  const pendingUserAttachmentsRef = useRef<UserAttachmentChip[] | null>(null);
+  const pendingUserAttachmentsRef = useRef(new Map<string, UserAttachmentChip[]>());
   const enterChatRef = useRef<(providerId: string) => Promise<SessionInfo>>(
     async () => {
       throw new Error("session start is not ready yet");
@@ -585,39 +589,56 @@ export default function App() {
   }, []);
 
   const applyChatEventNow = useCallback((event: ChatEvent) => {
-    const prevSending = sendingRef.current;
-    const { state, effects } = reduceChatEvent(
+    const threadKey = event.thread_id;
+    const isCurrent = threadIdRef.current === threadKey;
+    const previous =
+      chatStatesRef.current.get(threadKey) ??
+      initialChatUiState([], { threadId: threadKey });
+    const { state: reduced, effects } = reduceChatEvent(
       {
-        messages: messagesRef.current,
-        activeAssistantId: activeAssistantId.current,
-        sending: prevSending,
-        sessionId: sessionIdRef.current,
-        threadId: threadIdRef.current,
-        currentTurnId: currentTurnIdRef.current,
+        ...previous,
+        // Session ids are runtime identities. A chat may be reopened with a
+        // new runtime while its old turn is still finishing, so thread id is
+        // the durable routing key for streamed events.
+        sessionId: null,
+        threadId: threadKey,
       },
       event,
       { newId }
     );
     // Attach filename chips from the send that produced this user event.
     // History reload omits them until thread persistence gains attachments.
-    let nextMessages = state.messages;
-    if (event.kind === "user" && pendingUserAttachmentsRef.current) {
-      const chips = pendingUserAttachmentsRef.current;
-      pendingUserAttachmentsRef.current = null;
-      nextMessages = nextMessages.map((m) =>
-        m.role === "user" && m.id === event.message_id
-          ? { ...m, attachments: chips }
-          : m
-      );
+    let nextMessages = reduced.messages;
+    if (event.kind === "user") {
+      const chips = pendingUserAttachmentsRef.current.get(threadKey);
+      pendingUserAttachmentsRef.current.delete(threadKey);
+      if (chips) {
+        nextMessages = nextMessages.map((m) =>
+          m.role === "user" && m.id === event.message_id
+            ? { ...m, attachments: chips }
+            : m
+        );
+      }
     }
 
-    messagesRef.current = nextMessages;
-    activeAssistantId.current = state.activeAssistantId;
-    currentTurnIdRef.current = state.currentTurnId;
-    setMessages(nextMessages);
-    if (state.sending !== prevSending) {
-      sendingRef.current = state.sending;
-      setSending(state.sending);
+    const state: ChatUiState = {
+      ...reduced,
+      messages: nextMessages,
+      sessionId: null,
+      threadId: threadKey,
+    };
+    chatStatesRef.current.set(threadKey, state);
+
+    if (isCurrent) {
+      const prevSending = sendingRef.current;
+      messagesRef.current = nextMessages;
+      activeAssistantId.current = state.activeAssistantId;
+      currentTurnIdRef.current = state.currentTurnId;
+      setMessages(nextMessages);
+      if (state.sending !== prevSending) {
+        sendingRef.current = state.sending;
+        setSending(state.sending);
+      }
     }
     if (effects.errorToast) {
       toast.add({
@@ -635,13 +656,16 @@ export default function App() {
     }
 
     if (event.kind === "user" && state.currentTurnId === event.turn_id) {
-      turnStartedAtRef.current = Date.now();
-      notifiedApprovalIdsRef.current.clear();
+      turnStartedAtByThreadRef.current.set(threadKey, Date.now());
+      notifiedApprovalIdsByThreadRef.current.set(threadKey, new Set());
     }
 
     if (event.kind === "approval_needed") {
-      if (!notifiedApprovalIdsRef.current.has(event.approval_id)) {
-        notifiedApprovalIdsRef.current.add(event.approval_id);
+      const notified =
+        notifiedApprovalIdsByThreadRef.current.get(threadKey) ?? new Set<string>();
+      notifiedApprovalIdsByThreadRef.current.set(threadKey, notified);
+      if (!notified.has(event.approval_id)) {
+        notified.add(event.approval_id);
         const description = event.summary
           ? `${event.tool_name}: ${event.summary}`
           : `${event.tool_name} is waiting for your approval.`;
@@ -654,19 +678,21 @@ export default function App() {
     }
 
     if (event.kind === "done") {
-      const startedAt = turnStartedAtRef.current;
+      const startedAt = turnStartedAtByThreadRef.current.get(threadKey);
       if (startedAt != null && isLongTurn(Date.now() - startedAt)) {
         void showAttention("Response ready", "Zest finished the turn.", "success");
       }
-      turnStartedAtRef.current = null;
-      notifiedApprovalIdsRef.current.clear();
-      refreshCheckpointMetadata();
-      maybeAutoCompact();
+      turnStartedAtByThreadRef.current.delete(threadKey);
+      notifiedApprovalIdsByThreadRef.current.delete(threadKey);
+      if (isCurrent) {
+        refreshCheckpointMetadata();
+        maybeAutoCompact();
+      }
     }
 
     if (event.kind === "error" || event.kind === "cancelled") {
-      turnStartedAtRef.current = null;
-      notifiedApprovalIdsRef.current.clear();
+      turnStartedAtByThreadRef.current.delete(threadKey);
+      notifiedApprovalIdsByThreadRef.current.delete(threadKey);
     }
   }, [maybeAutoCompact, refreshCheckpointMetadata]);
 
@@ -751,15 +777,24 @@ export default function App() {
       .catch(() => {
         /* keep the current chip; the picker is not worth an error toast */
       });
-    const messages = normalizeMessages(info.messages);
+    const loadedMessages = normalizeMessages(info.messages);
+    const cachedState = chatStatesRef.current.get(info.threadId);
+    const liveState = cachedState?.sending ? cachedState : undefined;
+    const chatState =
+      liveState ?? initialChatUiState(loadedMessages, { threadId: info.threadId });
+    const messages = liveState ? liveState.messages : loadedMessages;
+    chatStatesRef.current.set(info.threadId, {
+      ...chatState,
+      messages,
+      sessionId: null,
+      threadId: info.threadId,
+    });
     setMessages(messages);
     messagesRef.current = messages;
-    activeAssistantId.current = null;
-    currentTurnIdRef.current = null;
-    turnStartedAtRef.current = null;
-    notifiedApprovalIdsRef.current.clear();
-    setSending(false);
-    sendingRef.current = false;
+    activeAssistantId.current = chatState.activeAssistantId;
+    currentTurnIdRef.current = chatState.currentTurnId;
+    setSending(chatState.sending);
+    sendingRef.current = chatState.sending;
     threadIdRef.current = info.threadId;
     sessionIdRef.current = info.sessionId;
     setAttachments([]);
@@ -1076,7 +1111,13 @@ export default function App() {
       if (session?.threadId) {
         saveDraft(session.threadId, draftRef.current);
       }
-      const info = await backend.newThread();
+      const root = session?.root ?? workspacePath;
+      if (!root) return;
+      const info = await backend.openProjectChat({
+        root,
+        newThread: true,
+        providerId: session?.provider ?? selectedId ?? undefined,
+      });
       applySession(info, { clearDraft: true });
     } catch (err) {
       toast.add({
@@ -1212,14 +1253,6 @@ export default function App() {
     providerId?: string;
     copyThread?: boolean;
   }) {
-    if (sendingRef.current) {
-      toast.add({
-        type: "error",
-        title: "Busy",
-        description: "Stop the current turn before switching project",
-      });
-      return;
-    }
     try {
       if (session?.threadId) {
         saveDraft(session.threadId, draftRef.current);
@@ -1388,14 +1421,6 @@ export default function App() {
   }
 
   async function onOpenFolder() {
-    if (sendingRef.current) {
-      toast.add({
-        type: "error",
-        title: "Busy",
-        description: "Stop the current turn before changing folder",
-      });
-      return;
-    }
     try {
       const result = await backend.pickWorkspaceFolder();
       if (!result) return;
@@ -1444,7 +1469,9 @@ export default function App() {
     const chips: UserAttachmentChip[] = pending
       .filter((a) => a.status === "done")
       .map((a) => ({ name: a.name, kind: a.kind }));
-    pendingUserAttachmentsRef.current = chips.length > 0 ? chips : null;
+    if (session?.threadId && chips.length > 0) {
+      pendingUserAttachmentsRef.current.set(session.threadId, chips);
+    }
     if (!directAnswer) {
       setDraft("");
       setAttachments([]);
@@ -1466,10 +1493,21 @@ export default function App() {
     { restoreDraftOnFailure }: { restoreDraftOnFailure: boolean }
   ) {
     if (compactionInFlightRef.current) return;
+    const turnThreadId = threadIdRef.current;
     // Stay busy until an authoritative done/cancelled/error chat-event arrives.
     setSending(true);
     sendingRef.current = true;
     activeAssistantId.current = null;
+    if (turnThreadId) {
+      const current = chatStatesRef.current.get(turnThreadId);
+      if (current) {
+        chatStatesRef.current.set(turnThreadId, {
+          ...current,
+          activeAssistantId: null,
+          sending: true,
+        });
+      }
+    }
     try {
       await backend.sendMessage(
         text,
@@ -1484,16 +1522,31 @@ export default function App() {
         }))
       );
     } catch (err) {
-      pendingUserAttachmentsRef.current = null;
-      setSending(false);
-      sendingRef.current = false;
+      if (turnThreadId) {
+        pendingUserAttachmentsRef.current.delete(turnThreadId);
+      }
+      if (turnThreadId === threadIdRef.current) {
+        setSending(false);
+        sendingRef.current = false;
+        const current = turnThreadId
+          ? chatStatesRef.current.get(turnThreadId)
+          : undefined;
+        if (current && turnThreadId) {
+          chatStatesRef.current.set(turnThreadId, {
+            ...current,
+            sending: false,
+          });
+        }
+      }
       // Only text the user typed goes back in the composer. Putting a
       // button's prompt there would leave them holding words they never wrote.
       if (restoreDraftOnFailure) {
-        setDraft(text);
-        setAttachments(pending);
-        if (session?.threadId) {
-          saveDraft(session.threadId, text);
+        if (turnThreadId === threadIdRef.current) {
+          setDraft(text);
+          setAttachments(pending);
+        }
+        if (turnThreadId) {
+          saveDraft(turnThreadId, text);
         }
       }
       const message = formatInvokeError(err);
@@ -1551,7 +1604,7 @@ export default function App() {
   async function onStop() {
     if (!sendingRef.current) return;
     try {
-      await backend.cancelTurn();
+      await backend.cancelTurn(threadIdRef.current ?? undefined);
       // Keep sending=true until the Cancelled chat-event clears busy state.
     } catch (err) {
       toast.add({
@@ -1574,7 +1627,11 @@ export default function App() {
       setMessages(next);
     }
     try {
-      await backend.resolveApproval(approvalId, decision);
+      await backend.resolveApproval(
+        approvalId,
+        decision,
+        threadIdRef.current ?? undefined
+      );
     } catch (err) {
       if (allow && snapshot) {
         const restored = restoreApprovalCard(messagesRef.current, snapshot);
@@ -1592,7 +1649,11 @@ export default function App() {
 
   async function onResolveQuestion(questionId: string, answer: string) {
     try {
-      await backend.resolveQuestion(questionId, answer);
+      await backend.resolveQuestion(
+        questionId,
+        answer,
+        threadIdRef.current ?? undefined
+      );
     } catch (err) {
       toast.add({
         type: "error",
