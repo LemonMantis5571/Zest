@@ -237,22 +237,23 @@ fn scan_roots(days: u32, roots: &[(CliKind, PathBuf)], cache: &mut ScanCache) ->
 
         status.duplicates_dropped += parsed.within_file_duplicates;
         for record in &parsed.records {
-            if record.day < oldest_day {
+            // The day is derived here, not read from the cache: see
+            // `CachedRecord::at` for why storing it would be wrong.
+            let day = day_key(record.at);
+            if day < oldest_day {
                 continue;
             }
-            if !seen.insert(record.key.clone()) {
-                status.duplicates_dropped += 1;
+            let Some(model) = parsed.models.get(record.m) else {
                 continue;
+            };
+            if let Some(dedupe) = &record.key {
+                if !seen.insert(dedupe.clone()) {
+                    status.duplicates_dropped += 1;
+                    continue;
+                }
             }
             status.records += 1;
-            result.add(&record.day, &record.model, record.counts(), record.cost);
-        }
-        for bucket in &parsed.buckets {
-            if bucket.day < oldest_day {
-                continue;
-            }
-            status.records += bucket.records;
-            result.add(&bucket.day, &bucket.model, bucket.counts(), None);
+            result.add(&day, model, unpack(record.c), record.cost);
         }
 
         fresh.insert(key, parsed);
@@ -309,10 +310,7 @@ fn parse_file(kind: CliKind, path: &Path, mtime: u64, size: u64) -> Option<Cache
     let file = std::fs::File::open(path).ok()?;
     let mut codex = CodexScanState::default();
     let mut records: Vec<CachedRecord> = Vec::new();
-    // Codex rollouts are per session and need no global de-duplication, so they
-    // collapse to day/model buckets here — which is most of why the cache stays
-    // small against a gigabyte of transcripts.
-    let mut buckets: BTreeMap<(String, String), CachedBucket> = BTreeMap::new();
+    let mut models: Vec<String> = Vec::new();
     let mut within_file: HashSet<String> = HashSet::new();
     let mut within_file_duplicates = 0u32;
 
@@ -327,47 +325,38 @@ fn parse_file(kind: CliKind, path: &Path, mtime: u64, size: u64) -> Option<Cache
         };
         let Some(record) = record else { continue };
 
-        let day = day_key(record.timestamp_secs);
-        let model = model_key(record.kind.provider_id(), &record.model);
-        match record.dedupe_key {
-            Some(key) => {
-                // Within-file repeats collapse now; the cross-file pass still
-                // needs the key, so the record is kept whole.
-                if within_file.insert(key.clone()) {
-                    records.push(CachedRecord {
-                        key,
-                        day,
-                        model,
-                        c: pack(&record.counts),
-                        cost: record.reported_cost_usd,
-                    });
-                } else {
-                    within_file_duplicates += 1;
-                }
-            }
-            None => {
-                let bucket = buckets
-                    .entry((day.clone(), model.clone()))
-                    .or_insert_with(|| CachedBucket {
-                        day,
-                        model,
-                        c: [0; 5],
-                        records: 0,
-                    });
-                bucket.records += 1;
-                let packed = pack(&record.counts);
-                for (slot, value) in bucket.c.iter_mut().zip(packed) {
-                    *slot = slot.saturating_add(value);
-                }
+        // Within-file repeats collapse now. The cross-file pass still needs the
+        // key, so the record itself is kept whole.
+        if let Some(key) = &record.dedupe_key {
+            if !within_file.insert(key.clone()) {
+                within_file_duplicates += 1;
+                continue;
             }
         }
+
+        let model = model_key(record.kind.provider_id(), &record.model);
+        let m = match models.iter().position(|known| known == &model) {
+            Some(index) => index,
+            None => {
+                models.push(model);
+                models.len() - 1
+            }
+        };
+
+        records.push(CachedRecord {
+            at: record.timestamp_secs,
+            m,
+            c: pack(&record.counts),
+            key: record.dedupe_key,
+            cost: record.reported_cost_usd,
+        });
     }
 
     Some(CachedFile {
         mtime,
         size,
+        models,
         records,
-        buckets: buckets.into_values().collect(),
         within_file_duplicates,
     })
 }
@@ -395,7 +384,15 @@ impl ScanResult {
 
 /// Bumped when the cached shape changes, so an old file is re-parsed rather than
 /// misread.
-const CACHE_FORMAT: u32 = 1;
+///
+/// 2: records carry a timestamp instead of a pre-computed day key. Version 1
+/// baked the day in, which meant a cache written by the CLI (which buckets in
+/// UTC) was read back by the desktop (which buckets in the machine's zone) as
+/// though the days matched — silently misplacing every turn in the offset
+/// window, six hours a day at UTC-6.
+///
+/// 3: rows are positional arrays and the file is written compactly.
+const CACHE_FORMAT: u32 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ScanCache {
@@ -412,16 +409,21 @@ struct ScanCache {
 struct CachedFile {
     mtime: u64,
     size: u64,
-    /// Records that carry a de-duplication key, kept individually because the
-    /// same message legitimately appears in more than one transcript — a resumed
-    /// or forked session copies its history — and only a pass across all files
-    /// can tell. Measured at 14% of Claude Code records on a real machine, so
-    /// collapsing these per file would overcount by that much.
+    /// Model keys this file touched. Records hold an index rather than the
+    /// string: a transcript uses a handful of models across tens of thousands
+    /// of turns, and repeating the name each time is most of the file.
+    #[serde(default)]
+    models: Vec<String>,
+    /// Every usage record, individually.
+    ///
+    /// Not pre-aggregated per day, because a day depends on the reader's
+    /// timezone — see [`CachedRecord::at`]. Not pre-aggregated per model
+    /// either, because the same message legitimately appears in more than one
+    /// transcript when a session is resumed or forked, and only a pass across
+    /// all files can tell. Measured at 14% of Claude Code records on a real
+    /// machine, so collapsing them per file would overcount by that much.
     #[serde(default)]
     records: Vec<CachedRecord>,
-    /// Records that need no global de-duplication, already summed per day/model.
-    #[serde(default)]
-    buckets: Vec<CachedBucket>,
     /// Repeats collapsed while parsing this file.
     ///
     /// Carried in the cache so the reported duplicate count means the same thing
@@ -456,35 +458,100 @@ fn unpack(c: Packed) -> TokenCounts {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One cached turn.
+///
+/// Serialised as a bare array rather than an object — see the `Serialize` impl.
+#[derive(Debug, Clone, PartialEq)]
 struct CachedRecord {
-    key: String,
-    day: String,
-    model: String,
+    /// Unix seconds of the turn.
+    ///
+    /// The timestamp, never a day key. Which day a turn falls on depends on the
+    /// reader's timezone, and the two front ends do not agree on one: the CLI
+    /// buckets in UTC so its output is deterministic, while the desktop uses the
+    /// machine's zone. They share this file. Caching a day computed by whichever
+    /// process wrote last would hand the other one someone else's calendar, and
+    /// it would also survive the user changing timezone, which it must not.
+    at: u64,
+    /// Index into [`CachedFile::models`].
+    m: usize,
     c: Packed,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// De-duplication key, for records that carry one.
+    key: Option<String>,
     cost: Option<f64>,
 }
 
-impl CachedRecord {
-    fn counts(&self) -> TokenCounts {
-        unpack(self.c)
+/// Positional encoding: `[at, m, requests, in, out, cache_write, cache_read]`,
+/// with `key` and `cost` appended only when present.
+///
+/// Field names are a third of this file once the rows are counted in tens of
+/// thousands, and they are the same eight names on every row. The trailing
+/// optionals are omitted rather than written as `null` because the overwhelming
+/// majority of rows — every Codex turn — have neither.
+impl Serialize for CachedRecord {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let extra = match (self.key.is_some(), self.cost.is_some()) {
+            (_, true) => 2,
+            (true, false) => 1,
+            (false, false) => 0,
+        };
+        let mut seq = serializer.serialize_seq(Some(7 + extra))?;
+        seq.serialize_element(&self.at)?;
+        seq.serialize_element(&self.m)?;
+        for value in self.c {
+            seq.serialize_element(&value)?;
+        }
+        if extra >= 1 {
+            seq.serialize_element(&self.key)?;
+        }
+        if extra >= 2 {
+            seq.serialize_element(&self.cost)?;
+        }
+        seq.end()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachedBucket {
-    day: String,
-    model: String,
-    c: Packed,
-    /// How many turns were summed in, so the record count stays honest.
-    #[serde(default)]
-    records: u32,
-}
+impl<'de> Deserialize<'de> for CachedRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RowVisitor;
 
-impl CachedBucket {
-    fn counts(&self) -> TokenCounts {
-        unpack(self.c)
+        impl<'de> serde::de::Visitor<'de> for RowVisitor {
+            type Value = CachedRecord;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a cached usage row of at least 7 elements")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<CachedRecord, A::Error> {
+                use serde::de::Error as _;
+                let mut next = |index: usize| {
+                    seq.next_element::<u64>()?
+                        .ok_or_else(|| A::Error::invalid_length(index, &"7 numbers"))
+                };
+                let at = next(0)?;
+                let m = next(1)? as usize;
+                let mut c: Packed = [0; 5];
+                for (index, slot) in c.iter_mut().enumerate() {
+                    *slot = next(2 + index)?;
+                }
+                // Absent and null both mean "not recorded": a short row simply
+                // stopped early, which is how the common case is written.
+                let key = seq.next_element::<Option<String>>()?.flatten();
+                let cost = seq.next_element::<Option<f64>>()?.flatten();
+                Ok(CachedRecord {
+                    at,
+                    m,
+                    c,
+                    key,
+                    cost,
+                })
+            }
+        }
+
+        deserializer.deserialize_seq(RowVisitor)
     }
 }
 
@@ -514,7 +581,7 @@ impl ScanCache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::fsutil::atomic_write_json(&path, self)
+        crate::fsutil::atomic_write_json_compact(&path, self)
     }
 }
 
@@ -1080,6 +1147,91 @@ mod tests {
         assert_eq!(day.by_model[&expected].requests, 1);
         assert_eq!(day.requests, 1);
         assert_eq!(day.total_tokens(), day.by_model[&expected].total_tokens());
+    }
+
+    #[test]
+    fn a_cached_scan_buckets_by_the_readers_timezone_not_the_writers() {
+        // The bug this guards: the CLI buckets days in UTC and the desktop in
+        // the machine's zone, and they share one cache file. Caching a day key
+        // meant whichever wrote last decided the calendar for both, silently
+        // misplacing every turn inside the offset window.
+        let _guard = crate::usage::LOCAL_OFFSET_TEST_LOCK.lock();
+        let fixture = Fixture::new("tz-independent");
+        // 02:00 UTC on the 9th is still the 8th anywhere west of Greenwich.
+        let line = r#"{"type":"assistant","requestId":"r","timestamp":"2026-08-09T02:00:00Z","message":{"id":"m","model":"claude-sonnet-5","usage":{"output_tokens":10}}}"#;
+        fixture.write("claude", "a.jsonl", &[line]);
+
+        let mut cache = ScanCache::default();
+
+        // Written by a process bucketing in UTC...
+        crate::usage::set_local_offset_minutes(0);
+        let utc = fixture.scan_with(3650, &mut cache);
+        assert!(
+            utc.daily.contains_key("2026-08-09"),
+            "{:?}",
+            utc.daily.keys()
+        );
+
+        // ...and read back by one six hours behind, off the same cache.
+        crate::usage::set_local_offset_minutes(-6 * 60);
+        let local = fixture.scan_with(3650, &mut cache);
+        assert_eq!(local.status.files_cached, 1, "served from the same cache");
+        assert!(
+            local.daily.contains_key("2026-08-08"),
+            "the reader's day, not the writer's: {:?}",
+            local.daily.keys()
+        );
+
+        crate::usage::set_local_offset_minutes(0);
+    }
+
+    #[test]
+    fn a_cached_row_is_a_bare_array_and_omits_what_it_does_not_have() {
+        // The shape is the point: eight repeated field names across tens of
+        // thousands of rows is most of the file.
+        let plain = CachedRecord {
+            at: 1_785_974_925,
+            m: 0,
+            c: [1, 2, 123, 11_700, 29_617],
+            key: None,
+            cost: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            "[1785974925,0,1,2,123,11700,29617]"
+        );
+
+        let keyed = CachedRecord {
+            key: Some("msg:req".into()),
+            ..plain.clone()
+        };
+        assert_eq!(
+            serde_json::to_string(&keyed).unwrap(),
+            "[1785974925,0,1,2,123,11700,29617,\"msg:req\"]"
+        );
+
+        let costed = CachedRecord {
+            cost: Some(0.25),
+            ..plain.clone()
+        };
+        // A cost with no key still needs the key slot held open.
+        assert_eq!(
+            serde_json::to_string(&costed).unwrap(),
+            "[1785974925,0,1,2,123,11700,29617,null,0.25]"
+        );
+
+        for row in [plain, keyed, costed] {
+            let json = serde_json::to_string(&row).unwrap();
+            let back: CachedRecord = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, row, "round trip: {json}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_row_is_refused_rather_than_read_as_zeroes() {
+        // Silently reading a short row as zero tokens would under-report spend,
+        // which is the failure mode this whole module is careful about.
+        assert!(serde_json::from_str::<CachedRecord>("[1,0,1,2,123]").is_err());
     }
 
     #[test]
