@@ -860,19 +860,52 @@ impl ThreadStore {
         };
         thread.checkpoints.push(checkpoint.clone());
 
-        const MAX_CHECKPOINTS: usize = 24;
-        if thread.checkpoints.len() > MAX_CHECKPOINTS {
-            let removed = thread
-                .checkpoints
-                .drain(0..thread.checkpoints.len() - MAX_CHECKPOINTS)
-                .collect::<Vec<_>>();
-            for old in removed {
-                let _ = fs::remove_file(dir.join(format!("{}.json", old.id)));
-            }
-        }
+        Self::prune_checkpoints(thread, &dir);
         thread.touch();
         self.save(thread)?;
         Ok(checkpoint)
+    }
+
+    /// Ceiling on how many snapshots one thread keeps.
+    ///
+    /// Enough to rewind through a long working session.
+    const MAX_CHECKPOINTS: usize = 24;
+
+    /// Ceiling on what those snapshots may occupy on disk.
+    ///
+    /// A count alone is not a bound. Every checkpoint is a complete copy of the
+    /// conversation, so on a long thread twenty-four of them are twenty-four
+    /// full transcripts — the limit that binds is bytes, and it is the one that
+    /// was missing. Old snapshots go first, because the useful ones are the
+    /// recent ones.
+    const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// Drop the oldest snapshots until both ceilings are satisfied.
+    ///
+    /// Always leaves one behind. A thread with a single enormous checkpoint has
+    /// nothing useful to delete — removing it would buy space by making rewind
+    /// impossible, which is the one thing checkpoints exist for.
+    fn prune_checkpoints(thread: &mut Thread, dir: &Path) {
+        let size_of = |id: &str| -> u64 {
+            fs::metadata(dir.join(format!("{id}.json")))
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        };
+
+        let mut total: u64 = thread
+            .checkpoints
+            .iter()
+            .map(|checkpoint| size_of(&checkpoint.id))
+            .sum();
+
+        while thread.checkpoints.len() > 1
+            && (thread.checkpoints.len() > Self::MAX_CHECKPOINTS
+                || total > Self::MAX_CHECKPOINT_BYTES)
+        {
+            let oldest = thread.checkpoints.remove(0);
+            total = total.saturating_sub(size_of(&oldest.id));
+            let _ = fs::remove_file(dir.join(format!("{}.json", oldest.id)));
+        }
     }
 
     /// Restore a checkpoint snapshot. The caller decides whether it should
@@ -1152,6 +1185,65 @@ mod characterization {
         assert_eq!(listed[0].message_count, 2);
     }
 
+    /// Twenty-four checkpoints of a large conversation is twenty-four complete
+    /// copies of it. A count cap alone never noticed that.
+    #[test]
+    fn checkpoints_are_bounded_by_bytes_not_only_by_count() {
+        let root = scratch("checkpoint-bytes");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+
+        // One fat message, so a handful of snapshots clears the byte ceiling
+        // long before the count ceiling is anywhere near.
+        thread.apply_user("u1", &"x".repeat(12 * 1024 * 1024));
+        store.save(&thread).unwrap();
+
+        for index in 0..8 {
+            store
+                .create_checkpoint(&mut thread, format!("turn {index}"))
+                .unwrap();
+        }
+
+        let dir = store.checkpoints_dir_for(&ThreadId::parse(&thread.id).unwrap());
+        let on_disk: u64 = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|meta| meta.len())
+            .sum();
+
+        assert!(
+            thread.checkpoints.len() < 8,
+            "the byte ceiling pruned before the count ceiling could: {}",
+            thread.checkpoints.len()
+        );
+        assert!(
+            on_disk <= ThreadStore::MAX_CHECKPOINT_BYTES,
+            "kept {on_disk} bytes"
+        );
+        // Metadata and files must agree, or rewind offers a checkpoint that is
+        // no longer there.
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            thread.checkpoints.len()
+        );
+    }
+
+    /// Even a single oversized snapshot survives: deleting it would buy space
+    /// by making rewind impossible, which is the one thing it exists for.
+    #[test]
+    fn the_last_checkpoint_is_never_pruned() {
+        let root = scratch("checkpoint-last");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+        let huge = ThreadStore::MAX_CHECKPOINT_BYTES as usize;
+        thread.apply_user("u1", &"y".repeat(huge));
+        store.save(&thread).unwrap();
+
+        store.create_checkpoint(&mut thread, "only one").unwrap();
+        assert_eq!(thread.checkpoints.len(), 1);
+    }
+
     #[test]
     fn checkpoints_restore_wire_history_and_forks_start_clean() {
         let root = scratch("checkpoint");
@@ -1169,6 +1261,13 @@ mod characterization {
             .unwrap();
         assert_eq!(thread.checkpoints.len(), 1);
         assert_eq!(checkpoint.message_count, 2);
+        assert!(
+            store
+                .checkpoints_dir_for(&ThreadId::parse(&thread.id).unwrap())
+                .join(format!("{}.json", checkpoint.id))
+                .is_file(),
+            "the snapshot file backs the metadata record"
+        );
 
         thread.apply_user("u2", "second question");
         store.save(&thread).unwrap();

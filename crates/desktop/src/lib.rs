@@ -3651,6 +3651,16 @@ fn delete_thread(
             let _ = store.load(&id).map_err(|e| e.to_string())?;
             store.delete(&id).map_err(|e| e.to_string())?;
 
+            // The transcript was only part of what this chat left behind. Its
+            // run and interrupt records lived on in the project, read on every
+            // open and never collected, describing a conversation the user
+            // asked to be rid of. Best effort, and after the thread is gone: a
+            // side record that will not unlink is no reason to report the
+            // deletion as failed.
+            if let Ok(persistence) = ChatPersistence::open(&target_root) {
+                let _ = persistence.forget_thread(&id);
+            }
+
             // Compare via display paths — `session.root` may be `\\?\…` while the
             // sidebar sends a stripped path that still canonicalizes differently.
             let same_project = display_path(&session.root) == display_path(&target_root)

@@ -384,6 +384,22 @@ impl RunStore {
         )
     }
 
+    /// Remove every run belonging to a thread. Best effort by design — see
+    /// [].
+    pub fn delete_for_thread(&self, thread_id: &str) -> usize {
+        let Ok(runs) = self.list_by_thread(thread_id) else {
+            return 0;
+        };
+        let _guard = state_lock().ok();
+        runs.iter()
+            .filter(|run| {
+                self.path_for(&run.run_id)
+                    .map(|path| fs::remove_file(path).is_ok())
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
     pub fn list_by_thread(&self, thread_id: &str) -> Result<Vec<RunRecord>> {
         let thread_id = validate_id(thread_id, "thread")?;
         let _guard = state_lock()?;
@@ -585,6 +601,21 @@ impl InterruptStore {
         self.finish(interrupt_id, InterruptStatus::Cancelled, None)
     }
 
+    /// Remove every interrupt belonging to a thread. Best effort by design.
+    pub fn delete_for_thread(&self, thread_id: &str) -> usize {
+        let Ok(interrupts) = self.list(thread_id) else {
+            return 0;
+        };
+        interrupts
+            .iter()
+            .filter(|interrupt| {
+                self.path_for(&interrupt.interrupt_id)
+                    .map(|path| fs::remove_file(path).is_ok())
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
     pub fn list(&self, thread_id: &str) -> Result<Vec<InterruptRecord>> {
         let thread_id = validate_id(thread_id, "thread")?;
         let mut interrupts = self.read_all()?;
@@ -659,6 +690,22 @@ impl InterruptStore {
 pub struct ChatPersistence {
     pub runs: RunStore,
     pub interrupts: InterruptStore,
+}
+
+impl ChatPersistence {
+    /// Remove the lifecycle records belonging to a deleted thread.
+    ///
+    /// Deleting a chat removed its transcript and left these behind, so a
+    /// workspace accumulated run and interrupt records for conversations that no
+    /// longer exist — read on every open, never collected, and describing
+    /// something the user explicitly asked to be rid of.
+    ///
+    /// Returns how many records went, and never fails the deletion: the thread
+    /// is already gone by the time this runs, and refusing to finish because a
+    /// stale side record would not unlink helps nobody.
+    pub fn forget_thread(&self, thread_id: &str) -> usize {
+        self.runs.delete_for_thread(thread_id) + self.interrupts.delete_for_thread(thread_id)
+    }
 }
 
 /// The durable chat projection needed after opening a workspace.
@@ -773,6 +820,52 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+    /// Deleting a chat used to leave its lifecycle records behind, read on
+    /// every open and never collected, describing a conversation the user had
+    /// explicitly asked to be rid of.
+    #[test]
+    fn forgetting_a_thread_removes_its_lifecycle_records() {
+        let root = scratch("forget");
+        let persistence = ChatPersistence::open(&root).unwrap();
+
+        persistence
+            .runs
+            .create_or_resume("run-1", "thread-a")
+            .unwrap();
+        persistence
+            .runs
+            .create_or_resume("run-2", "thread-a")
+            .unwrap();
+        persistence
+            .runs
+            .create_or_resume("run-3", "thread-b")
+            .unwrap();
+        persistence
+            .interrupts
+            .create("int-1", "run-1", "thread-a", serde_json::json!({}))
+            .unwrap();
+        persistence
+            .interrupts
+            .create("int-2", "run-3", "thread-b", serde_json::json!({}))
+            .unwrap();
+
+        let removed = persistence.forget_thread("thread-a");
+        assert_eq!(removed, 3, "two runs and one interrupt");
+
+        assert!(persistence
+            .runs
+            .list_by_thread("thread-a")
+            .unwrap()
+            .is_empty());
+        assert!(persistence.interrupts.list("thread-a").unwrap().is_empty());
+
+        // The other conversation is untouched — deletion is scoped, not a sweep.
+        assert_eq!(
+            persistence.runs.list_by_thread("thread-b").unwrap().len(),
+            1
+        );
+        assert_eq!(persistence.interrupts.list("thread-b").unwrap().len(), 1);
     }
 
     #[test]
