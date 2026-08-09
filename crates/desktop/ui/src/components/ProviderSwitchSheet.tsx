@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { ProviderIcon } from "@/components/ProviderIcon";
 import { getBackend } from "@/lib/backend";
 import { recentVerifyFailed } from "@/lib/providerVerify";
 import type { ProviderRow } from "@/lib/types";
@@ -114,7 +115,10 @@ export function ProviderSwitchSheet({
                   )}
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{row.label}</div>
+                    <div className="flex items-center gap-2 truncate text-sm font-medium">
+                      <ProviderIcon providerId={row.id} />
+                      {row.label}
+                    </div>
                     <div className="truncate text-[11px] text-muted-foreground">
                       {statusLabel(row)}
                     </div>

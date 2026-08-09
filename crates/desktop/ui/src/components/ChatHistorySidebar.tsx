@@ -17,6 +17,7 @@ import {
 
 import { BrandMark } from "@/components/BrandMark";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ProviderIcon } from "@/components/ProviderIcon";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import type { ProjectChats, ThreadSummary } from "@/lib/types";
@@ -285,13 +286,11 @@ export function ChatHistorySidebar({
     const active = project.active && thread.id === activeThreadId;
     const title = threadTitle(thread);
     const age = formatAge(thread.updatedAt);
-    const showsProviders =
-      new Set(
-        project.threads
-          .map((item) => item.providerId)
-          .filter((id): id is string => Boolean(id))
-      ).size > 1;
-    const owner = showsProviders ? thread.providerId : undefined;
+    // Shown on every row now that it is a mark rather than a word. The name
+    // used to be hidden unless a project mixed providers, because `anthropic`
+    // spelled out next to every chat was noise — a glyph is not, and knowing
+    // who owns a chat before you open it is worth a few pixels.
+    const owner = thread.providerId;
 
     return (
       <li key={key} className="group/thread relative">
@@ -316,9 +315,11 @@ export function ChatHistorySidebar({
           {owner ? (
             <span
               title={`This chat belongs to ${owner}. Zest will keep the original provider or let you open a copy.`}
-              className="shrink-0 rounded-sm bg-white/[0.06] px-1 py-px font-mono text-[9px] tracking-tight text-muted-foreground"
+              className="flex shrink-0 items-center text-muted-foreground"
             >
-              {owner}
+              {/* The name still reaches a screen reader through the title
+                  above, so the glyph itself stays decorative. */}
+              <ProviderIcon providerId={owner} className="size-3" />
             </span>
           ) : null}
           {age ? (
