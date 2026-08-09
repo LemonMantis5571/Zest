@@ -677,6 +677,38 @@ struct LoginStatus {
     detail: Option<String>,
 }
 
+/// A session without its transcript, for operations that do not change one.
+///
+/// Deliberately a sibling of [`SessionInfo`] rather than a field inside it:
+/// `#[serde(flatten)]` and `ts-rs` do not agree about how to describe that, and
+/// the wire shape is what the generated bindings gate protects. The duplicated
+/// field list is the cost of both staying legible.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "SessionMeta.ts", rename_all = "camelCase")
+)]
+struct SessionMeta {
+    session_id: String,
+    provider: String,
+    label: String,
+    model: String,
+    effort: String,
+    root: String,
+    thread_id: String,
+    default_model: String,
+    models: Vec<ModelCapability>,
+    checkpoints: Vec<ThreadCheckpointView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    recovery: Option<TurnRecoveryView>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -2300,6 +2332,38 @@ fn session_capabilities(session: &Session) -> (String, Vec<ModelCapability>) {
     )
 }
 
+/// Everything about a session except the conversation.
+///
+/// Changing a model or an effort level does not change the transcript, but the
+/// only reply shape available carried every message anyway — so picking a model
+/// serialized the whole conversation, sent it across the IPC boundary, and was
+/// then discarded by a front end that already had it. The UI's own merge did
+/// `{ ...info, messages: prev.messages }`, which says plainly that the
+/// expensive half of the payload was never wanted.
+fn session_meta_from(session: &Session, warning: Option<String>) -> SessionMeta {
+    let (default_model, models) = session_capabilities(session);
+    SessionMeta {
+        session_id: session.session_id.clone(),
+        provider: session.provider_id.clone(),
+        label: session.provider_label.clone(),
+        model: session.model.clone(),
+        effort: session.effort.clone(),
+        root: display_path(&session.root),
+        thread_id: session.thread_id.clone(),
+        default_model,
+        models,
+        checkpoints: session
+            .thread
+            .checkpoints
+            .clone()
+            .into_iter()
+            .map(ThreadCheckpointView::from)
+            .collect(),
+        warning,
+        recovery: session.recovery.as_ref().map(TurnRecoveryView::from),
+    }
+}
+
 fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo {
     let (default_model, models) = session_capabilities(session);
     SessionInfo {
@@ -2649,11 +2713,11 @@ fn update_session_options(
     state: State<'_, AppState>,
     model: Option<String>,
     effort: Option<String>,
-) -> Result<SessionInfo, String> {
+) -> Result<SessionMeta, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state
         .sessions
-        .with_session_mut(|session| -> Result<SessionInfo, String> {
+        .with_session_mut(|session| -> Result<SessionMeta, String> {
             let next_model = model
                 .filter(|m| !m.trim().is_empty())
                 .unwrap_or_else(|| session.model.clone());
@@ -2672,7 +2736,7 @@ fn update_session_options(
                 &session.model,
                 &session.effort,
             )?;
-            Ok(session_info_from(session, None))
+            Ok(session_meta_from(session, None))
         })
         .map_err(map_session_err)
         .and_then(|r| r)
@@ -2680,11 +2744,11 @@ fn update_session_options(
 
 /// Atomically reset sticky model+effort for the active provider (clears prefs).
 #[tauri::command]
-fn reset_session_options(state: State<'_, AppState>) -> Result<SessionInfo, String> {
+fn reset_session_options(state: State<'_, AppState>) -> Result<SessionMeta, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
     state
         .sessions
-        .with_session_mut(|session| -> Result<SessionInfo, String> {
+        .with_session_mut(|session| -> Result<SessionMeta, String> {
             let descriptor = session.agent.descriptor();
             let next_model = descriptor.default_model.clone();
             let next_effort = "high".to_string();
@@ -2696,7 +2760,7 @@ fn reset_session_options(state: State<'_, AppState>) -> Result<SessionInfo, Stri
             let mut prefs = ProjectSessionState::load(&session.root, &session.provider_id);
             prefs.clear_model_effort(&session.provider_id);
             prefs.save(&session.root).map_err(|e| e.to_string())?;
-            Ok(session_info_from(session, None))
+            Ok(session_meta_from(session, None))
         })
         .map_err(map_session_err)
         .and_then(|r| r)

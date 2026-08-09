@@ -17,6 +17,7 @@ import type {
   ProviderRow,
   RatesStatus,
   SessionInfo,
+  SessionMeta,
   ProjectChats,
   ThreadSummary,
   UsageReport,
@@ -148,7 +149,7 @@ export function updateSessionOptions(options: {
   model?: string;
   effort?: string;
 }) {
-  return invoke<SessionInfo>("update_session_options", {
+  return invoke<SessionMeta>("update_session_options", {
     model: options.model ?? null,
     effort: options.effort ?? null,
   });
