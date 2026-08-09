@@ -43,8 +43,26 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Convenience: serialize `value` as pretty JSON and atomically replace `target`.
+///
+/// Pretty because most of what Zest writes is meant to be opened and read — a
+/// ledger, a config, a thread. For files only Zest ever reads, prefer
+/// [`atomic_write_json_compact`].
 pub fn atomic_write_json<T: serde::Serialize>(target: &Path, value: &T) -> std::io::Result<()> {
     let body = serde_json::to_vec_pretty(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    atomic_write(target, &body)
+}
+
+/// The same, without the indentation.
+///
+/// For machine-only files large enough that the whitespace is the file. The
+/// transcript scan cache holds ~50,000 rows; pretty-printing it costs 6 MB of
+/// indentation for a document no person will ever open.
+pub fn atomic_write_json_compact<T: serde::Serialize>(
+    target: &Path,
+    value: &T,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     atomic_write(target, &body)
 }
