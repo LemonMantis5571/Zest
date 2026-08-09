@@ -52,7 +52,9 @@ Step "toolchain check" {
 Step "gateway release and sidecar" {
   # CI starts from a clean checkout. Fetch the pinned host sidecar so Tauri's
   # build script can validate its external binary during Clippy and tests.
-  & (Join-Path $Root "scripts\fetch-gateway.ps1")
+  # Forward slashes keep Join-Path correct under pwsh on Linux (a literal
+  # backslash would become part of the file name there).
+  & (Join-Path $Root "scripts/fetch-gateway.ps1")
 }
 
 Step "npm ci" {
