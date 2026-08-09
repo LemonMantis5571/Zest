@@ -18,8 +18,9 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ChatMessage, SessionInfo, WorkspaceReview } from "@/lib/types";
 
-type Props = {
-  open: boolean;
+type Props = PanelProps & { open: boolean };
+
+type PanelProps = {
   session: SessionInfo;
   messages: ChatMessage[];
   sending: boolean;
@@ -75,8 +76,22 @@ function messagePreview(message: ChatMessage) {
   return message.role === "user" ? "Attachment" : "Working…";
 }
 
-export function WorkbenchPanel({
-  open,
+/**
+ * Mounts the panel only while it is open.
+ *
+ * The body derives its task list, subagent list and outline from the whole
+ * message array. Those ran on every streamed delta even with the panel closed,
+ * because hooks cannot sit behind an early return — and since the panel no
+ * longer opens itself, closed is the normal state, so that was very nearly all
+ * the time. Splitting the component is what lets the work not happen: an
+ * unmounted component has no hooks to run.
+ */
+export function WorkbenchPanel({ open, ...props }: Props) {
+  if (!open) return null;
+  return <WorkbenchBody {...props} />;
+}
+
+function WorkbenchBody({
   session,
   messages,
   sending,
@@ -87,17 +102,17 @@ export function WorkbenchPanel({
   onVerify,
   onRewind,
   onJump,
-}: Props) {
+}: PanelProps) {
   const [tab, setTab] = useState<Tab>("activity");
   const [busyAction, setBusyAction] = useState<"fork" | string | null>(null);
   const panelRef = useRef<HTMLElement>(null);
   const titleId = useId();
   const descriptionId = useId();
 
+  // Mount is open, because this component only exists while the panel is.
   useEffect(() => {
-    if (!open) return;
-    // Always focus now: the panel only opens because someone asked for it, so
-    // moving focus into it is following the user rather than stealing from them.
+    // The panel only opens because someone asked for it, so moving focus into
+    // it is following the user rather than stealing from them.
     panelRef.current?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -109,7 +124,7 @@ export function WorkbenchPanel({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [onClose]);
 
   const tasks = useMemo(
     () =>
@@ -183,7 +198,6 @@ export function WorkbenchPanel({
     }
   }
 
-  if (!open) return null;
 
   return (
     // Non-modal: the panel floats over the transcript but claims none of it.
