@@ -274,7 +274,10 @@ struct AppState {
     /// One coalescing transcript worker per open project. A background turn
     /// must keep its writer after the user navigates to another root.
     persist: Mutex<HashMap<PathBuf, PersistWorker>>,
-    /// Preferred project root (folder picker / last-workspace). Falls back to cwd.
+    /// Preferred project root (explicit launch/folder choice / last-workspace).
+    /// A usable launch directory is the strongest startup context; packaged
+    /// launches normally start in the install directory, which is rejected by
+    /// `usable_workspace` and therefore falls back to the remembered folder.
     workspace_root: Mutex<Option<PathBuf>>,
     /// The last working provider configuration. Keep its provider entry
     /// available when the destination is an ordinary folder with no zest.toml
@@ -2024,6 +2027,29 @@ fn cwd_workspace() -> Option<PathBuf> {
     usable_workspace(std::env::current_dir().ok()?)
 }
 
+/// Select the initial project without letting a stale remembered workspace
+/// override an explicit directory supplied by the process that launched Zest.
+///
+/// Development launches can carry the launched directory in the process
+/// working directory. Packaged launches are commonly started in Zest's own
+/// install directory; that path is rejected by `usable_workspace`, so normal
+/// last-workspace behavior remains intact there.
+fn choose_initial_workspace(
+    launch: Option<PathBuf>,
+    remembered: Option<PathBuf>,
+    fallback: Option<PathBuf>,
+) -> Option<PathBuf> {
+    launch.or(remembered).or(fallback)
+}
+
+fn initial_workspace_root() -> Option<PathBuf> {
+    choose_initial_workspace(
+        cwd_workspace(),
+        load_persisted_workspace().and_then(usable_workspace),
+        default_workspace(),
+    )
+}
+
 /// The folder first run falls back to when the working directory is unusable.
 ///
 /// Documents is where someone who did not choose a project expects to find
@@ -2129,22 +2155,18 @@ fn remember_workspace(root: &Path) {
 
 /// Pick the project folder, rejecting any candidate Zest cannot write to.
 ///
-/// Order matters: an explicit choice beats a remembered one, a remembered one
-/// beats wherever the process happened to start, and Documents/Zest catches the
-/// case where none of those are usable. Every step is writability-checked,
-/// because a candidate that fails only surfaces later as a storage error deep
-/// inside session startup, far from the folder that caused it.
+/// Order matters: an explicit launch directory or folder choice beats a
+/// remembered one, and Documents/Zest catches the case where none of those are
+/// usable. Every step is writability-checked, because a candidate that fails
+/// only surfaces later as a storage error deep inside session startup, far from
+/// the folder that caused it.
 fn resolve_workspace_root(state: &AppState) -> Result<PathBuf, String> {
     if let Ok(guard) = state.workspace_root.lock() {
         if let Some(root) = guard.as_ref() {
             return Ok(root.clone());
         }
     }
-    let resolved = load_persisted_workspace()
-        .and_then(usable_workspace)
-        .or_else(cwd_workspace)
-        .or_else(default_workspace)
-        .ok_or_else(no_writable_workspace_error)?;
+    let resolved = initial_workspace_root().ok_or_else(no_writable_workspace_error)?;
     if let Ok(mut guard) = state.workspace_root.lock() {
         *guard = Some(resolved.clone());
     }
@@ -5467,11 +5489,11 @@ pub fn run() {
             browser: Arc::new(BrowserHost::new()),
             login: Mutex::new(None),
             persist: Mutex::new(HashMap::new()),
-            // Validated here too: seeding the cache with a remembered folder
-            // that has since become unwritable would let it skip the checks in
-            // `resolve_workspace_root` entirely. `None` just means the first
-            // caller resolves it properly.
-            workspace_root: Mutex::new(load_persisted_workspace().and_then(usable_workspace)),
+            // Validate the launch directory first so a project opened from a
+            // terminal cannot be silently replaced by a stale remembered
+            // workspace. Packaged launches fall through from their rejected
+            // install directory to the remembered folder.
+            workspace_root: Mutex::new(initial_workspace_root()),
             workspace_config: Mutex::new(None),
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
             config_edit: Mutex::new(()),
@@ -5606,6 +5628,26 @@ mod workspace_root_tests {
         assert!(root.is_dir());
         assert!(dir_is_writable(&root));
         assert!(!is_install_dir(&root));
+    }
+
+    #[test]
+    fn launch_directory_wins_over_a_stale_remembered_workspace() {
+        let launch = PathBuf::from(r"D:\Code\Test");
+        let remembered = PathBuf::from(r"D:\Code\zest");
+        assert_eq!(
+            choose_initial_workspace(Some(launch.clone()), Some(remembered), None),
+            Some(launch)
+        );
+    }
+
+    #[test]
+    fn remembered_workspace_is_used_when_launch_directory_is_unusable() {
+        let remembered = PathBuf::from(r"D:\Code\Test");
+        let fallback = PathBuf::from(r"D:\Users\brite\Documents\Zest");
+        assert_eq!(
+            choose_initial_workspace(None, Some(remembered.clone()), Some(fallback)),
+            Some(remembered)
+        );
     }
 
     /// The UI keys the "choose another folder" guidance off this token, so the
