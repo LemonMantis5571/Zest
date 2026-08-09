@@ -465,7 +465,20 @@ export function createFixtureBackend(): DesktopBackend {
           updatedAt: Math.floor(Date.now() / 1000),
           title: "Fixture",
           pinned: fixturePinned,
+          providerId: "codex",
           messageCount: session.messages.length,
+        },
+        // A provider Zest has no mark for, so the generic fallback is visible
+        // offline. This is the ordinary case for a local model, and it is the
+        // half of the mapping most likely to regress unnoticed.
+        {
+          id: "fixture-local",
+          createdAt: Math.floor(Date.now() / 1000) - 3600,
+          updatedAt: Math.floor(Date.now() / 1000) - 3600,
+          title: "Local model chat",
+          pinned: false,
+          providerId: "ollama",
+          messageCount: 0,
         },
       ];
     },
