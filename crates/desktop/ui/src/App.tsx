@@ -53,6 +53,10 @@ import {
   rollbackSessionOptions,
 } from "@/lib/sessionOptions";
 import { markStartup, measureStartup } from "@/lib/startupPerf";
+import {
+  reduceThreadActivity,
+  type ThreadActivityMap,
+} from "@/lib/threadActivity";
 import type {
   ApprovalChoice,
   ApprovalMode,
@@ -324,6 +328,7 @@ export default function App() {
     avatarDataUrl: "",
   });
   const [sending, setSending] = useState(false);
+  const [threadActivity, setThreadActivity] = useState<ThreadActivityMap>({});
   const [compacting, setCompacting] = useState(false);
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
   const [effort, setEffort] = useState<EffortId>(DEFAULT_EFFORT);
@@ -350,6 +355,7 @@ export default function App() {
   messagesRef.current = messages;
   const sendingRef = useRef(sending);
   sendingRef.current = sending;
+  const threadActivityRef = useRef<ThreadActivityMap>({});
   const threadIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const currentTurnIdRef = useRef<string | null>(null);
@@ -372,6 +378,14 @@ export default function App() {
       throw new Error("session start is not ready yet");
     }
   );
+
+  const recordThreadActivity = useCallback((event: ChatEvent) => {
+    const previous = threadActivityRef.current;
+    const next = reduceThreadActivity(previous, event, Date.now());
+    if (next === previous) return;
+    threadActivityRef.current = next;
+    setThreadActivity(next);
+  }, []);
 
   const loadProviders = useCallback(async (prefer?: string | null) => {
     const rows = await backend.listProviders();
@@ -733,6 +747,10 @@ export default function App() {
 
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
+      // This projection is intentionally ahead of the current-thread reducer:
+      // events from a chat left running in the background are stale for the
+      // transcript, but are the useful part of the sidebar status card.
+      recordThreadActivity(event);
       if (event.kind === "text_delta" || event.kind === "thinking_delta") {
         deltaQueueRef.current.push(event);
         if (deltaRafRef.current == null) {
@@ -753,7 +771,7 @@ export default function App() {
       }
       applyChatEventNow(event);
     },
-    [applyChatEventNow, flushDeltaQueue]
+    [applyChatEventNow, flushDeltaQueue, recordThreadActivity]
   );
 
   const applySession = useCallback((info: SessionInfo, opts?: { clearDraft?: boolean }) => {
@@ -1801,6 +1819,7 @@ export default function App() {
             branch={branch}
             profile={profile}
             sending={sending}
+            threadActivity={threadActivity}
             model={model}
             effort={effort}
             optionsDisabled={optionsUpdating}
