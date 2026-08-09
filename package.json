@@ -16,6 +16,6 @@
     "ui:test": "npm run test -w ui",
     "desktop:dev": "npm run dev -w zest-desktop",
     "desktop:build": "npm run build -w zest-desktop",
-    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify.ps1"
+    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify.ps1 || pwsh -NoProfile -File ./scripts/verify.ps1"
   }
 }
