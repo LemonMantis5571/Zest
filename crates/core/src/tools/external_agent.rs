@@ -41,6 +41,13 @@ const PROMPT_PLACEHOLDER: &str = "{prompt}";
 const MODEL_PLACEHOLDER: &str = "{model}";
 const MAX_TIMEOUT_SECS: u64 = 3_600;
 const MAX_ERROR_CHARS: usize = 2_000;
+
+/// Ceiling on a worker's stderr, held while it is read.
+///
+/// Only [`MAX_ERROR_CHARS`] of it is ever surfaced, so this is generous by an
+/// order of magnitude and still bounded — the point is that the child cannot
+/// choose the number.
+const MAX_STDERR_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_DIFF_BYTES: usize = 512 * 1024;
 const DIFF_CLIP_MARKER_BUDGET: usize = 96;
 const MAX_ACP_FILE_BYTES: usize = 1024 * 1024;
@@ -631,10 +638,14 @@ async fn spawn_and_run(
     let stderr = child.stderr.take();
     let mut stderr_task = stderr.map(|stderr| {
         tokio::spawn(async move {
-            let mut bytes = Vec::new();
+            // Bounded while reading, not after. Only a few hundred characters
+            // of this are ever shown, so holding all of a worker's stderr to
+            // then throw it away lets the child decide how much memory we use —
+            // and a CLI stuck in a retry loop will happily decide gigabytes.
             let mut reader = BufReader::new(stderr);
-            let _ = reader.read_to_end(&mut bytes).await;
-            String::from_utf8_lossy(&bytes).trim().to_string()
+            let captured =
+                crate::tools::capture::drain_bounded(Some(&mut reader), MAX_STDERR_BYTES).await;
+            captured.to_lossy_string().trim().to_string()
         })
     });
 
