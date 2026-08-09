@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  CircleAlertIcon,
   Clock3Icon,
   ChevronRightIcon,
   ChevronsLeftIcon,
@@ -7,10 +8,13 @@ import {
   FolderIcon,
   FolderOpenIcon,
   GitForkIcon,
+  LoaderCircleIcon,
   PinIcon,
   PlusIcon,
+  ShieldAlertIcon,
   SearchIcon,
   SquarePenIcon,
+  TerminalIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -20,6 +24,11 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
+import {
+  elapsedLabel,
+  type ThreadActivity,
+  type ThreadActivityMap,
+} from "@/lib/threadActivity";
 import type { ProjectChats, ThreadSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +38,7 @@ type Props = {
   activeProjectPath: string;
   activeProviderId: string;
   sending: boolean;
+  threadActivity: ThreadActivityMap;
   onOpenChange: (open: boolean) => void;
   onNewChat: () => void;
   onOpenProjectChat: (options: {
@@ -124,12 +134,96 @@ function navItemClass(active = false) {
   );
 }
 
+function readableAction(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+function activityStateLabel(activity: ThreadActivity) {
+  return activity.state === "awaiting_approval" ? "Needs approval" : "Working";
+}
+
+function activityDescription(activity: ThreadActivity, now: number) {
+  const parts = [activityStateLabel(activity)];
+  if (activity.tool) parts.push(`running ${readableAction(activity.tool)}`);
+  const elapsed = elapsedLabel(activity.startedAt, now);
+  if (elapsed) parts.push(`for ${elapsed}`);
+  return parts.join(", ");
+}
+
+function ThreadActivityCard({
+  activity,
+  now,
+}: {
+  activity: ThreadActivity;
+  now: number;
+}) {
+  const waiting = activity.state === "awaiting_approval";
+  const elapsed = elapsedLabel(activity.startedAt, now);
+
+  return (
+    <div
+      aria-hidden="true"
+      className={cn(
+        "pointer-events-none absolute inset-x-1 top-[calc(100%-2px)] z-30 rounded-lg border bg-popover p-2 text-popover-foreground opacity-0 shadow-lg transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100",
+        waiting ? "border-amber-400/35" : "border-primary/35"
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className={cn(
+            "flex min-w-0 items-center gap-1.5 text-[11px] font-medium",
+            waiting ? "text-amber-200" : "text-primary"
+          )}
+        >
+          {waiting ? (
+            <ShieldAlertIcon className="size-3.5 shrink-0" />
+          ) : (
+            <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" />
+          )}
+          <span className="truncate">{activityStateLabel(activity)}</span>
+        </span>
+        {elapsed ? (
+          <span className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted-foreground">
+            <Clock3Icon className="size-3" />
+            {elapsed}
+          </span>
+        ) : null}
+      </div>
+
+      {activity.tool ? (
+        <div className="mt-1.5 flex min-w-0 items-start gap-1.5">
+          <TerminalIcon className="mt-0.5 size-3 shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <div className="text-[10px] text-muted-foreground">Running tool</div>
+            <code className="block truncate text-[11px] text-foreground">
+              {readableAction(activity.tool)}
+            </code>
+          </div>
+        </div>
+      ) : null}
+
+      {activity.lastAction ? (
+        <div className="mt-1.5 flex min-w-0 items-start gap-1.5">
+          <CircleAlertIcon className="mt-0.5 size-3 shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <div className="text-[10px] text-muted-foreground">Last action</div>
+            <div className="truncate text-[11px] text-foreground/85">
+              {readableAction(activity.lastAction)}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatHistorySidebar({
   open,
   activeThreadId,
   activeProjectPath,
   activeProviderId,
   sending,
+  threadActivity,
   onOpenChange,
   onNewChat,
   onOpenProjectChat,
@@ -151,6 +245,18 @@ export function ChatHistorySidebar({
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [pinning, setPinning] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  const hasActiveActivity = Object.values(threadActivity).some(
+    (activity) => activity.state !== "idle"
+  );
+
+  useEffect(() => {
+    if (!hasActiveActivity) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [hasActiveActivity]);
 
   useEffect(() => {
     if (!open) return;
@@ -286,6 +392,11 @@ export function ChatHistorySidebar({
     const active = project.active && thread.id === activeThreadId;
     const title = threadTitle(thread);
     const age = formatAge(thread.updatedAt);
+    const activity = threadActivity[thread.id];
+    const activityText =
+      activity && activity.state !== "idle"
+        ? activityDescription(activity, now)
+        : undefined;
     // Shown on every row now that it is a mark rather than a word. The name
     // used to be hidden unless a project mixed providers, because `anthropic`
     // spelled out next to every chat was noise — a glyph is not, and knowing
@@ -302,6 +413,7 @@ export function ChatHistorySidebar({
               /* Parent handlers surface the actionable error. */
             });
           }}
+          aria-label={activityText ? `${title}. ${activityText}` : undefined}
           className={cn(
             "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-24 pl-2 text-left outline-none transition-colors",
             "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
@@ -319,7 +431,11 @@ export function ChatHistorySidebar({
             >
               {/* The name still reaches a screen reader through the title
                   above, so the glyph itself stays decorative. */}
-              <ProviderIcon providerId={owner} className="size-4 opacity-80" />
+              <ProviderIcon
+                providerId={owner}
+                label={owner}
+                className="size-4 opacity-80"
+              />
             </span>
           ) : null}
           {age ? (
@@ -328,6 +444,9 @@ export function ChatHistorySidebar({
             </span>
           ) : null}
         </button>
+        {activity && activity.state !== "idle" ? (
+          <ThreadActivityCard activity={activity} now={now} />
+        ) : null}
         {active ? (
           <Button
             type="button"

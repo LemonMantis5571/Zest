@@ -58,6 +58,7 @@ import { ZestPulse } from "@/components/ZestPulse";
 import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
+import type { ThreadActivityMap } from "@/lib/threadActivity";
 import { useKeybindings } from "@/lib/useKeybindings";
 import type {
   ApprovalChoice,
@@ -87,6 +88,7 @@ type Props = {
   branch: string | null;
   profile: UserProfile;
   sending: boolean;
+  threadActivity: ThreadActivityMap;
   model: string;
   effort: EffortId;
   onDraftChange: (value: string) => void;
@@ -578,6 +580,7 @@ export function ChatScreen({
   branch,
   profile,
   sending,
+  threadActivity,
   model,
   effort,
   onDraftChange,
@@ -846,6 +849,7 @@ export function ChatScreen({
         activeProjectPath={session.root}
         activeProviderId={session.provider}
         sending={sending}
+        threadActivity={threadActivity}
         onOpenChange={setSidebar}
         onNewChat={onNewChat}
         onOpenProjectChat={onOpenProjectChat}
