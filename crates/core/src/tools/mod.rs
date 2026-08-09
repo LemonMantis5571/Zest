@@ -1,5 +1,6 @@
 pub mod approval;
 pub mod bash;
+pub mod browser;
 pub mod capture;
 pub mod edit_file;
 pub mod external_agent;
@@ -38,6 +39,7 @@ use self::read_skill::ReadSkill;
 use self::web_search::WebSearch;
 use self::write_file::WriteFile;
 
+pub use self::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
 pub use self::outcome::{ToolMetadata, ToolOutcome};
 pub use self::question::{
     parse_question_input, AskUser, DenyQuestioner, QuestionRequest, Questioner, ASK_USER_TOOL,
@@ -203,6 +205,12 @@ pub fn register_read_tools(
     registry.register(Arc::new(Grep::new(root)?));
     registry.register(Arc::new(WebSearch::new()));
     Ok(())
+}
+
+/// Register the parent-only local browser tool after the shared worker tools
+/// have been cloned, so delegated workers cannot control the desktop webview.
+pub fn register_browser_tool(registry: &mut ToolRegistry, adapter: Arc<dyn BrowserAdapter>) {
+    browser::register_browser_tool(registry, adapter);
 }
 
 /// Register `read_skill` against a shared skill registry (hot-reloadable).

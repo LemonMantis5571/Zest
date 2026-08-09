@@ -59,6 +59,7 @@ import { LinkifyText } from "@/lib/linkify";
 import { sessionSupportsModelPicker, type EffortId } from "@/lib/models";
 import { collapseThresholdFor, groupToolRuns } from "@/lib/toolRuns";
 import type { ThreadActivityMap } from "@/lib/threadActivity";
+import type { QueuedTurn } from "@/lib/threadQueue";
 import { useKeybindings } from "@/lib/useKeybindings";
 import type {
   ApprovalChoice,
@@ -88,6 +89,9 @@ type Props = {
   branch: string | null;
   profile: UserProfile;
   sending: boolean;
+  queuedMessages: ReadonlyArray<QueuedTurn>;
+  onUpdateQueuedMessage: (turnId: string, text: string) => void;
+  onRemoveQueuedMessage: (turnId: string) => void;
   threadActivity: ThreadActivityMap;
   model: string;
   effort: EffortId;
@@ -372,7 +376,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
       <MessageScrollerItem id={`message-${msg.id}`} messageId={msg.id} scrollAnchor={isLast}>
         <Message align="end" className="justify-end">
           <MessageContent className="items-end gap-1.5">
-            <div className="group/user flex flex-col items-end gap-1.5">
+            <div className="group/user flex w-full flex-col items-end gap-1.5">
               {msg.attachments && msg.attachments.length > 0 ? (
                 <AttachmentGroup className="justify-end">
                   {msg.attachments.map((att) => (
@@ -580,6 +584,9 @@ export function ChatScreen({
   branch,
   profile,
   sending,
+  queuedMessages,
+  onUpdateQueuedMessage,
+  onRemoveQueuedMessage,
   threadActivity,
   model,
   effort,
@@ -1077,6 +1084,9 @@ export function ChatScreen({
             branch={branch}
             contextRefreshKey={`${session.threadId}:${messages.length}:${session.checkpoints.length}:${sending ? 1 : 0}`}
             sending={sending}
+            queuedMessages={queuedMessages}
+            onUpdateQueuedMessage={onUpdateQueuedMessage}
+            onRemoveQueuedMessage={onRemoveQueuedMessage}
             showModelPicker={showPicker}
             optionsDisabled={optionsDisabled}
             attachments={attachments}
