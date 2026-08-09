@@ -30,7 +30,7 @@ use zest_core::{
     start_login as core_start_login, truncate_chars, uses_gateway_auth, ApprovalDecision,
     ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts,
     ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace, GatewayState, HarnessError,
-    Ledger, LoginProcess, PersistPriority, PersistWorker, Prices, ProfileStats,
+    Ledger, LoginProcess, PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats,
     ProjectSessionState, ProviderConfig, ProviderRegistry, ProviderSlot, QuestionRequest,
     Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
     StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError, ThreadStore, ThreadSummary,
@@ -3858,7 +3858,10 @@ async fn send_message(
     };
     apply_event_to_thread(&mut session.thread, &assistant_start);
     if worker
-        .save_and_wait(session.thread.clone(), PersistPriority::Immediate)
+        .save_and_wait(
+            PersistSnapshot::owned(session.thread.clone()),
+            PersistPriority::Immediate,
+        )
         .await
         .is_err()
     {
@@ -4069,12 +4072,25 @@ async fn send_message(
                 }
             }
 
-            if let Ok(mut thread) = live_thread.lock() {
-                let priority = event_priority(&event);
-                apply_event_to_thread(&mut thread, &event);
-                // Schedule the checkpoint, then clone for the worker — Immediate
-                // for tools/approvals/terminal; Delta coalesces text/thinking.
-                let snapshot = thread.clone();
+            // The lock is released before the worker is told anything, so the
+            // deferred read below can never wait on this event's own guard.
+            let priority = match live_thread.lock() {
+                Ok(mut thread) => {
+                    let priority = event_priority(&event);
+                    apply_event_to_thread(&mut thread, &event);
+                    Some(priority)
+                }
+                Err(_) => None,
+            };
+
+            if let Some(priority) = priority {
+                // Immediate for tools/approvals/terminal, Delta for text and
+                // thinking. Either way the worker is handed the live thread
+                // rather than a copy of it: deltas arrive dozens of times a
+                // second and coalesce into one write, so copying the whole
+                // conversation per delta produced a transcript-sized allocation
+                // for every chunk and threw nearly all of them away.
+                let snapshot = PersistSnapshot::Live(live_thread.clone());
                 if worker.enqueue(snapshot, priority).is_err() {
                     let _ = app.emit(
                         "chat-event",
@@ -4171,7 +4187,10 @@ async fn send_message(
     };
     apply_event_to_thread(&mut session.thread, &final_event);
     let history_save_failed = if worker
-        .save_and_wait(session.thread.clone(), PersistPriority::Immediate)
+        .save_and_wait(
+            PersistSnapshot::owned(session.thread.clone()),
+            PersistPriority::Immediate,
+        )
         .await
         .is_err()
     {

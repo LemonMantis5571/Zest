@@ -25,10 +25,31 @@ pub enum PersistPriority {
     Delta,
 }
 
-#[allow(clippy::large_enum_variant)]
+/// What to write, and when to read it.
+pub enum Snapshot {
+    /// A copy the caller already took. Use when the state at *this* instant is
+    /// what has to land — a finished turn, a tool result.
+    Owned(Box<Thread>),
+    /// A handle to the live thread, read at write time.
+    ///
+    /// This is what makes coalescing worth anything. A burst of deltas produces
+    /// one write, so copying the whole conversation on every delta duplicates a
+    /// long transcript dozens of times a second and discards all but one of
+    /// them. Handing over the handle defers the copy to the write that actually
+    /// happens — and that copy is taken on the blocking thread, so the lock is
+    /// never held on the async runtime.
+    Live(Arc<std::sync::Mutex<Thread>>),
+}
+
+impl Snapshot {
+    pub fn owned(thread: Thread) -> Self {
+        Snapshot::Owned(Box::new(thread))
+    }
+}
+
 enum Cmd {
     Upsert {
-        thread: Thread,
+        snapshot: Snapshot,
         priority: PersistPriority,
         ack: Option<oneshot::Sender<Result<()>>>,
     },
@@ -75,10 +96,10 @@ impl PersistWorker {
 
     /// Enqueue a thread snapshot. When `ack` is needed, use [`Self::save`] /
     /// [`Self::save_and_wait`] instead.
-    pub fn enqueue(&self, thread: Thread, priority: PersistPriority) -> Result<()> {
+    pub fn enqueue(&self, snapshot: Snapshot, priority: PersistPriority) -> Result<()> {
         self.tx
             .send(Cmd::Upsert {
-                thread,
+                snapshot,
                 priority,
                 ack: None,
             })
@@ -86,11 +107,11 @@ impl PersistWorker {
     }
 
     /// Save immediately (or as a delta) and wait for the write to finish.
-    pub async fn save_and_wait(&self, thread: Thread, priority: PersistPriority) -> Result<()> {
+    pub async fn save_and_wait(&self, snapshot: Snapshot, priority: PersistPriority) -> Result<()> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.tx
             .send(Cmd::Upsert {
-                thread,
+                snapshot,
                 priority,
                 ack: Some(ack_tx),
             })
@@ -120,7 +141,7 @@ impl PersistWorker {
 
 async fn run_worker(store: ThreadStore, mut rx: mpsc::UnboundedReceiver<Cmd>) {
     let store = Arc::new(store);
-    let mut pending: Option<Thread> = None;
+    let mut pending: Option<Snapshot> = None;
     let mut deadline: Option<Instant> = None;
     let mut waiters: Vec<oneshot::Sender<Result<()>>> = Vec::new();
 
@@ -140,25 +161,25 @@ async fn run_worker(store: ThreadStore, mut rx: mpsc::UnboundedReceiver<Cmd>) {
             cmd = rx.recv() => {
                 match cmd {
                     None => {
-                        let _ = flush_pending(&store, &mut pending, &mut deadline, &mut waiters);
+                        let _ = flush_pending(&store, &mut pending, &mut deadline, &mut waiters).await;
                         break;
                     }
                     Some(Cmd::Shutdown { ack }) => {
-                        let _ = flush_pending(&store, &mut pending, &mut deadline, &mut waiters);
+                        let _ = flush_pending(&store, &mut pending, &mut deadline, &mut waiters).await;
                         let _ = ack.send(());
                         break;
                     }
                     Some(Cmd::Flush { ack }) => {
-                        let result = flush_pending(&store, &mut pending, &mut deadline, &mut waiters);
+                        let result = flush_pending(&store, &mut pending, &mut deadline, &mut waiters).await;
                         let _ = ack.send(result);
                     }
-                    Some(Cmd::Upsert { thread, priority, ack }) => {
+                    Some(Cmd::Upsert { snapshot, priority, ack }) => {
                         match priority {
                             PersistPriority::Immediate => {
                                 // Collapse any pending delta into this write.
                                 pending = None;
                                 deadline = None;
-                                let result = store.save(&thread);
+                                let result = write_off_runtime(&store, snapshot).await;
                                 let for_waiters = clone_result(&result);
                                 if let Some(ack) = ack {
                                     let _ = ack.send(result);
@@ -168,7 +189,7 @@ async fn run_worker(store: ThreadStore, mut rx: mpsc::UnboundedReceiver<Cmd>) {
                                 }
                             }
                             PersistPriority::Delta => {
-                                pending = Some(thread);
+                                pending = Some(snapshot);
                                 if deadline.is_none() {
                                     deadline = Some(
                                         Instant::now()
@@ -191,30 +212,56 @@ async fn run_worker(store: ThreadStore, mut rx: mpsc::UnboundedReceiver<Cmd>) {
                     std::future::pending::<()>().await;
                 }
             }, if deadline.is_some() => {
-                let _ = flush_pending(&store, &mut pending, &mut deadline, &mut waiters);
+                let _ = flush_pending(&store, &mut pending, &mut deadline, &mut waiters).await;
             }
         }
     }
 }
 
-fn flush_pending(
-    store: &ThreadStore,
-    pending: &mut Option<Thread>,
+async fn flush_pending(
+    store: &Arc<ThreadStore>,
+    pending: &mut Option<Snapshot>,
     deadline: &mut Option<Instant>,
     waiters: &mut Vec<oneshot::Sender<Result<()>>>,
 ) -> Result<()> {
     *deadline = None;
-    let Some(thread) = pending.take() else {
+    let Some(snapshot) = pending.take() else {
         for w in waiters.drain(..) {
             let _ = w.send(Ok(()));
         }
         return Ok(());
     };
-    let result = store.save(&thread);
+    let result = write_off_runtime(store, snapshot).await;
     for w in waiters.drain(..) {
         let _ = w.send(clone_result(&result));
     }
     result
+}
+
+/// Serialize and write on a blocking thread.
+///
+/// [`crate::fsutil::atomic_write`] ends in `sync_all` — a real fsync — and the
+/// document is the entire conversation. Doing that inline stalled a runtime
+/// worker for the duration of a disk sync, several times a second while a turn
+/// streams, which is exactly the kind of work Tokio asks you not to do on an
+/// async thread.
+async fn write_off_runtime(store: &Arc<ThreadStore>, snapshot: Snapshot) -> Result<()> {
+    let store = store.clone();
+    let task = tokio::task::spawn_blocking(move || match snapshot {
+        Snapshot::Owned(thread) => store.save(&thread),
+        Snapshot::Live(live) => {
+            // Taken here, on the blocking thread, so a producer mid-event never
+            // stalls a runtime worker. A poisoned lock still holds a usable
+            // thread — losing the transcript because a different thread
+            // panicked would be the worse outcome.
+            let thread = live.lock().unwrap_or_else(|e| e.into_inner());
+            store.save(&thread)
+        }
+    });
+    match task.await {
+        Ok(result) => result,
+        Err(e) => Err(HarnessError::Other(format!("persist task failed: {e}"))),
+    }
 }
 
 fn clone_result(result: &Result<()>) -> Result<()> {
@@ -244,11 +291,75 @@ mod tests {
         let mut thread = Thread::new();
         thread.apply_user("u1", "hello");
         worker
-            .save_and_wait(thread.clone(), PersistPriority::Immediate)
+            .save_and_wait(Snapshot::owned(thread.clone()), PersistPriority::Immediate)
             .await
             .unwrap();
         let loaded = ThreadStore::open(&root).unwrap().load(&thread.id).unwrap();
         assert_eq!(loaded.messages.len(), 1);
+        worker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_live_snapshot_is_read_when_it_is_written_not_when_it_is_queued() {
+        // The point of the Live variant: the producer hands over a handle and
+        // keeps appending. Whatever the thread says at flush time is what lands,
+        // so a burst of deltas costs one copy instead of one per delta.
+        let root = scratch("live");
+        let worker = PersistWorker::spawn(&root).unwrap();
+
+        let mut seed = Thread::new();
+        seed.apply_user("u1", "hi");
+        let id = seed.id.clone();
+        let live = Arc::new(std::sync::Mutex::new(seed));
+
+        worker
+            .enqueue(Snapshot::Live(live.clone()), PersistPriority::Delta)
+            .unwrap();
+
+        // Appended *after* the enqueue, and still expected on disk.
+        live.lock().unwrap().apply_text_delta("a1", "written later");
+
+        worker.flush().await.unwrap();
+        let loaded = ThreadStore::open(&root).unwrap().load(&id).unwrap();
+        match &loaded.messages[1] {
+            crate::thread::StoredMessage::Assistant { text, .. } => {
+                assert_eq!(text, "written later");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+        worker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn many_deltas_against_one_handle_still_write_once() {
+        // Coalescing was always here; what changed is that the queued items are
+        // now handles rather than whole transcripts.
+        let root = scratch("live-burst");
+        let worker = PersistWorker::spawn(&root).unwrap();
+
+        let mut seed = Thread::new();
+        seed.apply_user("u1", "hi");
+        let id = seed.id.clone();
+        let live = Arc::new(std::sync::Mutex::new(seed));
+
+        for index in 0..200 {
+            live.lock()
+                .unwrap()
+                .apply_text_delta("a1", &format!("{index} "));
+            worker
+                .enqueue(Snapshot::Live(live.clone()), PersistPriority::Delta)
+                .unwrap();
+        }
+
+        worker.flush().await.unwrap();
+        let loaded = ThreadStore::open(&root).unwrap().load(&id).unwrap();
+        match &loaded.messages[1] {
+            crate::thread::StoredMessage::Assistant { text, .. } => {
+                assert!(text.starts_with("0 1 2 "), "{text}");
+                assert!(text.trim_end().ends_with("199"), "{text}");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
         worker.shutdown().await;
     }
 
@@ -259,13 +370,13 @@ mod tests {
         let mut thread = Thread::new();
         thread.apply_user("u1", "hi");
         worker
-            .save_and_wait(thread.clone(), PersistPriority::Immediate)
+            .save_and_wait(Snapshot::owned(thread.clone()), PersistPriority::Immediate)
             .await
             .unwrap();
 
         thread.apply_text_delta("a1", "partial");
         worker
-            .enqueue(thread.clone(), PersistPriority::Delta)
+            .enqueue(Snapshot::owned(thread.clone()), PersistPriority::Delta)
             .unwrap();
         // Before checkpoint interval, disk may still lack the delta — flush forces it.
         worker.flush().await.unwrap();

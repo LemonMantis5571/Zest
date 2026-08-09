@@ -704,14 +704,27 @@ impl ThreadStore {
             }
             .into());
         }
-        let mut thread = thread.clone();
-        thread.version = THREAD_FORMAT_VERSION;
-        if thread.wire_format.trim().is_empty() {
-            thread.wire_format = default_wire_format();
-        }
         let path = self.path_for(&id);
-        fsutil::atomic_write_json(&path, &thread)
-            .map_err(|e| HarnessError::Other(format!("write thread {}: {e}", path.display())))?;
+
+        // Normalisation used to clone the whole thread unconditionally, to set
+        // two fields that are almost always already correct. On a long
+        // conversation that is a deep copy of every message on every save, and
+        // saves happen several times a second while a turn streams. Clone only
+        // when there is actually something to fix.
+        let needs_normalising =
+            thread.version != THREAD_FORMAT_VERSION || thread.wire_format.trim().is_empty();
+        let result = if needs_normalising {
+            let mut normalised = thread.clone();
+            normalised.version = THREAD_FORMAT_VERSION;
+            if normalised.wire_format.trim().is_empty() {
+                normalised.wire_format = default_wire_format();
+            }
+            fsutil::atomic_write_json(&path, &normalised)
+        } else {
+            fsutil::atomic_write_json(&path, thread)
+        };
+
+        result.map_err(|e| HarnessError::Other(format!("write thread {}: {e}", path.display())))?;
         Ok(())
     }
 
