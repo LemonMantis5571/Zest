@@ -3,6 +3,7 @@ import { CheckIcon, FolderOpenIcon, PlusIcon } from "lucide-react";
 
 import { ApiProviderForm } from "@/components/ApiProviderForm";
 import { AuthShell } from "@/components/AuthShell";
+import { ProviderIcon } from "@/components/ProviderIcon";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
 import { recentVerifyFailed } from "@/lib/providerVerify";
@@ -181,6 +182,8 @@ export function ProviderPicker({
                 />
                 <span className="min-w-0">
                   <div className="flex items-center gap-2 text-[13px] font-medium tracking-[-0.1px]">
+                    {/* Decorative — the name it identifies is right beside it. */}
+                    <ProviderIcon providerId={p.id} />
                     {p.label}
                     {selectedRow ? (
                       <CheckIcon
