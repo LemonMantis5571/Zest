@@ -34,13 +34,18 @@ fn configure_builder(builder: &mut WalkBuilder) {
         });
 }
 
-/// Walk files under `start` (must already be confined under `root`).
-/// Yields canonical paths that stay inside the project and are not sensitive.
-pub fn walk_files(root: &ProjectRoot, start: &Path) -> Vec<PathBuf> {
+/// Walk files under `start` (must already be confined under `root`), handing
+/// each canonical, non-sensitive path to `visit`.
+///
+/// `visit` returns `false` to stop the walk.
+///
+/// Streaming rather than returning a `Vec` because the caller bounds its own
+/// results: collecting the whole tree first meant a caller's cap saved nothing,
+/// since on a large repository the walk *is* the cost and the matching is free.
+pub fn walk_files(root: &ProjectRoot, start: &Path, mut visit: impl FnMut(PathBuf) -> bool) {
     let mut builder = WalkBuilder::new(start);
     configure_builder(&mut builder);
 
-    let mut out = Vec::new();
     for entry in builder.build().flatten() {
         let path = entry.path();
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -56,9 +61,10 @@ pub fn walk_files(root: &ProjectRoot, start: &Path) -> Vec<PathBuf> {
         if is_sensitive_path(&rel) {
             continue;
         }
-        out.push(resolved);
+        if !visit(resolved) {
+            return;
+        }
     }
-    out
 }
 
 /// Immediate children of `dir` (confined), skip hard-skip dirs and sensitive files.
@@ -149,8 +155,11 @@ mod tests {
         fs::write(dir.join("keep.txt"), "yes").unwrap();
 
         let root = ProjectRoot::new(&dir).unwrap();
-        let files = walk_files(&root, root.as_path());
-        let rels: Vec<String> = files.iter().map(|p| root.relativize(p)).collect();
+        let mut rels: Vec<String> = Vec::new();
+        walk_files(&root, root.as_path(), |path| {
+            rels.push(root.relativize(&path));
+            true
+        });
 
         assert!(rels.iter().any(|r| r == "src/main.rs"), "{rels:?}");
         assert!(rels.iter().any(|r| r == "keep.txt"), "{rels:?}");

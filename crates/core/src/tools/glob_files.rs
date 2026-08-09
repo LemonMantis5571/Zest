@@ -84,16 +84,23 @@ impl Tool for GlobFiles {
 fn collect_matches(root: &ProjectRoot, set: &globset::GlobSet) -> Result<Vec<String>, String> {
     let mut matches = Vec::new();
 
-    for resolved in walk_files(root, root.as_path()) {
+    // Stopping the walk, not just the collecting. The cap is what makes a glob
+    // over a large repository cheap, and it only does that if the traversal
+    // itself ends — the matching was never the expensive part.
+    walk_files(root, root.as_path(), |resolved| {
         let rel = root.relativize(&resolved);
         if set.is_match(&rel) || set.is_match(Path::new(&rel)) {
             matches.push(rel);
             if matches.len() >= MAX_MATCHES {
-                break;
+                return false;
             }
         }
-    }
+        true
+    });
 
+    // Sorted after the fact: the walk has no useful order, so the cap takes
+    // whichever matches it reaches first and this makes the output stable to
+    // read. Which 200 you get is unchanged from before.
     matches.sort();
     Ok(matches)
 }
@@ -108,6 +115,43 @@ fn format_matches(matches: Vec<String>) -> Result<String, String> {
         out.push_str(&format!("\n\n[truncated at {MAX_MATCHES} matches]"));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod walk_bounds_tests {
+    use super::*;
+    use crate::tools::project::ProjectRoot;
+
+    /// The cap has to end the traversal, not just the collecting. Counting how
+    /// many files the walk actually visits is the only way to tell the two
+    /// apart from the outside — the returned matches look identical either way.
+    #[test]
+    fn the_cap_stops_the_walk_rather_than_filtering_its_output() {
+        let dir = std::env::temp_dir().join("zest-glob-cap");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Comfortably more than the cap, so a full walk is clearly visible.
+        for index in 0..(MAX_MATCHES * 3) {
+            std::fs::write(dir.join(format!("f{index:04}.txt")), "x").unwrap();
+        }
+
+        let root = ProjectRoot::new(&dir).unwrap();
+        let mut visited = 0usize;
+        crate::tools::walk::walk_files(&root, root.as_path(), |_| {
+            visited += 1;
+            visited < MAX_MATCHES
+        });
+        assert_eq!(visited, MAX_MATCHES, "the walk stopped when asked to");
+
+        let set = globset::GlobSetBuilder::new()
+            .add(globset::Glob::new("*.txt").unwrap())
+            .build()
+            .unwrap();
+        let matches = collect_matches(&root, &set).unwrap();
+        assert_eq!(matches.len(), MAX_MATCHES);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
