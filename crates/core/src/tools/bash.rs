@@ -24,15 +24,24 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::io::AsyncReadExt;
 
 use super::approval::{ApprovalPreview, ToolRisk};
+use super::capture::{drain_bounded, Captured};
 use super::prepared::PreparedToolCall;
 use super::Tool;
 
 /// Combined stdout+stderr kept from a command. Build logs are enormous and the
 /// interesting part is at both ends, so the middle is what gets dropped.
 const MAX_OUTPUT_BYTES: usize = 30 * 1024;
+
+/// Ceiling on what one stream may cost in memory, however much it writes.
+///
+/// The output is clipped to both ends anyway, so reading all of a runaway
+/// command into a `Vec` first buys nothing and risks everything: `yes`, a build
+/// loop, or a binary accidentally written to stdout will produce gigabytes, and
+/// the only reason it was survivable before is that nothing had tried it yet.
+/// Generous enough that the clip below still has more than it needs.
+const MAX_STREAM_BYTES: usize = 2 * MAX_OUTPUT_BYTES;
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
 
@@ -329,19 +338,9 @@ impl Tool for Bash {
         // screenful of errors clears 64 KB easily, so the shape that hangs is
         // one of the most common commands there is.
         let collect = async {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            let read_out = async {
-                if let Some(s) = stdout.as_mut() {
-                    let _ = s.read_to_end(&mut out).await;
-                }
-            };
-            let read_err = async {
-                if let Some(s) = stderr.as_mut() {
-                    let _ = s.read_to_end(&mut err).await;
-                }
-            };
-            tokio::join!(read_out, read_err);
+            let read_out = drain_bounded(stdout.as_mut(), MAX_STREAM_BYTES);
+            let read_err = drain_bounded(stderr.as_mut(), MAX_STREAM_BYTES);
+            let (out, err) = tokio::join!(read_out, read_err);
             let status = child.wait().await;
             (status, out, err)
         };
@@ -388,10 +387,10 @@ fn shell_command(command: &str) -> tokio::process::Command {
 
 /// Format a finished command for the model: exit status first, then output with
 /// the middle elided if it is long.
-fn render_output(command: &str, code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
+fn render_output(command: &str, code: Option<i32>, stdout: &Captured, stderr: &Captured) -> String {
     let mut combined = String::new();
-    let out = String::from_utf8_lossy(stdout);
-    let err = String::from_utf8_lossy(stderr);
+    let out = String::from_utf8_lossy(&stdout.bytes);
+    let err = String::from_utf8_lossy(&stderr.bytes);
     if !out.trim().is_empty() {
         combined.push_str(&out);
     }
@@ -400,6 +399,16 @@ fn render_output(command: &str, code: Option<i32>, stdout: &[u8], stderr: &[u8])
             combined.push('\n');
         }
         combined.push_str(&err);
+    }
+
+    // Said plainly rather than left to be inferred from a suspiciously round
+    // output size. A model that cannot tell truncated output from complete
+    // output will happily conclude the build printed nothing after line 40,000.
+    let dropped = stdout.dropped + stderr.dropped;
+    if dropped > 0 {
+        combined.push_str(&format!(
+            "\n\n[… {dropped} bytes dropped from the middle while the command ran …]\n"
+        ));
     }
 
     let status = match code {
@@ -612,6 +621,16 @@ mod tests {
         let out = tool.run(json!({ "command": command })).await.unwrap().body;
         assert!(out.contains("hello"), "{out}");
         assert!(out.contains("exit 0"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn truncation_is_stated_in_the_output() {
+        let out = Captured {
+            bytes: b"start".to_vec(),
+            dropped: 4096,
+        };
+        let rendered = render_output("noisy", Some(0), &out, &Captured::default());
+        assert!(rendered.contains("4096 bytes dropped"), "{rendered}");
     }
 
     #[tokio::test]

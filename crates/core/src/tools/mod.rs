@@ -1,5 +1,6 @@
 pub mod approval;
 pub mod bash;
+pub mod capture;
 pub mod edit_file;
 pub mod external_agent;
 pub mod glob_files;
