@@ -8,13 +8,13 @@
 [![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**One Rust core. Two frontends. No accounts, no telemetry.**
+**Stop forcing one model to do everything.**
 
-**🔧 A provider-aware, local-first coding harness, built in Rust. ⚡**
+**🧠 Plan with a frontier model, delegate the execution to the model that does each task best. 🎯**
 
-Run a coding agent in your project: stream responses, read and edit files, run
-commands, and delegate bounded work to external CLIs — with approvals, visible
-diffs, and honest usage accounting at every step.
+Run a coding agent in your project: a frontier model plans, specialist workers
+execute, and every write, command, and delegation pauses for your approval
+with a diff preview — local-first, no telemetry, no accounts, no bloat.
 
 [Documentation](#documentation) · [Quick start](#quick-start) · [Contributing](CONTRIBUTING.md)
 
@@ -39,19 +39,22 @@ diffs, and honest usage accounting at every step.
 
 ## 🎯 What is Zest?
 
-**The pain:** running a coding agent in a real project means wiring a provider,
-trusting a black-box loop, and losing track of what a session actually cost.
+**The pain:** one model can't be great at everything. Frontier models plan
+brilliantly but fumble the execution, and tools that try to do it all bury you
+in bloat, telemetry, and accounts — while locking you into a single model.
 
-**The solution:** Zest is the harness between you and the model. One Rust core
-drives two frontends — a Tauri desktop app and a terminal REPL — so the same
-sessions, tools, approvals, and usage records work in both.
+**The solution:** Zest is built for delegation. A frontier model runs the
+parent session and plans the change; each bounded task is handed to an
+already-authenticated specialist CLI — Claude Code or Gemini CLI — working in
+an isolated Git worktree. The core stays deliberately lean: one Rust engine,
+two frontends, no accounts, no telemetry.
 
-**The result:** you keep your own model account, approve every write and
-command with a diff preview, and know exactly what a session cost.
+**The result:** keep your own model accounts, delegate each task to the model
+that does it best, approve every write and command with a diff preview, and
+know exactly what a session cost.
 
-You bring your own model account. Zest never routes your prompts through a
-middleman, has no accounts of its own, and records your usage locally so you
-can see what a session actually cost.
+Zest never routes your prompts through a middleman and never fabricates usage
+— workers stay explicit: configured, signed in, and approval-gated.
 
 <div align="center">
 
@@ -59,6 +62,7 @@ can see what a session actually cost.
 | --- | --- |
 | 🧩 Cores | 1 — one `zest-core` agent loop |
 | 🖥️ Frontends | 2 — desktop app + terminal client |
+| 🔀 Workers | Claude Code + Gemini CLI, in isolated worktrees |
 | 🔒 Accounts | 0 — bring your own model |
 | 📡 Telemetry | 0 — local-first |
 | 🔧 Compaction | automatic at 80% of the context window |
@@ -67,18 +71,20 @@ can see what a session actually cost.
 
 ## ✨ Features
 
+- **🧠 Delegate to the model that's best at the job** — a frontier model plans
+  in the parent session; bounded subtasks go to already-authenticated Claude
+  Code or Gemini CLI workers in isolated Git worktrees, and their diffs come
+  back for review before anything is accepted.
+- **🔑 Bring your own planner** — Codex or Claude through the bundled gateway,
+  the native Anthropic API, or any OpenAI-compatible endpoint (OpenAI,
+  DeepSeek, local servers). The worker model is independent — let the CLI pick
+  its default, like a flash-class model for frontend work.
 - **🧩 One core, two frontends** — a shared `zest-core` agent loop drives both
   the desktop app and the `zest` terminal client.
-- **🔑 Bring your own parent session** — Codex or Claude through the bundled
-  gateway, the native Anthropic API, or any OpenAI-compatible endpoint
-  (OpenAI, DeepSeek, local servers).
 - **⚡ Streaming with effort control** — token-by-token responses with
   `low`–`max` reasoning effort, so you choose how much the model thinks.
 - **✅ Approvals with diff previews** — writes, shell commands, and worker
   delegations pause for your explicit `y/N` and show what will change.
-- **🤝 Explicit worker delegation** — hand bounded subtasks to already-authenticated
-  Claude Code or Gemini CLI workers, run in isolated Git worktrees, and review
-  their diffs before accepting anything.
 - **📊 Context management that is honest** — a live context meter, automatic
   compaction at 80% of the window, and checkpoints that survive a restart.
 - **🧾 Honest usage ledger** — local token and cost records per provider and model,
@@ -126,7 +132,8 @@ The parent conversation runs against the provider you selected. The bundled
 `CLIProxyAPI` sidecar translates subscription-backed providers (Codex, Claude)
 locally and is started and supervised by Zest. External workers are an explicit
 process boundary: they are configured, signed in, and approval-gated — never
-an automatic fallback.
+an automatic fallback. The planner stays in charge; each task goes to the
+worker model best suited to it.
 
 ## 🚀 Getting started
 
@@ -265,6 +272,12 @@ invocation. The worker runs in an isolated Git worktree by default and its
 answer and diff come back for your review; the delegation itself still needs
 your approval.
 
+A typical mixed-model session: ask the parent model to plan the change, then
+delegate the frontend work to a Gemini CLI worker and a backend refactor to
+Claude Code. Each worker's model is independent of Zest's chat model — choose
+**CLI default** to let the vendor CLI pick (e.g. a flash-class model for
+frontend work), or pin one per agent.
+
 ```toml
 [agents.claude]
 mode = "headless"
@@ -274,9 +287,6 @@ model = "sonnet"
 allow_mcp = false
 workspace = "isolated"
 ```
-
-The worker model is independent of Zest's chat model — choose **CLI default**
-to let the vendor CLI decide.
 
 > [!WARNING]
 > MCP pass-through is off by default. Enabling it lets a worker use the MCP
