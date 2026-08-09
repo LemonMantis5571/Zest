@@ -317,15 +317,31 @@ impl Tool for Bash {
 
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
+        // Both pipes are drained at once, and that is not a tidiness choice.
+        //
+        // Reading stdout to EOF first deadlocks: a pipe holds only so much
+        // (~64 KB), so once the child has filled stderr it blocks writing and
+        // never exits, so stdout never reaches EOF, so the read never returns.
+        // The command then runs until the timeout and comes back with nothing.
+        //
+        // This is not a corner case for a coding tool. `cargo check` writes its
+        // entire output to stderr and nothing at all to stdout — a build with a
+        // screenful of errors clears 64 KB easily, so the shape that hangs is
+        // one of the most common commands there is.
         let collect = async {
             let mut out = Vec::new();
             let mut err = Vec::new();
-            if let Some(s) = stdout.as_mut() {
-                let _ = s.read_to_end(&mut out).await;
-            }
-            if let Some(s) = stderr.as_mut() {
-                let _ = s.read_to_end(&mut err).await;
-            }
+            let read_out = async {
+                if let Some(s) = stdout.as_mut() {
+                    let _ = s.read_to_end(&mut out).await;
+                }
+            };
+            let read_err = async {
+                if let Some(s) = stderr.as_mut() {
+                    let _ = s.read_to_end(&mut err).await;
+                }
+            };
+            tokio::join!(read_out, read_err);
             let status = child.wait().await;
             (status, out, err)
         };
@@ -596,6 +612,43 @@ mod tests {
         let out = tool.run(json!({ "command": command })).await.unwrap().body;
         assert!(out.contains("hello"), "{out}");
         assert!(out.contains("exit 0"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_only_writes_to_stderr_does_not_deadlock() {
+        // The regression: stdout was read to EOF before stderr was touched, so a
+        // child that filled the ~64 KB stderr pipe blocked writing, never
+        // exited, and never closed stdout. The command then ran to its timeout.
+        //
+        // `cargo check` is exactly this shape — everything on stderr, nothing on
+        // stdout — so the failing case is one of the most common commands a
+        // coding tool runs. The generated volume here is well past a pipe.
+        let dir = scratch("stderr-flood");
+        let tool = Bash::new(&dir).unwrap();
+        // The runner already wraps this in `cmd /C` or `sh -c`, so it is the
+        // loop itself, not another shell invocation.
+        let command = if cfg!(windows) {
+            "for /L %i in (1,1,4000) do @echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1>&2"
+        } else {
+            "for i in $(seq 1 4000); do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1>&2; done"
+        };
+
+        // A short ceiling so the old behaviour fails fast rather than hanging
+        // the suite for the default timeout.
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            tool.run(json!({ "command": command, "timeout_ms": 20_000 })),
+        )
+        .await
+        .expect("must not hang")
+        .unwrap()
+        .body;
+
+        assert!(out.contains("exit 0"), "{out}");
+        assert!(
+            !out.contains("did not finish within"),
+            "the command completed, so it must not be reported as timed out: {out}"
+        );
     }
 
     #[tokio::test]
