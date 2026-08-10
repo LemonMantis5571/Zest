@@ -19,6 +19,7 @@ import type {
   SessionInfo,
   SessionMeta,
   ProjectChats,
+  SpacesSnapshot,
   ThreadSummary,
   UsageReport,
   UsageSnapshot,
@@ -157,6 +158,40 @@ export function updateSessionOptions(options: {
 
 export function listThreads() {
   return invoke<ThreadSummary[]>("list_threads");
+}
+
+export function listSpaces() {
+  return invoke<SpacesSnapshot>("list_spaces");
+}
+
+export function setActiveSpace(spaceId: string, currentWorkspacePath?: string | null) {
+  return invoke<SpacesSnapshot>("set_active_space", {
+    spaceId,
+    currentWorkspacePath: currentWorkspacePath ?? null,
+  });
+}
+
+export function createSpace(name: string, emoji?: string | null) {
+  return invoke<SpacesSnapshot>("create_space", {
+    name,
+    emoji: emoji ?? null,
+  });
+}
+
+export function updateSpace(spaceId: string, name: string, emoji?: string | null) {
+  return invoke<SpacesSnapshot>("update_space", {
+    spaceId,
+    name,
+    emoji: emoji ?? null,
+  });
+}
+
+export function deleteSpace(spaceId: string) {
+  return invoke<SpacesSnapshot>("delete_space", { spaceId });
+}
+
+export function moveProjectToSpace(projectPath: string, spaceId: string) {
+  return invoke<SpacesSnapshot>("move_project_to_space", { projectPath, spaceId });
 }
 
 export function listChatProjects() {

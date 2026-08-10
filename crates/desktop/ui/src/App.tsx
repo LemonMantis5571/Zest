@@ -1329,7 +1329,7 @@ export default function App() {
     newThread?: boolean;
     providerId?: string;
     copyThread?: boolean;
-  }) {
+  }): Promise<boolean> {
     try {
       if (session?.threadId) {
         saveDraft(session.threadId, draftRef.current);
@@ -1342,11 +1342,12 @@ export default function App() {
       void loadProviders(info.provider).catch(() => {});
       setWorkspacePath(info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+      return true;
     } catch (err) {
       const recovery = conversationRecovery(err);
       if (recovery) {
         setPendingConversationRecovery({ recovery, root: options.root });
-        return;
+        return false;
       }
       toast.add({
         type: "error",
