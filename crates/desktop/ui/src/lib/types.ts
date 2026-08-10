@@ -162,7 +162,22 @@ export type ProjectChats = {
   name: string;
   path: string;
   active: boolean;
+  spaceId: string;
   threads: ThreadSummary[];
+};
+
+export type SpaceView = {
+  id: string;
+  name: string;
+  emoji?: string | null;
+  isDefault: boolean;
+  projectCount: number;
+};
+
+export type SpacesSnapshot = {
+  activeSpaceId: string;
+  spaces: SpaceView[];
+  lastWorkspacePath?: string | null;
 };
 
 export type PreparedAttachment = {
