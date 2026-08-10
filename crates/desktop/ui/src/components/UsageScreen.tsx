@@ -37,11 +37,14 @@ export function UsageScreen({ onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   /** Bumped by Refresh. One effect owns fetching, whatever triggered it. */
   const [reloadToken, setReloadToken] = useState(0);
+  const forceRefreshRef = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let live = true;
     const backend = getBackend();
+    const forceRefresh = forceRefreshRef.current;
+    forceRefreshRef.current = false;
     setLoading(true);
 
     // The report first and on its own: it is a local file read, so the screen
@@ -56,7 +59,7 @@ export function UsageScreen({ onBack }: Props) {
         setError(null);
 
         return backend
-          .refreshRates(reloadToken > 0)
+          .refreshRates(forceRefresh)
           .then((rates) => {
             if (!live || rates.fetchedAt === next.rates.fetchedAt) return;
             return backend.usageReport(range).then((repriced) => {
@@ -151,7 +154,10 @@ export function UsageScreen({ onBack }: Props) {
             title="Refresh"
             aria-label="Refresh usage"
             disabled={loading}
-            onClick={() => setReloadToken((token) => token + 1)}
+            onClick={() => {
+              forceRefreshRef.current = true;
+              setReloadToken((token) => token + 1);
+            }}
           >
             <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
           </Button>
@@ -227,8 +233,8 @@ export function UsageScreen({ onBack }: Props) {
  * it is not.
  *
  * The asterisk is load-bearing. Zest has no billing relationship with any
- * provider: this is local token counts multiplied by rates in a local file, and
- * anyone on a subscription is not being charged it.
+ * provider: this combines local token counts, provider-reported costs, and list
+ * rates, and anyone on a subscription is not being charged it.
  */
 function Headline({ report }: { report: UsageReport }) {
   const { totals, providers } = report;
@@ -238,15 +244,15 @@ function Headline({ report }: { report: UsageReport }) {
     <section className="flex flex-col gap-5">
       <div>
         <h2 className="m-0 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-          Estimated token cost
+          Known token cost
         </h2>
         <div className="mt-1 text-[34px] font-semibold leading-none tracking-[-1px] tabular-nums">
           {money(totals.costUsd)}
           <span className="text-muted-foreground">*</span>
         </div>
         <p className="m-0 mt-2 text-[11px] leading-relaxed text-muted-foreground">
-          * what this traffic would have cost at list API rates. Not a bill — Zest does not see
-          your account, and a subscription does not charge this.
+          * combines provider-reported charges with list-rate estimates where needed. Not a bill
+          — Zest does not see your account, and a subscription does not charge this.
         </p>
       </div>
 
@@ -563,13 +569,9 @@ function ModelTable({
               </span>
             ) : (
               <span
-                // A cost the CLI recorded and one multiplied out of a rate table
-                // are both dollars; the marker is what distinguishes them.
-                title={
-                  row.costSource === "providerReported"
-                    ? "Reported by the CLI — measured, not estimated"
-                    : "Estimated from published rates"
-                }
+                // The marker distinguishes provider-reported dollars from
+                // estimates, including rows that mix sources or include gaps.
+                title={costSourceTitle(row.costSource)}
               >
                 {money(row.costUsd)}
                 {row.costSource === "providerReported" ? null : (
@@ -795,7 +797,11 @@ function ExternalWorkers({ report }: { report: UsageReport }) {
               value={
                 worker.reportedTokenTotal == null
                   ? "Not reported"
-                  : `${compact(worker.reportedTokenTotal)} tokens`
+                  : `${compact(worker.reportedTokenTotal)} tokens${
+                      worker.tokenReports < worker.invocations
+                        ? ` (${worker.tokenReports}/${worker.invocations} runs reported)`
+                        : ""
+                    }`
               }
             />
             {worker.lastCost ? (
@@ -886,6 +892,19 @@ function Empty({ children }: { children: React.ReactNode }) {
 function bandColor(index: number): string {
   if (index < 0) return BAND_COLORS[BAND_COLORS.length - 1];
   return BAND_COLORS[index % BAND_COLORS.length];
+}
+
+function costSourceTitle(source: ModelCostRow["costSource"]): string {
+  switch (source) {
+    case "providerReported":
+      return "Reported by the CLI — measured, not estimated";
+    case "modelPriced":
+      return "Estimated from published rates";
+    case "mixed":
+      return "Combines provider-reported and estimated or unpriced traffic";
+    case "unpriced":
+      return "No published rate for this model";
+  }
 }
 
 function describeDay(point: DayCostPoint, metric: Metric): string {

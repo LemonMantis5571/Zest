@@ -250,11 +250,10 @@ export type ProviderUsageView = {
 export type UsageSnapshot = {
   providers: ProviderUsageView[];
   externalWorkers: ExternalWorkerUsageView[];
-  path?: string | null;
 };
 
 export type RangeTotals = {
-  /** Priced traffic only — read it next to `CostQuality`, never alone. */
+  /** Known-cost traffic; read it next to `CostQuality`, never alone. */
   costUsd: number;
   requests: number;
   processedTokens: number;
@@ -295,10 +294,10 @@ export type ProviderCostRow = {
  * Where a cost figure came from, in descending order of authority.
  *
  * `providerReported` is what a CLI recorded being charged; `modelPriced` is
- * multiplied out of a rate table. Both are dollars, and only this tells them
- * apart.
+ * multiplied out of a rate table; `mixed` combines those sources or includes
+ * an unpriced portion.
  */
-export type CostSource = "providerReported" | "modelPriced" | "unpriced";
+export type CostSource = "providerReported" | "modelPriced" | "mixed" | "unpriced";
 
 export type ModelCostRow = {
   providerId: string;

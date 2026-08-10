@@ -1647,12 +1647,6 @@ async fn usage_report(days: u32) -> Result<UsageReport, String> {
     .map_err(|e| format!("could not read usage: {e}"))
 }
 
-/// Where the price book lives, so the usage screen can offer to open it.
-#[tauri::command]
-fn prices_path() -> Option<String> {
-    Prices::load().path().map(|p| p.display().to_string())
-}
-
 /// Fetch the published rate table if the cached copy is due for renewal.
 ///
 /// Deliberately its own command rather than something `usage_report` does. The
@@ -5519,7 +5513,6 @@ pub fn run() {
             open_project_config,
             usage_snapshot,
             usage_report,
-            prices_path,
             open_prices_file,
             refresh_rates,
             profile_stats,
