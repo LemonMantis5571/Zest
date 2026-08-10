@@ -740,12 +740,25 @@ fn print_recent_cost(ledger: &Ledger, catalog: &zest_core::RateCatalog) {
         report.totals.cache_savings_usd,
     );
     println!(
-        "    cost       \x1b[1m${:.2}\x1b[0m  \x1b[90m(estimate at list API rates, not a bill)\x1b[0m",
+        "    cost       \x1b[1m${:.2}\x1b[0m  \x1b[90m(provider-reported + list-rate estimate, not a bill)\x1b[0m",
         report.totals.cost_usd,
     );
     println!(
-        "    coverage   {:.0}% of tokens priced\x1b[90m{}{}\x1b[0m",
-        report.quality.priced_percent,
+        "    coverage   {:.0}% of tokens costed\x1b[90m{}{}{}{}\x1b[0m",
+        report.quality.provider_reported_percent + report.quality.priced_percent,
+        if report.quality.provider_reported_percent > 0.0 {
+            format!(
+                ", {:.0}% reported",
+                report.quality.provider_reported_percent
+            )
+        } else {
+            String::new()
+        },
+        if report.quality.priced_percent > 0.0 {
+            format!(", {:.0}% list-priced", report.quality.priced_percent)
+        } else {
+            String::new()
+        },
         if report.quality.unpriced_percent > 0.0 {
             format!(", {:.0}% unpriced", report.quality.unpriced_percent)
         } else {
@@ -801,6 +814,7 @@ fn print_recent_cost(ledger: &Ledger, catalog: &zest_core::RateCatalog) {
             match row.cost_source {
                 zest_core::CostSource::ProviderReported => "reported",
                 zest_core::CostSource::ModelPriced => "priced",
+                zest_core::CostSource::Mixed => "mixed",
                 zest_core::CostSource::Unpriced => "unpriced",
             },
         );
