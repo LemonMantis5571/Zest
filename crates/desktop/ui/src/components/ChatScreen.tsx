@@ -112,7 +112,7 @@ type Props = {
     newThread?: boolean;
     providerId?: string;
     copyThread?: boolean;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
   providers: ProviderRow[];
   onSwitchProvider: (providerId: string) => Promise<void>;
   onReloadSession?: () => Promise<void>;

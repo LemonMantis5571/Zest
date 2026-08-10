@@ -8,6 +8,7 @@ mod attachments;
 mod browser;
 mod context_meter;
 mod session;
+mod spaces;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -46,6 +47,7 @@ use attachments::{
 use browser::BrowserHost;
 use context_meter::{estimate_context, ContextUsageView};
 use session::{Session, SessionController, SessionError};
+use spaces::{SpaceState, DEFAULT_SPACE_ID};
 
 /// Providers shown in the desktop launch picker.
 ///
@@ -293,6 +295,9 @@ struct AppState {
     /// JSON file after each navigation or completed turn. File metadata is the
     /// invalidation signal, so changes made by another process are still seen.
     chat_summary_cache: Mutex<ChatSummaryCache>,
+    /// Desktop-local project grouping. This is separate from the active
+    /// repo/worktree boundary used by the agent.
+    space_state: Mutex<SpaceState>,
 }
 
 #[derive(Default)]
@@ -2131,6 +2136,21 @@ fn load_known_workspaces() -> Vec<PathBuf> {
         .collect()
 }
 
+fn require_known_workspace(path: &Path) -> Result<PathBuf, String> {
+    let root = canonicalize_dir(path.to_path_buf())?;
+    let root_key = display_path(&root);
+    if load_known_workspaces()
+        .iter()
+        .any(|known| display_path(known) == root_key)
+    {
+        Ok(root)
+    } else {
+        Err(format!(
+            "That folder is not a known Zest workspace: {root_key}"
+        ))
+    }
+}
+
 fn remember_workspace(root: &Path) {
     let Ok(root) = canonicalize_dir(root.to_path_buf()) else {
         return;
@@ -2144,6 +2164,97 @@ fn remember_workspace(root: &Path) {
         if let Ok(raw) = serde_json::to_string_pretty(&display) {
             let _ = std::fs::write(path, raw);
         }
+    }
+}
+
+fn space_snapshot(state: &AppState) -> Result<SpacesSnapshot, String> {
+    let active_root = state
+        .sessions
+        .active_root()
+        .map_err(map_session_err)?
+        .or_else(|| resolve_workspace_root(state).ok());
+
+    let mut roots = load_known_workspaces();
+    if let Some(active) = active_root {
+        if !roots.iter().any(|root| root == &active) {
+            roots.insert(0, active);
+        }
+    }
+
+    let spaces = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?
+        .clone()
+        .normalized();
+    let active_space_id = spaces.active_space_id.clone();
+    let views = spaces
+        .spaces
+        .iter()
+        .map(|space| SpaceView {
+            id: space.id.clone(),
+            name: space.name.clone(),
+            emoji: space.emoji.clone(),
+            is_default: space.id == DEFAULT_SPACE_ID,
+            project_count: roots
+                .iter()
+                .filter(|root| spaces.space_for_project(&display_path(root)) == space.id)
+                .count(),
+        })
+        .collect();
+    let last_workspace_path = spaces
+        .last_workspace_by_space_id
+        .get(&active_space_id)
+        .and_then(|path| require_known_workspace(Path::new(path)).ok())
+        .map(|path| display_path(&path));
+
+    Ok(SpacesSnapshot {
+        active_space_id,
+        spaces: views,
+        last_workspace_path,
+    })
+}
+
+fn remember_active_space_workspace(state: &AppState, root: &Path) -> Result<(), String> {
+    let root = require_known_workspace(root)?;
+    let key = display_path(&root);
+    let mut guard = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = guard.clone();
+    guard.remember_active_workspace(&key);
+    if let Err(error) = save_space_state(&guard) {
+        *guard = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn adopt_workspace_into_active_space(state: &AppState, root: &Path) -> Result<(), String> {
+    let root = require_known_workspace(root)?;
+    let key = display_path(&root);
+    let mut guard = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = guard.clone();
+    let active = guard.active_space_id.clone();
+    if active != DEFAULT_SPACE_ID {
+        guard.set_project_space(&key, &active)?;
+    }
+    guard.remember_active_workspace(&key);
+    if let Err(error) = save_space_state(&guard) {
+        *guard = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn restore_space_state(state: &AppState, previous: SpaceState) {
+    if let Ok(mut guard) = state.space_state.lock() {
+        *guard = previous;
+        let _ = save_space_state(&guard);
     }
 }
 
@@ -2804,13 +2915,159 @@ fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadSummary>, String
         .and_then(|r| r)
 }
 
+#[tauri::command]
+fn list_spaces(state: State<'_, AppState>) -> Result<SpacesSnapshot, String> {
+    space_snapshot(&state)
+}
+
+#[tauri::command]
+fn set_active_space(
+    state: State<'_, AppState>,
+    space_id: String,
+    current_workspace_path: Option<String>,
+) -> Result<SpacesSnapshot, String> {
+    let current_workspace = current_workspace_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| require_known_workspace(Path::new(path)))
+        .transpose()?;
+    let mut guard = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = guard.clone();
+    let space_id = space_id.trim();
+    if guard.space(space_id).is_none() {
+        return Err("That Space no longer exists.".to_string());
+    }
+
+    let previous_active = guard.active_space_id.clone();
+    if let Some(root) = current_workspace {
+        let key = display_path(&root);
+        if guard.space_for_project(&key) == previous_active {
+            guard
+                .last_workspace_by_space_id
+                .insert(previous_active, key);
+        }
+    }
+    guard.active_space_id = space_id.to_string();
+    if let Err(error) = save_space_state(&guard) {
+        *guard = previous;
+        return Err(error);
+    }
+    drop(guard);
+    space_snapshot(&state)
+}
+
+#[tauri::command]
+fn create_space(
+    state: State<'_, AppState>,
+    name: String,
+    emoji: Option<String>,
+) -> Result<SpacesSnapshot, String> {
+    let mut guard = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = guard.clone();
+    guard.create_space(new_id("space"), &name, emoji)?;
+    if let Err(error) = save_space_state(&guard) {
+        *guard = previous;
+        return Err(error);
+    }
+    drop(guard);
+    space_snapshot(&state)
+}
+
+#[tauri::command]
+fn update_space(
+    state: State<'_, AppState>,
+    space_id: String,
+    name: String,
+    emoji: Option<String>,
+) -> Result<SpacesSnapshot, String> {
+    let mut guard = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = guard.clone();
+    guard.update_space(space_id.trim(), &name, emoji)?;
+    if let Err(error) = save_space_state(&guard) {
+        *guard = previous;
+        return Err(error);
+    }
+    drop(guard);
+    space_snapshot(&state)
+}
+
+#[tauri::command]
+fn delete_space(state: State<'_, AppState>, space_id: String) -> Result<SpacesSnapshot, String> {
+    let mut guard = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = guard.clone();
+    guard.delete_space(space_id.trim())?;
+    if let Err(error) = save_space_state(&guard) {
+        *guard = previous;
+        return Err(error);
+    }
+    drop(guard);
+    space_snapshot(&state)
+}
+
+#[tauri::command]
+fn move_project_to_space(
+    state: State<'_, AppState>,
+    project_path: String,
+    space_id: String,
+) -> Result<SpacesSnapshot, String> {
+    let root = require_known_workspace(Path::new(project_path.trim()))?;
+    let key = display_path(&root);
+    let mut guard = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = guard.clone();
+    guard.set_project_space(&key, space_id.trim())?;
+    if guard.active_space_id == space_id.trim() {
+        guard.remember_active_workspace(&key);
+    }
+    if let Err(error) = save_space_state(&guard) {
+        *guard = previous;
+        return Err(error);
+    }
+    drop(guard);
+    space_snapshot(&state)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectChats {
     name: String,
     path: String,
     active: bool,
+    space_id: String,
     threads: Vec<ThreadSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpaceView {
+    id: String,
+    name: String,
+    emoji: Option<String>,
+    is_default: bool,
+    project_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpacesSnapshot {
+    active_space_id: String,
+    spaces: Vec<SpaceView>,
+    last_workspace_path: Option<String>,
 }
 
 fn project_display_name(root: &Path) -> String {
@@ -2913,6 +3170,14 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         .unwrap_or(resolve_workspace_root(&state)?);
     remember_workspace(&active_root);
 
+    let spaces = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?
+        .clone()
+        .normalized();
+    let active_space_id = spaces.active_space_id.clone();
+
     let mut roots = load_known_workspaces();
     if !roots.iter().any(|p| p == &active_root) {
         roots.insert(0, active_root.clone());
@@ -2928,6 +3193,10 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         if !root.is_dir() {
             continue;
         }
+        let space_id = spaces.space_for_project(&display_path(&root)).to_string();
+        if space_id != active_space_id {
+            continue;
+        }
         let threads = match open_store(&root) {
             Ok(store) => list_cached_threads(
                 &store,
@@ -2941,6 +3210,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             name: project_display_name(&root),
             path: display_path(&root),
             active,
+            space_id,
             threads,
         });
     }
@@ -3440,7 +3710,24 @@ async fn open_project_chat(
         Some((resolved.thread, resolved.warning))
     };
 
-    set_workspace_root(&state, root)?;
+    let previous_space_state = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?
+        .clone();
+    set_workspace_root(&state, root.clone())?;
+    if let Err(error) = remember_active_space_workspace(&state, &root) {
+        restore_snapshot(&target_state_path, previous_target_state.clone());
+        if let Some(thread_id) = created_thread_id.as_ref() {
+            let _ = target_store.delete(thread_id);
+        }
+        restore_last_provider(previous_last_provider.clone());
+        restore_space_state(&state, previous_space_state.clone());
+        if let Some(previous_root) = previous_root.as_ref() {
+            let _ = set_workspace_root(&state, previous_root.clone());
+        }
+        return Err(error);
+    }
 
     // Keep the old route alive until the new runtime has been built. If it is
     // still running, its worker continues in the background; if it is idle,
@@ -3459,6 +3746,7 @@ async fn open_project_chat(
             let _ = target_store.delete(&thread_id);
         }
         restore_last_provider(previous_last_provider);
+        restore_space_state(&state, previous_space_state);
         if let Some(previous_root) = previous_root {
             let _ = set_workspace_root(&state, previous_root);
         }
@@ -4723,6 +5011,22 @@ fn zest_config_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
+const SPACES_FILE: &str = "spaces.json";
+
+fn spaces_state_path() -> Result<PathBuf, String> {
+    Ok(zest_config_dir()?.join(SPACES_FILE))
+}
+
+fn load_space_state() -> SpaceState {
+    spaces_state_path()
+        .map(|path| SpaceState::load(&path))
+        .unwrap_or_default()
+}
+
+fn save_space_state(state: &SpaceState) -> Result<(), String> {
+    state.save(&spaces_state_path()?)
+}
+
 const MARKDOWN_SAVE_DIRECTORY_FILE: &str = "last-markdown-save-directory";
 
 fn markdown_save_directory_path() -> Result<PathBuf, String> {
@@ -4945,6 +5249,7 @@ fn pick_workspace_folder(
         return Ok(None);
     };
     let root = set_workspace_root(&state, folder)?;
+    adopt_workspace_into_active_space(&state, &root)?;
     let had_session = state
         .sessions
         .has_active_session()
@@ -5492,6 +5797,7 @@ pub fn run() {
             policy: Arc::new(Mutex::new(ApprovalPolicy::new(DESKTOP_DEFAULT_MODE))),
             config_edit: Mutex::new(()),
             chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
+            space_state: Mutex::new(load_space_state()),
         })
         .setup(|app| {
             app.state::<AppState>().browser.attach(app.handle().clone());
@@ -5526,6 +5832,12 @@ pub fn run() {
             update_session_options,
             reset_session_options,
             list_threads,
+            list_spaces,
+            set_active_space,
+            create_space,
+            update_space,
+            delete_space,
+            move_project_to_space,
             list_chat_projects,
             open_project_chat,
             load_thread,
