@@ -3086,7 +3086,7 @@ dependencies = [
 [[package]]
 name = "pdf-inspector"
 version = "0.1.7"
-source = "git+https://github.com/MADENIYOU/pdf-inspector?rev=a602f5c5acf1bd9858f7b76760eb71aa98d6d934#a602f5c5acf1bd9858f7b76760eb71aa98d6d934"
+source = "git+https://github.com/firecrawl/pdf-inspector?branch=main#f4b8c9e8546703e3817d9c47498d822cb2db81e3"
 dependencies = [
  "env_logger",
  "include_dir",
