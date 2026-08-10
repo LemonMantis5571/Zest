@@ -849,7 +849,7 @@ export function ChatScreen({
   });
 
   return (
-    <section className="relative flex h-full min-h-0 overflow-hidden bg-[var(--chat-canvas)]">
+    <section className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--chat-canvas)]">
       <ChatHistorySidebar
         open={sidebarOpen}
         activeThreadId={session.threadId}

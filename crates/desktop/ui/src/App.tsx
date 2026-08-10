@@ -1910,10 +1910,10 @@ export default function App() {
     <Toaster>
       <div
         className={cn(
-          "h-full w-full",
+          "h-full min-h-0 w-full min-w-0",
           authMode &&
             "relative flex items-center justify-center overflow-auto px-6 py-8 before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[radial-gradient(ellipse_at_50%_0%,color-mix(in_srgb,var(--primary)_10%,transparent),transparent_55%)] [&>*]:relative [&>*]:z-10",
-          !authMode && "flex min-h-0 flex-col"
+          !authMode && "flex flex-1 flex-col overflow-hidden"
         )}
       >
         {/* Boot is short now that session start no longer waits on the network. */}
