@@ -32,8 +32,7 @@ tauri-plugin-notification = "2"
 dirs = { workspace = true }
 tokio = { workspace = true }
 ts-rs = { version = "11", default-features = true, optional = true }
-# bump until a patched release is published:
-pdf-inspector = { git = "https://github.com/MADENIYOU/pdf-inspector", rev = "a602f5c5acf1bd9858f7b76760eb71aa98d6d934" }
+pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", branch = "main" }
 rfd = "0.15"
 base64 = "0.22"
 
