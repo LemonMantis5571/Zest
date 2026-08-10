@@ -47,9 +47,9 @@ Track corrections that apply across the whole workspace.
   cooldown labeling before treating it as spent quota. Do not add aggressive product-identity
   openers for Antigravity-backed models without verifying; prefer neutral coding-agent framing.
 - **pdf-inspector / lopdf RustSec** — crates.io `pdf-inspector` 0.1.7 pins `lopdf ^0.41`
-  (RUSTSEC-2026-0187). Desktop depends on the patched git rev from
-  [firecrawl/pdf-inspector#222](https://github.com/firecrawl/pdf-inspector/pull/222) until a
-  crates.io release ships; switch back to a versioned crates.io dep when available.
+  (RUSTSEC-2026-0187). Desktop depends on upstream `firecrawl/pdf-inspector` `main` branch
+  (lopdf 0.42.0 merged in [firecrawl/pdf-inspector#198](https://github.com/firecrawl/pdf-inspector/pull/198))
+  until a crates.io release ships; switch back to a versioned crates.io dep when available.
 - **Gateway Claude/Codex “Signed in” ≠ working** — CLIProxyAPI can leave a cooldown or
   stub auth file that looks Ready locally while chat gets 503 `auth_unavailable`.
   Builds do not wipe `~/.cli-proxy-api`. Always probe before opening a gateway chat;
