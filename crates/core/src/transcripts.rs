@@ -286,15 +286,17 @@ fn collect(
                     status.files_failed += 1;
                     continue;
                 };
-                let mtime = meta
+                let modified = meta
                     .modified()
                     .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+                let mtime = modified
+                    .map(|d| d.as_nanos().min(u128::from(u64::MAX)) as u64)
                     .unwrap_or(0);
+                let mtime_secs = modified.map(|d| d.as_secs()).unwrap_or(0);
                 // A file untouched since before the horizon cannot hold a record
                 // inside it. This is what keeps a year of transcripts cheap.
-                if mtime > 0 && mtime < horizon {
+                if mtime_secs > 0 && mtime_secs < horizon {
                     status.files_skipped += 1;
                     continue;
                 }
@@ -367,7 +369,7 @@ impl ScanResult {
             .entry(day.to_string())
             .or_default()
             .merge_counts(model, &counts);
-        if let Some(cost) = cost {
+        if let Some(cost) = cost.filter(|value| value.is_finite() && *value >= 0.0) {
             *self
                 .reported_cost
                 .entry(day.to_string())
@@ -392,7 +394,10 @@ impl ScanResult {
 /// window, six hours a day at UTC-6.
 ///
 /// 3: rows are positional arrays and the file is written compactly.
-const CACHE_FORMAT: u32 = 3;
+///
+/// 4: file modification times are stored with sub-second precision, so a
+/// same-size rewrite in one second cannot be mistaken for an unchanged file.
+const CACHE_FORMAT: u32 = 4;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ScanCache {
@@ -636,7 +641,10 @@ pub fn parse_claude_line(line: &str) -> Option<UsageRecord> {
             cache_write_tokens: u64_at(usage, "cache_creation_input_tokens"),
             cache_read_tokens: u64_at(usage, "cache_read_input_tokens"),
         },
-        reported_cost_usd: value.get("costUSD").and_then(|v| v.as_f64()),
+        reported_cost_usd: value
+            .get("costUSD")
+            .and_then(|v| v.as_f64())
+            .filter(|cost| cost.is_finite() && *cost >= 0.0),
         dedupe_key,
     })
 }
@@ -748,7 +756,13 @@ fn u64_at(value: &serde_json::Value, key: &str) -> u64 {
 /// zone, and only whole seconds matter for day bucketing.
 fn parse_rfc3339_secs(text: &str) -> Option<u64> {
     let bytes = text.as_bytes();
-    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' {
+    if bytes.len() < 19
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b'T' | b't' | b' ')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
         return None;
     }
     let num = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
@@ -758,7 +772,7 @@ fn parse_rfc3339_secs(text: &str) -> Option<u64> {
     let hour = num(11..13)?;
     let minute = num(14..16)?;
     let second = num(17..19)?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
         return None;
     }
 
@@ -768,19 +782,31 @@ fn parse_rfc3339_secs(text: &str) -> Option<u64> {
     // A trailing offset means the wall-clock parts above are in that zone; shift
     // back to UTC so every record lands on one timeline before day bucketing
     // reapplies the *user's* zone.
-    if let Some(rest) = text.get(19..) {
-        let rest = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
-        let sign = match rest.as_bytes().first() {
-            Some(b'+') => 1,
-            Some(b'-') => -1,
-            _ => 0,
-        };
-        if sign != 0 && rest.len() >= 6 {
-            let oh: i64 = rest.get(1..3)?.parse().ok()?;
-            let om: i64 = rest.get(4..6)?.parse().ok()?;
-            secs -= sign * (oh * 3_600 + om * 60);
+    let mut rest = text.get(19..)?;
+    if rest.starts_with('.') {
+        let fraction = rest.get(1..)?;
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
         }
+        rest = fraction.get(digits..)?;
     }
+    if rest.is_empty() || rest == "Z" || rest == "z" {
+        return u64::try_from(secs).ok();
+    }
+    if rest.len() != 6
+        || !matches!(rest.as_bytes().first(), Some(b'+' | b'-'))
+        || rest.as_bytes().get(3) != Some(&b':')
+    {
+        return None;
+    }
+    let sign = if rest.starts_with('+') { 1 } else { -1 };
+    let oh: i64 = rest.get(1..3)?.parse().ok()?;
+    let om: i64 = rest.get(4..6)?.parse().ok()?;
+    if oh > 23 || om > 59 {
+        return None;
+    }
+    secs -= sign * (oh * 3_600 + om * 60);
     u64::try_from(secs).ok()
 }
 
@@ -1005,6 +1031,30 @@ mod tests {
             "usage":{"output_tokens":10}}}"#;
         let record = parse_claude_line(line).expect("parsed");
         assert_eq!(record.reported_cost_usd, Some(0.1823282));
+    }
+
+    #[test]
+    fn malformed_timestamps_and_costs_are_ignored() {
+        for timestamp in [
+            "2026-02-30T12:00:00Z",
+            "2026-08-08T24:00:00Z",
+            "2026-08-08T12:60:00Z",
+            "2026-08-08T12:00:00+99:00",
+        ] {
+            let line = format!(
+                r#"{{"type":"assistant","timestamp":"{timestamp}","message":{{"model":"claude-sonnet-5","usage":{{"output_tokens":10}}}}}}"#
+            );
+            assert!(parse_claude_line(&line).is_none(), "accepted {timestamp}");
+        }
+
+        let negative = r#"{"type":"assistant","timestamp":"2026-08-08T12:00:00Z",
+            "costUSD":-0.01,"message":{"model":"claude-sonnet-5","usage":{"output_tokens":10}}}"#;
+        assert_eq!(
+            parse_claude_line(negative)
+                .expect("usage still parses")
+                .reported_cost_usd,
+            None
+        );
     }
 
     #[test]

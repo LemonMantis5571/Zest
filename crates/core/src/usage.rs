@@ -84,10 +84,21 @@ pub fn day_number_from_key(key: &str) -> Option<i64> {
     let y: i64 = parts.next()?.parse().ok()?;
     let m: u32 = parts.next()?.parse().ok()?;
     let d: u32 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    let max_day = match m {
+        2 if is_leap_year(y) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return None,
+    };
+    if parts.next().is_some() || !(1..=12).contains(&m) || d == 0 || d > max_day {
         return None;
     }
     Some(days_from_civil(y, m, d))
+}
+
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 /// Calendar date to days since the epoch. Inverse of [`civil_from_days`].
@@ -173,7 +184,10 @@ impl TokenCounts {
     }
 
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_read_tokens)
     }
 
     fn to_pricing(self) -> pricing::Counts {
@@ -209,7 +223,10 @@ pub struct DayUsage {
 
 impl DayUsage {
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_read_tokens)
     }
 
     fn totals(&self) -> TokenCounts {
@@ -261,7 +278,9 @@ impl DayUsage {
     /// Tokens on this day that no model can be assigned, because they were
     /// recorded before per-model attribution existed.
     fn unattributed_tokens(&self) -> u64 {
-        let attributed: u64 = self.by_model.values().map(|c| c.total_tokens()).sum();
+        let attributed = self.by_model.values().fold(0u64, |total, counts| {
+            total.saturating_add(counts.total_tokens())
+        });
         self.total_tokens().saturating_sub(attributed)
     }
 }
@@ -277,7 +296,7 @@ pub fn model_key(provider_id: &str, model_id: &str) -> String {
 
 /// Lifetime totals for one model, on one provider.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ModelUsage {
+struct ModelUsage {
     #[serde(default)]
     pub provider_id: String,
     #[serde(default)]
@@ -317,11 +336,10 @@ impl ProviderUsage {
     /// were still tokens the provider processed, even though they bill lower and
     /// mostly do not count against throughput limits.
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
-    }
-
-    pub fn ever_used(&self) -> bool {
-        self.requests > 0
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_read_tokens)
     }
 }
 
@@ -417,7 +435,7 @@ pub struct ExternalCost {
 /// report count makes partial coverage visible instead of presenting an exact
 /// looking total when some worker runs were silent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ExternalWorkerUsage {
+struct ExternalWorkerUsage {
     pub invocations: u64,
     #[serde(default)]
     pub usage_reports: u64,
@@ -578,12 +596,20 @@ impl Ledger {
             entry.first_seen = now;
         }
         entry.last_seen = now;
-        entry.requests += 1;
+        entry.requests = entry.requests.saturating_add(1);
         if completion.usage_available {
-            entry.input_tokens += u64::from(completion.usage.input_tokens);
-            entry.output_tokens += u64::from(completion.usage.output_tokens);
-            entry.cache_write_tokens += u64::from(completion.usage.cache_creation_input_tokens);
-            entry.cache_read_tokens += u64::from(completion.usage.cache_read_input_tokens);
+            entry.input_tokens = entry
+                .input_tokens
+                .saturating_add(u64::from(completion.usage.input_tokens));
+            entry.output_tokens = entry
+                .output_tokens
+                .saturating_add(u64::from(completion.usage.output_tokens));
+            entry.cache_write_tokens = entry
+                .cache_write_tokens
+                .saturating_add(u64::from(completion.usage.cache_creation_input_tokens));
+            entry.cache_read_tokens = entry
+                .cache_read_tokens
+                .saturating_add(u64::from(completion.usage.cache_read_input_tokens));
         }
 
         // Only overwrite when the provider actually reported something, so a
@@ -648,7 +674,10 @@ impl Ledger {
         self.providers
             .values()
             .fold((0, 0), |(tokens, requests), p| {
-                (tokens + p.total_tokens(), requests + p.requests)
+                (
+                    tokens.saturating_add(p.total_tokens()),
+                    requests.saturating_add(p.requests),
+                )
             })
     }
 
@@ -674,11 +703,6 @@ impl Ledger {
         self.external_workers = reloaded.external_workers;
     }
 
-    /// Every model with recorded spend, in key order.
-    pub fn model_entries(&self) -> impl Iterator<Item = &ModelUsage> {
-        self.models.values()
-    }
-
     pub fn get(&self, provider_id: &str) -> Option<&ProviderUsage> {
         self.providers.get(provider_id)
     }
@@ -686,11 +710,6 @@ impl Ledger {
     /// Every provider with recorded spend, alphabetically.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &ProviderUsage)> {
         self.providers.iter().map(|(k, v)| (k.as_str(), v))
-    }
-
-    /// Every external worker with at least one completed invocation.
-    pub fn external_entries(&self) -> impl Iterator<Item = (&str, &ExternalWorkerUsage)> {
-        self.external_workers.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -716,7 +735,6 @@ impl Ledger {
         UsageSnapshot {
             providers,
             external_workers,
-            path: self.path.as_ref().map(|p| p.display().to_string()),
         }
     }
 
@@ -745,10 +763,7 @@ impl Ledger {
         let first = today - (span - 1);
 
         let mut series = Vec::with_capacity(span as usize);
-        let mut window: BTreeMap<String, TokenCounts> = BTreeMap::new();
-        // Cost a CLI reported for a model, summed over the window. Measured, so
-        // it outranks anything the rate table would compute.
-        let mut reported_by_model: BTreeMap<String, f64> = BTreeMap::new();
+        let mut model_totals: BTreeMap<String, ModelReportTotals> = BTreeMap::new();
         let mut totals = TokenCounts::default();
         let mut unattributed_tokens = 0u64;
         let mut active_days = 0u32;
@@ -782,34 +797,60 @@ impl Ledger {
             let reported_today = scan.and_then(|s| s.reported_cost.get(&date));
 
             totals.merge(&usage.totals());
-            unattributed_tokens += usage.unattributed_tokens();
+            unattributed_tokens = unattributed_tokens.saturating_add(usage.unattributed_tokens());
             if usage.requests > 0 {
-                active_days += 1;
+                active_days = active_days.saturating_add(1);
             }
 
             let mut day_cost = 0.0;
             let mut by_provider: BTreeMap<String, ProviderDayPoint> = BTreeMap::new();
             for (key, counts) in &usage.by_model {
-                window.entry(key.clone()).or_default().merge(counts);
-
                 let (provider_id, model_id) = split_model_key(key);
                 // A cost the CLI actually reported beats one derived from a rate
                 // table, every time: one is what was charged, the other is what
                 // a public list price says it might have been.
-                let model_cost = match reported_today.and_then(|m| m.get(key)) {
-                    Some(reported) => {
-                        *reported_by_model.entry(key.clone()).or_insert(0.0) += reported;
-                        *reported
-                    }
+                let reported = reported_today
+                    .and_then(|m| m.get(key))
+                    .copied()
+                    .filter(|cost| valid_cost(*cost));
+                let (model_cost, source) = match reported {
+                    Some(reported) => (Some(reported), CostSource::ProviderReported),
                     None => match prices.price(provider_id, model_id, &counts.to_pricing()) {
-                        Some(priced) => {
+                        Some(priced)
+                            if valid_cost(priced.cost_usd)
+                                && valid_cost(priced.cache_saving_usd) =>
+                        {
                             cache_savings_usd += priced.cache_saving_usd;
-                            priced.cost_usd
+                            (Some(priced.cost_usd), CostSource::ModelPriced)
                         }
-                        None => 0.0,
+                        _ => (None, CostSource::Unpriced),
                     },
                 };
-                day_cost += model_cost;
+
+                let model = model_totals.entry(key.clone()).or_default();
+                model.counts.merge(counts);
+                let tokens = counts.total_tokens();
+                match source {
+                    CostSource::ProviderReported => {
+                        model.provider_reported = true;
+                        model.provider_reported_tokens =
+                            model.provider_reported_tokens.saturating_add(tokens);
+                    }
+                    CostSource::ModelPriced => {
+                        model.model_priced = true;
+                        model.model_priced_tokens =
+                            model.model_priced_tokens.saturating_add(tokens);
+                    }
+                    CostSource::Unpriced | CostSource::Mixed => {
+                        model.unpriced = true;
+                        model.unpriced_tokens = model.unpriced_tokens.saturating_add(tokens);
+                    }
+                }
+                if let Some(cost) = model_cost {
+                    model.cost_usd += cost;
+                    model.cost_known = true;
+                    day_cost += cost;
+                }
 
                 let bucket = by_provider
                     .entry(provider_id.to_string())
@@ -818,8 +859,8 @@ impl Ledger {
                         cost_usd: 0.0,
                         tokens: 0,
                     });
-                bucket.cost_usd += model_cost;
-                bucket.tokens += counts.total_tokens();
+                bucket.cost_usd += model_cost.unwrap_or(0.0);
+                bucket.tokens = bucket.tokens.saturating_add(counts.total_tokens());
             }
             cost_usd += day_cost;
 
@@ -841,29 +882,18 @@ impl Ledger {
         let mut models = Vec::new();
         let mut providers: BTreeMap<String, ProviderCostRow> = BTreeMap::new();
 
-        for (key, counts) in &window {
-            let (provider_id, model_id) = split_model_key(key);
-            let tokens = counts.total_tokens();
+        for (key, totals) in model_totals {
+            let (provider_id, model_id) = split_model_key(&key);
+            let tokens = totals.counts.total_tokens();
+            let model_cost = totals.cost_known.then_some(totals.cost_usd);
+            let source = totals.source();
 
-            let (model_cost, source) = match reported_by_model.get(key) {
-                Some(reported) => {
-                    reported_tokens += tokens;
-                    (Some(*reported), CostSource::ProviderReported)
-                }
-                None => match prices.price(provider_id, model_id, &counts.to_pricing()) {
-                    Some(priced) => {
-                        priced_tokens += tokens;
-                        (Some(priced.cost_usd), CostSource::ModelPriced)
-                    }
-                    None => {
-                        unpriced_tokens += tokens;
-                        if !unpriced_models.iter().any(|m| m == model_id) {
-                            unpriced_models.push(model_id.to_string());
-                        }
-                        (None, CostSource::Unpriced)
-                    }
-                },
-            };
+            reported_tokens = reported_tokens.saturating_add(totals.provider_reported_tokens);
+            priced_tokens = priced_tokens.saturating_add(totals.model_priced_tokens);
+            unpriced_tokens = unpriced_tokens.saturating_add(totals.unpriced_tokens);
+            if totals.unpriced && !unpriced_models.iter().any(|m| m == model_id) {
+                unpriced_models.push(model_id.to_string());
+            }
 
             let row = providers
                 .entry(provider_id.to_string())
@@ -874,7 +904,7 @@ impl Ledger {
                     share_percent: 0.0,
                 });
             row.cost_usd += model_cost.unwrap_or(0.0);
-            row.tokens += tokens;
+            row.tokens = row.tokens.saturating_add(tokens);
 
             models.push(ModelCostRow {
                 provider_id: provider_id.to_string(),
@@ -882,12 +912,12 @@ impl Ledger {
                 cost_usd: model_cost,
                 cost_source: source,
                 share_percent: 0.0,
-                requests: counts.requests,
+                requests: totals.counts.requests,
                 tokens,
-                input_tokens: counts.input_tokens,
-                output_tokens: counts.output_tokens,
-                cache_write_tokens: counts.cache_write_tokens,
-                cache_read_tokens: counts.cache_read_tokens,
+                input_tokens: totals.counts.input_tokens,
+                output_tokens: totals.counts.output_tokens,
+                cache_write_tokens: totals.counts.cache_write_tokens,
+                cache_read_tokens: totals.counts.cache_read_tokens,
             });
         }
 
@@ -917,7 +947,7 @@ impl Ledger {
         });
 
         let metered = totals.total_tokens();
-        let observed_input = totals.input_tokens + totals.cache_read_tokens;
+        let observed_input = totals.input_tokens.saturating_add(totals.cache_read_tokens);
 
         UsageReport {
             days: days.max(1),
@@ -990,6 +1020,10 @@ fn percent_of(part: f64, whole: f64) -> f64 {
     }
 }
 
+fn valid_cost(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
+}
+
 /// Honest usage projection: Zest metering and provider headroom stay separate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -997,14 +1031,13 @@ pub struct UsageSnapshot {
     pub providers: Vec<ProviderUsageView>,
     #[serde(default)]
     pub external_workers: Vec<ExternalWorkerUsageView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
 }
 
 /// Everything the usage screen draws for one time window.
 ///
-/// Every dollar figure in here is derived from the local price book, never from
-/// a provider. See [`crate::pricing`] for what that does and does not claim.
+/// Cost figures use provider-reported values where available and local rates for
+/// the remainder. See [`crate::pricing`] for what derived values do and do not
+/// claim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageReport {
@@ -1040,6 +1073,9 @@ pub enum CostSource {
     ProviderReported,
     /// Computed from the rate table.
     ModelPriced,
+    /// This model used more than one source in the selected window, or was
+    /// priced on some days and unpriced on others.
+    Mixed,
     /// No rate for this model. The tokens are real; the cost is unknown.
     Unpriced,
 }
@@ -1081,8 +1117,9 @@ impl RatesStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RangeTotals {
-    /// Priced traffic only. Read with [`CostQuality`] beside it — a large number
-    /// over thin coverage is a small number wearing a hat.
+    /// Traffic with a known cost, either provider-reported or model-priced. Read
+    /// with [`CostQuality`] beside it: a large number over thin coverage is a
+    /// small number wearing a hat.
     pub cost_usd: f64,
     pub requests: u64,
     pub processed_tokens: u64,
@@ -1285,6 +1322,37 @@ impl ExternalWorkerUsageView {
     }
 }
 
+#[derive(Debug, Default)]
+struct ModelReportTotals {
+    counts: TokenCounts,
+    cost_usd: f64,
+    cost_known: bool,
+    provider_reported_tokens: u64,
+    model_priced_tokens: u64,
+    unpriced_tokens: u64,
+    provider_reported: bool,
+    model_priced: bool,
+    unpriced: bool,
+}
+
+impl ModelReportTotals {
+    fn source(&self) -> CostSource {
+        let known_sources = [self.provider_reported, self.model_priced]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+        if self.unpriced || known_sources > 1 {
+            CostSource::Mixed
+        } else if self.provider_reported {
+            CostSource::ProviderReported
+        } else if self.model_priced {
+            CostSource::ModelPriced
+        } else {
+            CostSource::Unpriced
+        }
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1471,7 +1539,11 @@ mod tests {
         ledger.record_external("claude", Some(&report));
         ledger.record_external("claude", None);
 
-        let usage = ledger.external_entries().next().expect("worker usage").1;
+        let usage = ledger
+            .external_workers
+            .values()
+            .next()
+            .expect("worker usage");
         assert_eq!(usage.invocations, 2);
         assert_eq!(usage.usage_reports, 1);
         assert_eq!(usage.token_reports, 1);
@@ -1496,7 +1568,7 @@ mod tests {
     fn old_ledgers_load_without_external_worker_data() {
         let raw = r#"{"providers":{},"daily":{}}"#;
         let ledger: Ledger = serde_json::from_str(raw).unwrap();
-        assert!(ledger.external_entries().next().is_none());
+        assert!(ledger.external_workers.is_empty());
         assert!(ledger.snapshot().external_workers.is_empty());
     }
 }
@@ -1638,7 +1710,7 @@ mod daily_tests {
         ledger.record("anthropic", "claude-sonnet-4-6", &completion_with(10, 5));
         ledger.record("gateway", "claude-sonnet-4-6", &completion_with(10, 5));
 
-        assert_eq!(ledger.model_entries().count(), 2);
+        assert_eq!(ledger.models.len(), 2);
         let report = ledger.report(7, &Prices::default(), None);
         assert_eq!(report.models.len(), 2);
         assert_eq!(report.providers.len(), 2);
@@ -1676,6 +1748,41 @@ mod daily_tests {
         assert!((report.totals.cost_usd - 18.0).abs() < 1e-9, "{report:?}");
         assert_eq!(report.models[0].share_percent, 100.0);
         assert_eq!(report.quality.priced_percent, 100.0);
+    }
+
+    #[test]
+    fn a_partial_provider_report_keeps_daily_and_model_costs_consistent() {
+        let today = local_day_number(now_secs());
+        let model = model_key("claude-cli", "claude-sonnet-4-6");
+        let counts = TokenCounts {
+            requests: 1,
+            input_tokens: 1_000_000,
+            ..Default::default()
+        };
+        let mut scan = crate::transcripts::ScanResult::default();
+        scan.daily
+            .entry(day_key_from_number(today - 1))
+            .or_default()
+            .merge_counts(&model, &counts);
+        scan.daily
+            .entry(day_key_from_number(today))
+            .or_default()
+            .merge_counts(&model, &counts);
+        scan.reported_cost
+            .entry(day_key_from_number(today))
+            .or_default()
+            .insert(model, 4.0);
+
+        let report = Ledger::default().report(2, &priced(), Some(&scan));
+        let row = report.models.first().expect("model row");
+        assert_eq!(row.cost_source, CostSource::Mixed);
+        assert_eq!(row.cost_usd, Some(7.0));
+        assert_eq!(report.providers[0].cost_usd, 7.0);
+        assert_eq!(report.totals.cost_usd, 7.0);
+        assert_eq!(row.share_percent, 100.0);
+        assert_eq!(report.quality.provider_reported_percent, 50.0);
+        assert_eq!(report.quality.priced_percent, 50.0);
+        assert_eq!(report.quality.unpriced_percent, 0.0);
     }
 
     #[test]
