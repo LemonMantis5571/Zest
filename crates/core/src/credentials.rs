@@ -4,9 +4,40 @@
 //! values are kept in the platform credential manager and are never serialized
 //! into provider views or configuration files.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 const SERVICE: &str = "zest";
 
+// A denied or failed OS keychain lookup is re-asked by the UI's status poll
+// every couple of seconds; without this, that turns one "Deny" click into a
+// prompt repeating for as long as the poll runs. Cache the outcome for the
+// life of the process: a denial (or a success) sticks until the caller
+// explicitly changes it via `set`/`delete`, or the app restarts.
+fn cache() -> &'static Mutex<HashMap<String, Result<Option<String>, String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Result<Option<String>, String>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn invalidate(account: &str) {
+    cache().lock().unwrap().remove(account);
+}
+
 pub fn get(account: &str) -> Result<Option<String>, String> {
+    if let Some(cached) = cache().lock().unwrap().get(account) {
+        return cached.clone();
+    }
+
+    let result = fetch(account);
+    cache()
+        .lock()
+        .unwrap()
+        .insert(account.to_string(), result.clone());
+    result
+}
+
+fn fetch(account: &str) -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
@@ -20,6 +51,7 @@ pub fn set(account: &str, secret: &str) -> Result<(), String> {
     if secret.trim().is_empty() {
         return Err("API key cannot be empty".into());
     }
+    invalidate(account);
     keyring::Entry::new(SERVICE, account)
         .map_err(|e| e.to_string())?
         .set_password(secret)
@@ -31,6 +63,7 @@ pub fn set(account: &str, secret: &str) -> Result<(), String> {
     // secret is simply gone. That shipped once — keys looked saved and every
     // provider then reported itself unconfigured — so the write is not trusted
     // until a separate read confirms it.
+    invalidate(account);
     match get(account) {
         Ok(Some(stored)) if stored == secret => Ok(()),
         Ok(_) => Err(
@@ -43,6 +76,7 @@ pub fn set(account: &str, secret: &str) -> Result<(), String> {
 }
 
 pub fn delete(account: &str) -> Result<(), String> {
+    invalidate(account);
     let entry = keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())?;
     match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
