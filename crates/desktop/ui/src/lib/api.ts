@@ -8,6 +8,7 @@ import type {
   AttachmentInput,
   ChatEvent,
   ContextUsage,
+  GitContext,
   ExternalAgentCheck,
   ExternalAgentRow,
   LoginStarted,
@@ -305,6 +306,10 @@ export function preparePastedImage(options: {
 
 export function gitBranch() {
   return invoke<string | null>("git_branch");
+}
+
+export function gitContext() {
+  return invoke<GitContext>("git_context");
 }
 
 export function verifyWorkspace() {

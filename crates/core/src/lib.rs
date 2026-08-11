@@ -99,9 +99,9 @@ pub use skills::{
     MAX_SKILL_BYTES,
 };
 pub use thread::{
-    new_id, StoredMessage, Thread, ThreadCheckpoint, ThreadId, ThreadLoad, ThreadLoadError,
-    ThreadStore, ThreadSummary, ToolPart as ThreadToolPart, THREAD_FORMAT_VERSION,
-    WIRE_FORMAT_ANTHROPIC_MESSAGES,
+    new_id, PullRequestLink, StoredMessage, Thread, ThreadCheckpoint, ThreadGitContext, ThreadId,
+    ThreadLoad, ThreadLoadError, ThreadStore, ThreadSummary, ToolPart as ThreadToolPart,
+    THREAD_FORMAT_VERSION, WIRE_FORMAT_ANTHROPIC_MESSAGES,
 };
 pub use tools::approval::{
     AllowApprover, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalPreview,

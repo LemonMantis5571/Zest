@@ -6,6 +6,7 @@ import {
   FileTextIcon,
   FolderOpenIcon,
   GitBranchIcon,
+  GitPullRequestIcon,
   ImageIcon,
   PencilIcon,
   PlusIcon,
@@ -37,7 +38,12 @@ import {
   type ModelCapability,
 } from "@/lib/models";
 import { getBackend } from "@/lib/backend";
-import type { ApprovalMode, CommandView, PreparedAttachment } from "@/lib/types";
+import type {
+  ApprovalMode,
+  CommandView,
+  GitContext,
+  PreparedAttachment,
+} from "@/lib/types";
 import type { QueuedTurn } from "@/lib/threadQueue";
 import { cn } from "@/lib/utils";
 
@@ -49,6 +55,7 @@ type Props = {
   defaultModel?: string;
   folderLabel: string;
   branch: string | null;
+  gitContext: GitContext | null;
   approvalMode: ApprovalMode;
   contextRefreshKey: string | number;
   sending: boolean;
@@ -86,6 +93,7 @@ export function Composer({
   defaultModel,
   folderLabel,
   branch,
+  gitContext,
   approvalMode,
   contextRefreshKey,
   sending,
@@ -568,6 +576,32 @@ export function Composer({
               <span className="inline-flex items-center gap-1 truncate">
                 <GitBranchIcon className="size-3 shrink-0 opacity-70" />
                 <span className="truncate">{branch}</span>
+              </span>
+            ) : null}
+            {gitContext?.pullRequest ? (
+              <a
+                href={gitContext.pullRequest.url}
+                target="_blank"
+                rel="noreferrer"
+                title={`${gitContext.pullRequest.title} · +${gitContext.additions} −${gitContext.deletions} · ${gitContext.changedFiles} files`}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+              >
+                <GitPullRequestIcon className="size-3 opacity-80" />
+                <span>#{gitContext.pullRequest.number}</span>
+                <span className="text-emerald-600 dark:text-emerald-400">
+                  +{gitContext.additions}
+                </span>
+                <span className="text-rose-600 dark:text-rose-400">
+                  −{gitContext.deletions}
+                </span>
+              </a>
+            ) : gitContext?.branchChanged ? (
+              <span
+                title={`This chat is on ${gitContext.branch ?? branch ?? "another branch"}, based on ${gitContext.baseBranch ?? "the original branch"}.`}
+                className="inline-flex shrink-0 items-center gap-1 text-muted-foreground"
+              >
+                <GitBranchIcon className="size-3 opacity-80" />
+                <span className="hidden sm:inline">branch changed</span>
               </span>
             ) : null}
             {showModelPicker ? (

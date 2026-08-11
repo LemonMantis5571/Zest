@@ -12,6 +12,7 @@ import type {
   ContextUsage,
   ExternalAgentCheck,
   ExternalAgentRow,
+  GitContext,
   LoginStarted,
   LoginStatus,
   PreparedAttachment,
@@ -145,6 +146,7 @@ export type DesktopBackend = {
     name?: string;
   }): Promise<PreparedAttachment>;
   gitBranch(): Promise<string | null>;
+  gitContext(): Promise<GitContext>;
   verifyWorkspace(): Promise<WorkspaceReview>;
   contextUsage(): Promise<ContextUsage>;
   getUserProfile(): Promise<UserProfile>;
@@ -224,6 +226,7 @@ export function createTauriBackend(): DesktopBackend {
     pickFiles: () => tauriApi.pickFiles(),
     preparePastedImage: (options) => tauriApi.preparePastedImage(options),
     gitBranch: () => tauriApi.gitBranch(),
+    gitContext: () => tauriApi.gitContext(),
     verifyWorkspace: () => tauriApi.verifyWorkspace(),
     contextUsage: () => tauriApi.contextUsage(),
     getUserProfile: () => tauriApi.getUserProfile(),

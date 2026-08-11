@@ -202,6 +202,36 @@ fn assistant_fields(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestLink {
+    /// Repository identity is optional because the URL is authoritative and
+    /// GitHub CLI can return a PR even when the remote is not named `origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadGitContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequestLink>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadSummary {
@@ -215,6 +245,8 @@ pub struct ThreadSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     pub message_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_context: Option<ThreadGitContext>,
 }
 
 /// A durable conversation checkpoint. The full snapshot lives beside the
@@ -280,6 +312,13 @@ pub struct Thread {
     /// Provider that owns this conversation (parent is always pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// Git checkout and optional pull request associated with this chat.
+    ///
+    /// This is deliberately optional so older `.zest` thread files remain
+    /// readable and do not acquire repository metadata until the chat is
+    /// opened in a Git workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_context: Option<ThreadGitContext>,
     /// Wire format for `agent_messages` (e.g. anthropic_messages).
     #[serde(default = "default_wire_format")]
     pub wire_format: String,
@@ -317,6 +356,7 @@ impl Thread {
             title: None,
             pinned: false,
             provider_id: None,
+            git_context: None,
             wire_format: default_wire_format(),
             messages: Vec::new(),
             checkpoints: Vec::new(),
@@ -399,6 +439,61 @@ impl Thread {
         Ok(())
     }
 
+    /// Capture the checkout from which this chat started, without overwriting
+    /// a context already recorded for the thread.
+    pub fn ensure_git_context(
+        &mut self,
+        base_branch: Option<String>,
+        start_commit: Option<String>,
+    ) -> bool {
+        if base_branch.is_none() && start_commit.is_none() {
+            return false;
+        }
+        let context = self
+            .git_context
+            .get_or_insert_with(ThreadGitContext::default);
+        let mut changed = false;
+        if context.base_branch.is_none() && base_branch.is_some() {
+            context.base_branch = base_branch;
+            changed = true;
+        }
+        if context.start_commit.is_none() && start_commit.is_some() {
+            context.start_commit = start_commit;
+            changed = true;
+        }
+        if changed {
+            self.touch();
+        }
+        changed
+    }
+
+    /// Record the checkout currently visible while the chat is open.
+    pub fn record_git_branch(&mut self, branch: Option<String>) -> bool {
+        let Some(branch) = branch else {
+            return false;
+        };
+        let context = self
+            .git_context
+            .get_or_insert_with(ThreadGitContext::default);
+        if context.branch.as_deref() == Some(branch.as_str()) {
+            return false;
+        }
+        context.branch = Some(branch);
+        self.touch();
+        true
+    }
+
+    /// Replace the latest Git snapshot while preserving the conversation’s
+    /// durable association with the checkout and pull request.
+    pub fn record_git_context(&mut self, context: ThreadGitContext) -> bool {
+        if self.git_context.as_ref() == Some(&context) {
+            return false;
+        }
+        self.git_context = Some(context);
+        self.touch();
+        true
+    }
+
     /// Convert interrupted approvals / still-running tools into terminal error
     /// cards so a restart never leaves forever-pending UI state.
     pub fn terminalize_interrupted(&mut self) -> bool {
@@ -454,6 +549,7 @@ impl Thread {
             pinned: self.pinned,
             provider_id: self.provider_id.clone(),
             message_count: self.messages.len(),
+            git_context: self.git_context.clone(),
         }
     }
 
@@ -1183,6 +1279,38 @@ mod characterization {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, thread.id);
         assert_eq!(listed[0].message_count, 2);
+    }
+
+    #[test]
+    fn git_context_round_trips_and_stays_attached_to_summary() {
+        let root = scratch("git-context");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+
+        assert!(thread.ensure_git_context(Some("master".into()), Some("abc123".into())));
+        assert!(thread.record_git_branch(Some("feat/live-indicator".into())));
+        assert!(!thread.record_git_branch(Some("feat/live-indicator".into())));
+        thread.record_git_context(ThreadGitContext {
+            base_branch: Some("master".into()),
+            branch: Some("feat/live-indicator".into()),
+            start_commit: Some("abc123".into()),
+            pull_request: Some(PullRequestLink {
+                repository: None,
+                number: 5,
+                title: "Live branch indicator".into(),
+                url: "https://github.com/example/repo/pull/5".into(),
+                state: "OPEN".into(),
+                is_draft: false,
+                additions: 65,
+                deletions: 1,
+                changed_files: 3,
+            }),
+        });
+        store.save(&thread).unwrap();
+
+        let loaded = store.load(&thread.id).unwrap();
+        assert_eq!(loaded.git_context, thread.git_context);
+        assert_eq!(loaded.summary().git_context, thread.git_context);
     }
 
     /// Twenty-four checkpoints of a large conversation is twenty-four complete

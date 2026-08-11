@@ -34,10 +34,11 @@ use zest_core::{
     AuthStatus, ChatFacts, ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace,
     GatewayLease, GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority,
     PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderConfig,
-    ProviderRegistry, ProviderSlot, QuestionRequest, Questioner, RatesStatus, RecoverableRun,
-    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint,
-    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport,
-    UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest, Questioner, RatesStatus,
+    RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
+    ThreadCheckpoint, ThreadGitContext, ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata,
+    ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
+    THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -364,6 +365,71 @@ struct WorkspaceReview {
     changed_file_count: usize,
     /// `clean`, `issues`, or `unavailable`.
     patch_check: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "PullRequestView.ts", rename_all = "camelCase")
+)]
+struct PullRequestView {
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    number: u64,
+    title: String,
+    url: String,
+    state: String,
+    is_draft: bool,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    additions: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    deletions: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    changed_files: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "GitContext.ts", rename_all = "camelCase")
+)]
+struct GitContextView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    base_branch: Option<String>,
+    branch_changed: bool,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    additions: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    deletions: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    changed_files: u64,
+    /// `pull_request` when GitHub supplied the counts, otherwise `branch`.
+    stats_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    pull_request: Option<PullRequestView>,
+}
+
+impl From<&PullRequestLink> for PullRequestView {
+    fn from(link: &PullRequestLink) -> Self {
+        Self {
+            number: link.number,
+            title: link.title.clone(),
+            url: link.url.clone(),
+            state: link.state.clone(),
+            is_draft: link.is_draft,
+            additions: link.additions,
+            deletions: link.deletions,
+            changed_files: link.changed_files,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2812,6 +2878,10 @@ async fn start_session_inner(
         }
     };
     thread.ensure_provider(&id).map_err(|e| e.to_string())?;
+    let initial_branch = read_git_branch(&root);
+    let mut thread_metadata_changed =
+        thread.ensure_git_context(initial_branch.clone(), read_git_head(&root));
+    thread_metadata_changed |= thread.record_git_branch(initial_branch);
 
     let approval_hub = Arc::new(ApprovalHub::new());
     let question_hub = Arc::new(QuestionHub::new());
@@ -2858,9 +2928,9 @@ async fn start_session_inner(
     agent.messages = thread.agent_messages.clone();
 
     // A legacy thread is claimed only after the target provider has built a
-    // usable runtime. Reopening it later must use this explicit owner rather
-    // than guessing from the currently selected provider again.
-    if claiming_legacy_thread {
+    // usable runtime. Git context is persisted at the same point so a failed
+    // provider switch cannot leave half-open chat metadata behind.
+    if claiming_legacy_thread || thread_metadata_changed {
         if let Err(error) = store.save(&thread) {
             if thread_created {
                 let _ = store.delete(&thread.id);
@@ -5447,6 +5517,222 @@ fn read_git_branch(root: &Path) -> Option<String> {
     None
 }
 
+fn read_git_head(root: &Path) -> Option<String> {
+    let output = StdCommand::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!commit.is_empty()).then_some(commit)
+}
+
+#[derive(Debug, Default)]
+struct GitDiffStats {
+    additions: u64,
+    deletions: u64,
+    changed_files: u64,
+}
+
+fn parse_git_numstat(output: &[u8]) -> GitDiffStats {
+    let mut stats = GitDiffStats::default();
+    for line in String::from_utf8_lossy(output).lines() {
+        let mut fields = line.split('\t');
+        let additions = fields.next().and_then(|value| value.parse::<u64>().ok());
+        let deletions = fields.next().and_then(|value| value.parse::<u64>().ok());
+        // Binary diffs report `-` for both counts. They still represent one
+        // changed file, but do not have meaningful line statistics.
+        if additions.is_some() || deletions.is_some() || line.contains("\t-\t") {
+            stats.changed_files = stats.changed_files.saturating_add(1);
+        }
+        stats.additions = stats.additions.saturating_add(additions.unwrap_or(0));
+        stats.deletions = stats.deletions.saturating_add(deletions.unwrap_or(0));
+    }
+    stats
+}
+
+async fn read_git_diff_stats(root: &Path, start_commit: Option<&str>) -> GitDiffStats {
+    let mut command = Command::new("git");
+    command.args(["diff", "--numstat"]);
+    if let Some(start_commit) = start_commit {
+        command.arg(start_commit);
+    }
+    let output = match command
+        .current_dir(root)
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return GitDiffStats::default(),
+    };
+    parse_git_numstat(&output.stdout)
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPullRequest {
+    number: u64,
+    title: String,
+    state: String,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    url: String,
+    additions: u64,
+    deletions: u64,
+    #[serde(rename = "changedFiles")]
+    changed_files: u64,
+}
+
+enum PullRequestLookup {
+    Found(PullRequestLink),
+    NotFound,
+    Unavailable,
+}
+
+async fn lookup_pull_request(root: &Path) -> PullRequestLookup {
+    let output = match tokio::time::timeout(
+        Duration::from_secs(3),
+        Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                "--json",
+                "number,title,state,isDraft,url,additions,deletions,changedFiles",
+            ])
+            .current_dir(root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) | Err(_) => return PullRequestLookup::Unavailable,
+    };
+
+    if !output.status.success() {
+        return PullRequestLookup::NotFound;
+    }
+    let Ok(pr) = serde_json::from_slice::<GitHubPullRequest>(&output.stdout) else {
+        return PullRequestLookup::Unavailable;
+    };
+    PullRequestLookup::Found(PullRequestLink {
+        repository: None,
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        state: pr.state,
+        is_draft: pr.is_draft,
+        additions: pr.additions,
+        deletions: pr.deletions,
+        changed_files: pr.changed_files,
+    })
+}
+
+struct GitContextInspection {
+    thread_context: ThreadGitContext,
+    view: GitContextView,
+}
+
+async fn inspect_git_context(
+    root: &Path,
+    existing: Option<&ThreadGitContext>,
+) -> GitContextInspection {
+    let current_branch = read_git_branch(root);
+    let mut thread_context = existing.cloned().unwrap_or_default();
+    if thread_context.base_branch.is_none() {
+        thread_context.base_branch = current_branch.clone();
+    }
+    if thread_context.start_commit.is_none() {
+        thread_context.start_commit = read_git_head(root);
+    }
+    if current_branch.is_some() {
+        thread_context.branch = current_branch.clone();
+    }
+
+    let local_stats = read_git_diff_stats(root, thread_context.start_commit.as_deref()).await;
+    let mut pull_request = thread_context.pull_request.clone();
+    if current_branch.is_some() {
+        if let PullRequestLookup::Found(found) = lookup_pull_request(root).await {
+            pull_request = Some(found);
+        }
+    }
+    thread_context.pull_request = pull_request.clone();
+
+    let (additions, deletions, changed_files, stats_source) = match pull_request.as_ref() {
+        Some(pr) => (pr.additions, pr.deletions, pr.changed_files, "pull_request"),
+        None => (
+            local_stats.additions,
+            local_stats.deletions,
+            local_stats.changed_files,
+            "branch",
+        ),
+    };
+    let branch_changed = match (
+        thread_context.branch.as_deref(),
+        thread_context.base_branch.as_deref(),
+    ) {
+        (Some(branch), Some(base)) => branch != base,
+        _ => false,
+    };
+    let view = GitContextView {
+        branch: thread_context.branch.clone(),
+        base_branch: thread_context.base_branch.clone(),
+        branch_changed,
+        additions,
+        deletions,
+        changed_files,
+        stats_source: stats_source.to_string(),
+        pull_request: pull_request.as_ref().map(PullRequestView::from),
+    };
+    GitContextInspection {
+        thread_context,
+        view,
+    }
+}
+
+#[tauri::command]
+async fn git_context(state: State<'_, AppState>) -> Result<GitContextView, String> {
+    let snapshot = state
+        .sessions
+        .session_info_snapshot(|session| {
+            (
+                session.root.clone(),
+                session.thread_id.clone(),
+                session.thread.git_context.clone(),
+            )
+        })
+        .map_err(map_session_err)?
+        .ok_or_else(|| "no active session".to_string())?;
+    let (root, thread_id, existing) = snapshot;
+    let inspection = inspect_git_context(&root, existing.as_ref()).await;
+    let next_context = inspection.thread_context.clone();
+    match state
+        .sessions
+        .with_session_mut(|session| -> Result<(), String> {
+            if session.thread_id != thread_id {
+                return Ok(());
+            }
+            if session.thread.record_git_context(next_context) {
+                open_store(&session.root)?
+                    .save(&session.thread)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }) {
+        Ok(result) => result?,
+        // A turn owns the session body while it is streaming. Returning the
+        // fresh computed view is safe; the next poll will persist it after the
+        // turn releases the slot.
+        Err(SessionError::Busy) => {}
+        Err(error) => return Err(map_session_err(error)),
+    }
+    Ok(inspection.view)
+}
+
 fn workspace_review_without_git(repository: &str, summary: &str) -> WorkspaceReview {
     WorkspaceReview {
         summary: summary.to_string(),
@@ -5981,6 +6267,7 @@ pub fn run() {
             pick_files,
             prepare_pasted_image,
             git_branch,
+            git_context,
             verify_workspace,
             context_usage,
             get_user_profile,
@@ -6111,6 +6398,8 @@ mod export_bindings {
         ExternalAgentCheckView::export_all().expect("export ExternalAgentCheckView bindings");
         ModelCapability::export_all().expect("export ModelCapability bindings");
         WorkspaceReview::export_all().expect("export WorkspaceReview bindings");
+        PullRequestView::export_all().expect("export PullRequestView bindings");
+        GitContextView::export_all().expect("export GitContext bindings");
         ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");
         TurnRecoveryView::export_all().expect("export TurnRecovery bindings");
         ToolMetaView::export_all().expect("export ToolMetaView bindings");
@@ -6121,6 +6410,14 @@ mod export_bindings {
 mod characterization {
     use super::*;
     use zest_core::ToolRisk;
+
+    #[test]
+    fn git_numstat_counts_text_and_binary_files() {
+        let stats = parse_git_numstat(b"3\t1\tsrc/lib.rs\n-\t-\tassets/logo.png\n");
+        assert_eq!(stats.additions, 3);
+        assert_eq!(stats.deletions, 1);
+        assert_eq!(stats.changed_files, 2);
+    }
 
     #[test]
     fn normalize_effort_aliases_and_default() {
