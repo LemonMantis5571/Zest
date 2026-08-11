@@ -92,6 +92,8 @@ type Screen =
 
 const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
+/** How often to re-read .git/HEAD while a chat is open. */
+const BRANCH_POLL_MS = 2000;
 
 async function showAttention(
   title: string,
@@ -831,6 +833,34 @@ export default function App() {
     },
     [applyChatEventNow, flushDeltaQueue, recordThreadActivity]
   );
+
+  /**
+   * Keep the branch chip under the composer honest when the repo changes
+   * branch outside Zest (`git checkout` in a terminal). Rust has no filesystem
+   * watcher, so re-read .git/HEAD on an interval while a chat is open: a
+   * ~50-byte read, and setBranch only fires when the name actually changes.
+   */
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    const tick = async () => {
+      let next: string | null = null;
+      try {
+        next = await backend.gitBranch();
+      } catch {
+        /* same fallback the one-shot call sites use */
+      }
+      if (!cancelled) {
+        setBranch((current) => (current === next ? current : next));
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, BRANCH_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [session]);
 
   const applySession = useCallback((info: SessionInfo, opts?: { clearDraft?: boolean }) => {
     const prevThread = threadIdRef.current;
