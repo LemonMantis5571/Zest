@@ -42,8 +42,8 @@ pub use anthropic::types::{
 pub use auth::{
     adopt_bundled_gateway, can_start_login, cliproxy_exe, cliproxy_install, detect_all,
     detect_claude_code, gateway_auth_present, login_command, resolve_claude_code_login,
-    resolve_login, start_claude_code_login, start_login, uses_gateway_auth, AuthStatus,
-    LoginProcess, LoginSpawn, ProviderSlot,
+    resolve_login, start_claude_code_login, start_login, AuthStatus, LoginProcess, LoginSpawn,
+    ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use chat_persistence::{
@@ -64,8 +64,8 @@ pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
 pub use gateway::{
     ensure_running as ensure_gateway_running, gateway_dir, provision as provision_gateway,
-    runtime as gateway_runtime, GatewayState, Provisioned, DEFAULT_PORT as GATEWAY_DEFAULT_PORT,
-    GATEWAY_KEY_ENV,
+    runtime as gateway_runtime, GatewayLease, GatewayStart, GatewayState, Provisioned,
+    DEFAULT_PORT as GATEWAY_DEFAULT_PORT, GATEWAY_KEY_ENV,
 };
 pub use handoff::{ContextHandoff, MAX_HANDOFF_BYTES};
 pub use persist::{

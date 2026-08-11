@@ -33,4 +33,4 @@ jobs:
         shell: pwsh
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: ./scripts/verify.ps1
+        run: ./scripts/release-verify.ps1

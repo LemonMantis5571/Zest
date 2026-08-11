@@ -13,7 +13,8 @@ approvals, and project-scoped thread persistence.
 crates/core/     zest-core
   anthropic/     Messages API client + SSE (message_stop required; idle/connect timeouts)
   auth.rs        detect sign-ins; start_login spawns vendor CLI
-  gateway.rs     provision and supervise the bundled CLIProxyAPI sidecar
+  gateway.rs     provider-scoped provisioning and supervision for the bundled
+                 CLIProxyAPI sidecar
   cancel.rs      async CancelToken (races stream/tools/approvals; HTTP abort on drop)
   thread.rs      provider-owned threads; typed load errors; never rewrite newer formats
   prefs.rs       project-scoped provider sticky state (`.zest/session-state.json`)
@@ -26,7 +27,7 @@ crates/core/     zest-core
   agent.rs       transactional loop, concurrent ungated tools, sequential gated
                  ones; ledger-before-late-cancel; multimodal send
 crates/cli/      zest — REPL + doctor --live
-crates/desktop/  zest-desktop — Tauri chat shell + pinned gateway sidecar
+crates/desktop/  zest-desktop — Tauri chat shell + lazy gateway sidecar lifecycle
                  attachments, context meter, known workspaces, profile avatar
 ```
 
@@ -98,7 +99,8 @@ explicit `for<'a>` is required because inside an `async_trait` method an elided 
 instead of staying higher-ranked.
 
 **Auth detection** (`auth.rs`). Zest performs no OAuth itself. Vendor CLIs, the local gateway, and
-API-key providers own their credentials; Zest reads only whether a usable setup exists.
+API-key providers own their credentials; Zest reads only whether a usable setup exists. Gateway
+discovery may be used for status, but provisioning and process startup are selected-provider work.
 `AuthStatus` distinguishes `NotLoggedIn` from `Unknown` — Claude and Antigravity can keep
 credentials somewhere unreadable on Windows, and reporting those as logged-out would push the user
 to re-authenticate for nothing. The desktop **Connect** button supports the Zest-managed Codex flow
@@ -150,7 +152,8 @@ or the provider's plan balance.
   Auth via `x-api-key`; an `Authorization: Bearer` header is sent alongside because gateways differ
   on which they read, and the real API ignores the extra one.
 - **Messages-API gateways** — the desktop bundles a pinned CLIProxyAPI sidecar and `ZEST_BASE_URL`
-  may swap the origin. When the host is not Anthropic's, `thinking` and `output_config.effort` are
+  may swap the origin. The sidecar is adopted and started only when the selected provider is
+  gateway-backed. When the host is not Anthropic's, `thinking` and `output_config.effort` are
   omitted, since a GPT or Gemini backend has no use for them.
 - **agentic-lemon** — generated `AGENTS.md`, `PROJECT_CONTEXT.md`, `context/`, `memory/`,
   `skills/`, `references/`. Documentation only, no runtime role.

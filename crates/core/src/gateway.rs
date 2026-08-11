@@ -1,18 +1,19 @@
 //! Supervision for the local CLIProxyAPI process.
 //!
-//! Codex and Claude reach their subscriptions through a gateway running on
-//! localhost. That process is not a service and nothing was keeping it alive, so
-//! the ordinary state of a fresh boot was "installed, signed in, not running" —
-//! which surfaced as a failed turn several seconds later.
+//! Gateway-backed providers reach their subscriptions through a local gateway.
+//! Zest starts it only after the selected provider configuration requires it.
+//! Without that preparation, a fresh boot can leave the gateway installed and
+//! signed in but not running when a gateway-backed turn begins.
 //!
-//! Starting it is Zest's job rather than the user's: Zest already knows where the
-//! binary is, because it launches the same binary to perform the sign-in.
+//! A gateway that was already listening is treated as external/shared and is
+//! never killed by Zest; only a retained child lease can stop a process.
 
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::auth::{cliproxy_exe, cliproxy_install, spawn_detached};
+use crate::auth::{adopt_bundled_gateway, cliproxy_exe, cliproxy_install, spawn_managed};
 use crate::fsutil::atomic_write;
 
 /// How long to wait for a TCP connect before calling the port dead. Loopback
@@ -22,6 +23,61 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
 /// binds, so the first accept can be a second or two behind the spawn.
 const START_TIMEOUT: Duration = Duration::from_secs(12);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
+static START_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn start_lock() -> &'static tokio::sync::Mutex<()> {
+    START_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Ownership of a gateway child started by this Zest process.
+///
+/// An empty lease means the gateway was already listening or the URL was not
+/// local. Dropping an owned lease terminates only its retained child handle;
+/// Zest never searches by executable name, PID, or port to decide what to kill.
+pub struct GatewayLease {
+    child: Option<std::process::Child>,
+}
+
+impl GatewayLease {
+    fn external() -> Self {
+        Self { child: None }
+    }
+
+    fn owned(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    /// Whether this lease owns a child Zest started itself.
+    pub fn is_owned(&self) -> bool {
+        self.child.is_some()
+    }
+
+    /// Stop the owned child, if it is still present.
+    ///
+    /// CLIProxyAPI does not expose a portable graceful shutdown contract here,
+    /// so the bounded fallback is an explicit child kill followed by `wait`.
+    /// Calling this more than once is harmless.
+    pub fn shutdown(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+impl Drop for GatewayLease {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Readiness result plus the process ownership token that must live with the
+/// front-end for as long as it uses the gateway.
+pub struct GatewayStart {
+    pub state: GatewayState,
+    pub lease: GatewayLease,
+}
 
 /// What [`ensure_running`] found or did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,23 +99,55 @@ pub enum GatewayState {
 /// when this call started it — the caller only needs to know whether to proceed.
 /// Never an error type: every outcome here is something the caller reports
 /// alongside a real failure rather than instead of one.
-pub async fn ensure_running(base_url: &str) -> GatewayState {
+pub async fn ensure_running(base_url: &str) -> GatewayStart {
     let Some(addr) = local_origin(base_url) else {
-        return GatewayState::NotLocal;
+        return GatewayStart {
+            state: GatewayState::NotLocal,
+            lease: GatewayLease::external(),
+        };
     };
+
+    // Readiness can be requested concurrently by a desktop session and a
+    // provider verification task. Serialize the check/spawn/poll sequence so
+    // two children cannot race to bind the same gateway port.
+    let _start_guard = start_lock().lock().await;
     if port_open(addr) {
-        return GatewayState::Listening;
+        return GatewayStart {
+            state: GatewayState::Listening,
+            lease: GatewayLease::external(),
+        };
     }
+
+    // Sidecar adoption and config provisioning are deliberately inside the
+    // local, selected-provider path. Direct providers never reach this point.
+    let _ = adopt_bundled_gateway();
     let (exe, config) = match runtime() {
         Ok(Some(pair)) => pair,
-        Ok(None) => return GatewayState::NotInstalled,
-        Err(e) => return GatewayState::Unavailable(e),
+        Ok(None) => {
+            return GatewayStart {
+                state: GatewayState::NotInstalled,
+                lease: GatewayLease::external(),
+            }
+        }
+        Err(e) => {
+            return GatewayStart {
+                state: GatewayState::Unavailable(e),
+                lease: GatewayLease::external(),
+            }
+        }
     };
 
     let args = vec!["-config".to_string(), config.to_string_lossy().into_owned()];
-    if let Err(e) = spawn_detached(&exe, &args) {
-        return GatewayState::Unavailable(format!("could not start {}: {e}", exe.display()));
-    }
+    let child = match spawn_managed(&exe, &args) {
+        Ok(child) => child,
+        Err(e) => {
+            return GatewayStart {
+                state: GatewayState::Unavailable(format!("could not start {}: {e}", exe.display())),
+                lease: GatewayLease::external(),
+            }
+        }
+    };
+    let mut lease = GatewayLease::owned(child);
 
     // Poll rather than sleeping the whole budget: a warm start is usually ready
     // in well under a second, and this is on the path to the user's first turn.
@@ -69,15 +157,22 @@ pub async fn ensure_running(base_url: &str) -> GatewayState {
         tokio::time::sleep(POLL_INTERVAL).await;
         waited += POLL_INTERVAL;
         if port_open(addr) {
-            return GatewayState::Listening;
+            return GatewayStart {
+                state: GatewayState::Listening,
+                lease,
+            };
         }
     }
 
-    GatewayState::Unavailable(format!(
-        "started {} but {addr} did not accept within {}s",
-        exe.display(),
-        START_TIMEOUT.as_secs()
-    ))
+    lease.shutdown();
+    GatewayStart {
+        state: GatewayState::Unavailable(format!(
+            "started {} but {addr} did not accept within {}s",
+            exe.display(),
+            START_TIMEOUT.as_secs()
+        )),
+        lease,
+    }
 }
 
 /// Whether a local gateway is accepting right now, without starting anything.
@@ -353,13 +448,14 @@ mod tests {
     #[tokio::test]
     async fn a_remote_gateway_is_left_alone() {
         assert_eq!(
-            ensure_running("https://gateway.example.com").await,
+            ensure_running("https://gateway.example.com").await.state,
             GatewayState::NotLocal
         );
         assert!(!is_listening("https://gateway.example.com"));
     }
 
-    /// Opt-in: starts the real CLIProxyAPI and leaves it running.
+    /// Opt-in: starts the real CLIProxyAPI and releases its owned lease at the
+    /// end of the test.
     ///
     /// Ignored by default because it spawns a long-lived process and needs an
     /// actual install, which a CI box will not have. Run it when changing the
@@ -381,13 +477,17 @@ mod tests {
             return;
         }
         let url = "http://127.0.0.1:8317";
-        assert_eq!(ensure_running(url).await, GatewayState::Listening);
+        let start = ensure_running(url).await;
+        assert_eq!(start.state, GatewayState::Listening);
+        assert!(start.lease.is_owned() || is_listening(url));
         assert!(
             is_listening(url),
             "should be accepting after ensure_running"
         );
         // Idempotent: a second call finds it already up and must not spawn again.
-        assert_eq!(ensure_running(url).await, GatewayState::Listening);
+        let second = ensure_running(url).await;
+        assert_eq!(second.state, GatewayState::Listening);
+        assert!(!second.lease.is_owned());
     }
 
     /// Serializes the tests that touch process-wide environment variables.
@@ -614,7 +714,7 @@ mod tests {
         std::env::remove_var(GATEWAY_KEY_ENV);
 
         let url = format!("http://127.0.0.1:{DEFAULT_PORT}");
-        let state = ensure_running(&url).await;
+        let start = ensure_running(&url).await;
 
         // Restore before asserting, so a failure does not leak env into the
         // rest of the suite.
@@ -624,7 +724,7 @@ mod tests {
         std::env::remove_var(GATEWAY_KEY_ENV);
 
         assert_eq!(
-            state,
+            start.state,
             GatewayState::Listening,
             "config dir: {}",
             dir.display()

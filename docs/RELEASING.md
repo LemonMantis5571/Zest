@@ -21,7 +21,7 @@ Run from the repository root on the pinned Windows toolchain:
 
 ```powershell
 ./scripts/fetch-gateway.ps1 -CheckPin
-./scripts/verify.ps1
+./scripts/release-verify.ps1
 ```
 
 The verification script covers the UI, Rust, generated bindings, dependency

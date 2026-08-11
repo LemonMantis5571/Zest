@@ -162,8 +162,8 @@ Download a release for your platform from
 ### 🛠️ Build from source
 
 Prerequisites: **Rust 1.97.1** (pinned in `rust-toolchain.toml`), **Node.js
-24.16.0+** and **npm**, **Git**, and **PowerShell** (Windows PowerShell 5.1+ or
-`pwsh` 7+) for the gateway and verify scripts.
+24.16.0+** and **npm**, and **Git**. PowerShell is needed only for the
+release/CI gate documented in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 - **Windows** — Visual Studio Build Tools (C++ workload with Windows SDK) and
   the WebView2 Evergreen runtime (included with Windows 10/11).
@@ -179,15 +179,16 @@ Then, from the repository root:
 
 ```bash
 npm ci                                  # JavaScript dependencies
-./scripts/fetch-gateway.ps1             # fetch the pinned gateway sidecar
 npm run ui:build                        # build the web UI
 cargo run -p zest-desktop               # desktop app
 cargo run -p zest                       # terminal client
 ```
 
-On Linux or macOS, invoke the PowerShell scripts with `pwsh ./scripts/...`.
-Use `-Target <rust-target-triple>` to fetch the sidecar for a platform other
-than the host, and `-Check` to verify an existing one.
+Run `npm run verify` for the cross-platform local UI and Rust checks. The app
+manages the gateway when a gateway-backed provider is selected; direct Claude
+Code, native API, and OpenAI-compatible providers do not need the sidecar.
+Release sidecar fetching and the full release gate remain in
+`docs/RELEASING.md`.
 
 > [!NOTE]
 > Release builds bundle the gateway sidecar, so `cargo tauri build` requires

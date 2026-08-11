@@ -28,8 +28,9 @@ Zest does not perform automatic provider routing or run a second internal delega
 ## Current Priorities
 
 1. **Windows Beta** — core safety, cancellation, file/prompt hardening, and
-   `scripts/verify.ps1`. Run `cargo run -p zest -- doctor --live` only with a working
-   gateway/login; it is manual and spends quota.
+   `npm run verify`. The release/CI gate is `scripts/release-verify.ps1`. Run
+   `cargo run -p zest -- doctor --live` only with a working gateway/login; it is
+   manual and spends quota.
 2. **ACP worker UX** — configure external workers in the desktop, make delegation status and
    approvals clear, keep worker output reviewable without making workers look like parent
    providers, and make CLI-owned MCP explicitly opt-in.
