@@ -4,7 +4,7 @@ use std::path::Path;
 
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::config::{Config, ExternalAgentMode, ExternalWorkspace};
+use crate::config::{ClaudeCodePermissionMode, Config, ExternalAgentMode, ExternalWorkspace};
 use crate::fsutil::atomic_write;
 
 #[derive(Debug, Clone)]
@@ -21,6 +21,17 @@ pub struct AnthropicProviderInput {
     pub id: String,
     pub model: String,
     pub credential: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeCodeProviderInput {
+    pub id: String,
+    pub command: String,
+    pub model: String,
+    pub models: Vec<String>,
+    pub allow_mcp: bool,
+    pub permission_mode: ClaudeCodePermissionMode,
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +256,80 @@ pub fn add_anthropic_provider(path: &Path, input: &AnthropicProviderInput) -> Re
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// Add or update a first-class Claude Code parent provider while preserving
+/// comments and unrelated provider entries in the user's TOML file.
+pub fn add_claude_code_provider(
+    path: &Path,
+    input: &ClaudeCodeProviderInput,
+) -> Result<(), String> {
+    let id = input.id.trim();
+    let command = input.command.trim();
+    let model = input.model.trim();
+
+    validate_id(id, "provider")?;
+    if command.is_empty() {
+        return Err("Claude Code command is required".into());
+    }
+    if model.is_empty() {
+        return Err("a Claude Code model is required".into());
+    }
+    if input.timeout_secs == 0 || input.timeout_secs > 3_600 {
+        return Err("Claude Code timeout must be between 1 and 3600 seconds".into());
+    }
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("providers") {
+        doc["providers"] = Item::Table(Table::new());
+    }
+    let providers = doc["providers"]
+        .as_table_mut()
+        .ok_or_else(|| "[providers] is not a table".to_string())?;
+    let entry = providers.entry(id).or_insert(Item::Table(Table::new()));
+    let provider = entry
+        .as_table_mut()
+        .ok_or_else(|| format!("provider `{id}` is not a table"))?;
+    if let Some(kind) = provider.get("kind").and_then(Item::as_str) {
+        if kind != "claude_code" {
+            return Err(format!("provider `{id}` already has kind `{kind}`"));
+        }
+    }
+
+    provider["kind"] = toml_edit::value("claude_code");
+    provider["command"] = toml_edit::value(command);
+    provider["model"] = toml_edit::value(model);
+    provider["allow_mcp"] = toml_edit::value(input.allow_mcp);
+    provider["permission_mode"] = toml_edit::value(match input.permission_mode {
+        ClaudeCodePermissionMode::Default => "default",
+        ClaudeCodePermissionMode::AcceptEdits => "accept_edits",
+        ClaudeCodePermissionMode::Plan => "plan",
+        ClaudeCodePermissionMode::BypassPermissions => "bypass_permissions",
+    });
+    provider["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
+
+    let mut models = Array::new();
+    for value in input
+        .models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        models.push(Value::from(value));
+    }
+    if models.is_empty() {
+        provider.remove("models");
+    } else {
+        provider["models"] = toml_edit::value(models);
+    }
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 pub fn upsert_external_agent(path: &Path, input: &ExternalAgentInput) -> Result<(), String> {
     let id = input.id.trim();
     let command = input.command.trim();
@@ -411,6 +496,40 @@ mod tests {
             config.providers["anthropic"],
             crate::config::ProviderConfig::Anthropic {
                 credential: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn adds_claude_code_parent_without_discarding_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "# keep me\n[default]\nprovider = \"codex\"\n").unwrap();
+
+        add_claude_code_provider(
+            &path,
+            &ClaudeCodeProviderInput {
+                id: "claude".into(),
+                command: "claude".into(),
+                model: "sonnet".into(),
+                models: vec!["sonnet".into(), "opus".into()],
+                allow_mcp: false,
+                permission_mode: ClaudeCodePermissionMode::AcceptEdits,
+                timeout_secs: 900,
+            },
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep me"));
+        assert!(raw.contains("[providers.claude]"));
+        assert!(raw.contains("permission_mode = \"accept_edits\""));
+        let config = Config::parse(&raw).unwrap();
+        assert!(matches!(
+            config.providers["claude"],
+            crate::config::ProviderConfig::ClaudeCode {
+                permission_mode: ClaudeCodePermissionMode::AcceptEdits,
                 ..
             }
         ));

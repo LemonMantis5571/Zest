@@ -441,6 +441,9 @@ export function createFixtureBackend(): DesktopBackend {
     async configureAnthropicProvider() {
       notAvailable("configureAnthropicProvider");
     },
+    async configureClaudeCodeProvider() {
+      notAvailable("configureClaudeCodeProvider");
+    },
     async openProjectConfig() {
       notAvailable("openProjectConfig");
     },

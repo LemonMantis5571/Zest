@@ -218,6 +218,7 @@ mod tests {
             let mut sink = |e: StreamEvent<'_>| match e {
                 StreamEvent::Text(t) => seen.push(format!("text:{t}")),
                 StreamEvent::Thinking(t) => seen.push(format!("thinking:{t}")),
+                StreamEvent::ProviderActivity { .. } => {}
                 StreamEvent::ToolCallStart { name, .. } => seen.push(format!("tool:{name}")),
                 StreamEvent::ToolCallUpdate { .. } => {}
                 StreamEvent::ApprovalNeeded { tool_name, .. } => {

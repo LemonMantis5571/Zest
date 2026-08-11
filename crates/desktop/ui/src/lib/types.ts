@@ -98,6 +98,12 @@ export type UserAttachmentChip = {
   kind: string;
 };
 
+export type ProviderActivityPart = {
+  id: string;
+  title: string;
+  status: "running" | "done" | "error";
+};
+
 export type ChatMessage =
   | {
       id: string;
@@ -118,6 +124,8 @@ export type ChatMessage =
       command?: string;
       /** Live question requested by the model; not persisted in thread history. */
       question?: PlanningQuestion;
+      /** Ephemeral activity from a provider-owned model/tool loop. */
+      providerActivity?: ProviderActivityPart[];
       streaming: boolean;
     };
 

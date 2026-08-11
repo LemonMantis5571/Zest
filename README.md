@@ -30,6 +30,7 @@ with a diff preview — local-first, no telemetry, no accounts, no bloat.
 - [Getting started](#getting-started)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
+- [Using Claude Code as the parent](#using-claude-code-as-the-parent)
 - [Delegating to external workers](#delegating-to-external-workers)
 - [Headless mode](#headless-mode)
 - [Usage ledger](#usage-ledger)
@@ -43,11 +44,12 @@ with a diff preview — local-first, no telemetry, no accounts, no bloat.
 brilliantly but fumble the execution, and tools that try to do it all bury you
 in bloat, telemetry, and accounts — while locking you into a single model.
 
-**The solution:** Zest is built for delegation. A frontier model runs the
-parent session and plans the change; each bounded task is handed to an
-already-authenticated specialist CLI — Claude Code or Gemini CLI — working in
-an isolated Git worktree. The core stays deliberately lean: one Rust engine,
-two frontends, no accounts, no telemetry.
+**The solution:** Zest gives you a focused parent session and an explicit
+delegation boundary. The parent can use the bundled gateway, a native API, an
+OpenAI-compatible endpoint, or an authenticated Claude Code subscription;
+bounded tasks can still be handed to Claude Code or Gemini CLI in an isolated
+Git worktree. The core stays deliberately lean: one Rust engine, two frontends,
+no accounts, no telemetry.
 
 **The result:** keep your own model accounts, delegate each task to the model
 that does it best, approve every write and command with a diff preview, and
@@ -266,6 +268,17 @@ Environment overrides:
 
 ## 🤝 Delegating to external workers
 
+## Using Claude Code as the parent
+
+Run `claude login`, select Claude Code in the Zest provider picker, and choose
+**Enable Claude Code**. Zest writes a `claude_code` parent provider to the
+active configuration and runs the CLI in the current project. The parent owns
+Claude Code's built-in tools; `[agents.claude]` is not involved and no
+`delegate_external` tool is exposed in that session.
+Claude's partial text is forwarded into the chat as it arrives, while its
+provider-owned tool activity appears as ephemeral status rows; those activities
+are never treated as Zest tool calls or persisted into the local tool history.
+
 For bounded subtasks, Zest can delegate to an external CLI that is already
 signed in — currently Claude Code and Gemini CLI — over ACP or a headless
 invocation. The worker runs in an isolated Git worktree by default and its
@@ -303,7 +316,7 @@ denied rather than waiting on a prompt, so the run is deterministic.
 echo "Summarize README.md" | zest run --jsonl
 ```
 
-Events on stdout: `session`, `text`, `thinking`, `tool_call_start`,
+Events on stdout: `session`, `text`, `thinking`, `provider_activity`, `tool_call_start`,
 `tool_call_update`, `tool_call_result`, `approval_needed`, `question_needed`,
 `model_substituted`, `done`, `error`.
 

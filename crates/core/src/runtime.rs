@@ -187,7 +187,7 @@ impl RuntimeBuilder {
             None => Config::find(&root)?,
         };
 
-        let (registry, skipped) = ProviderRegistry::from_config(&config);
+        let (registry, skipped) = ProviderRegistry::from_config_at(&config, &root);
 
         let provider_id = self
             .provider_id
@@ -287,22 +287,39 @@ impl RuntimeBuilder {
             .ledger
             .unwrap_or_else(|| Arc::new(Mutex::new(Ledger::load())));
 
+        let provider_owns_agent_loop = provider.owns_agent_loop();
+
         // One condition, read twice: whether the ACP tool gets registered, and
         // whether the prompt is allowed to talk about it. Computing it in two
         // places would eventually let them disagree, and the failure mode is a
         // prompt describing a tool the model cannot see.
-        let external_delegate_enabled = self.enable_external_agents && !config.agents.is_empty();
+        let external_delegate_enabled =
+            self.enable_external_agents && !provider_owns_agent_loop && !config.agents.is_empty();
 
-        let mut base_system = self.system.unwrap_or_else(|| DEFAULT_SYSTEM.to_string());
+        let mut base_system = if provider_owns_agent_loop {
+            match self.system {
+                // The CLI and desktop deliberately pass the normal Zest base
+                // prompt into every runtime. It describes Zest's local tools,
+                // which Claude Code owns itself, so replace that exact default
+                // with the parent-provider guidance.
+                Some(system) if system == DEFAULT_SYSTEM => {
+                    crate::prompt::CLAUDE_CODE_PARENT_SYSTEM.to_string()
+                }
+                Some(system) => system,
+                None => crate::prompt::CLAUDE_CODE_PARENT_SYSTEM.to_string(),
+            }
+        } else {
+            self.system.unwrap_or_else(|| DEFAULT_SYSTEM.to_string())
+        };
         if external_delegate_enabled {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::EXTERNAL_DELEGATION_SYSTEM);
         }
-        if self.questioner.is_some() {
+        if self.questioner.is_some() && !provider_owns_agent_loop {
             base_system.push_str("\n\n");
             base_system.push_str(crate::prompt::INTERACTIVE_QUESTION_SYSTEM);
         }
-        if self.browser.is_some() {
+        if self.browser.is_some() && !provider_owns_agent_loop {
             base_system.push_str("\n\n");
             base_system.push_str(LOCAL_BROWSER_SYSTEM);
         }
@@ -320,23 +337,27 @@ impl RuntimeBuilder {
         };
 
         let mut worker_tools = ToolRegistry::new();
-        register_read_tools(&mut worker_tools, &root)
-            .map_err(|e| HarnessError::Other(format!("register read tools: {e}")))?;
-        if self.register_write {
-            register_write_tools(&mut worker_tools, &root)
-                .map_err(|e| HarnessError::Other(format!("register write tools: {e}")))?;
+        if !provider_owns_agent_loop {
+            register_read_tools(&mut worker_tools, &root)
+                .map_err(|e| HarnessError::Other(format!("register read tools: {e}")))?;
+            if self.register_write {
+                register_write_tools(&mut worker_tools, &root)
+                    .map_err(|e| HarnessError::Other(format!("register write tools: {e}")))?;
+            }
+            register_skill_tools(&mut worker_tools, skills.clone());
         }
-        register_skill_tools(&mut worker_tools, skills.clone());
 
         // `bash` is deliberately *not* in `worker_tools`. A delegated worker
         // runs on a different provider to think about something; letting it
         // also run shell commands widens the blast radius for no benefit that
         // the parent conversation cannot already provide.
         let mut tools = worker_tools.clone();
-        if let Some(browser) = self.browser {
-            register_browser_tool(&mut tools, browser);
+        if !provider_owns_agent_loop {
+            if let Some(browser) = self.browser {
+                register_browser_tool(&mut tools, browser);
+            }
         }
-        if self.register_exec && config.tools.bash.enabled {
+        if !provider_owns_agent_loop && self.register_exec && config.tools.bash.enabled {
             register_exec_tools(&mut tools, &root, config.tools.bash.settings())
                 .map_err(|e| HarnessError::Other(format!("register exec tools: {e}")))?;
         }
@@ -346,7 +367,7 @@ impl RuntimeBuilder {
         if external_delegate_enabled {
             tools.register(Arc::new(ExternalAgent::new(&root, config.agents.clone())));
         }
-        if self.questioner.is_some() {
+        if self.questioner.is_some() && !provider_owns_agent_loop {
             register_question_tool(&mut tools);
         }
 
@@ -384,7 +405,9 @@ impl RuntimeBuilder {
             warnings,
         })
     }
+}
 
+impl RuntimeSession {
     /// Resolve workspace root for callers that only have a path hint.
     pub fn root(&self) -> &Path {
         &self.root
@@ -559,6 +582,59 @@ provider = "codex"
             .unwrap();
         assert!(!disabled.agent.tool_names().contains(&"delegate_external"));
         std::env::remove_var("ZEST_EXTERNAL_RUNTIME_KEY");
+    }
+
+    #[test]
+    fn claude_code_parent_owns_tools_and_cannot_delegate() {
+        let dir = scratch("claude-code-parent");
+        let config = Config::parse(
+            r#"
+[providers.claude]
+kind = "claude_code"
+model = "sonnet"
+permission_mode = "accept_edits"
+
+[agents.review]
+mode = "headless"
+command = "review-agent"
+args = ["--output-format", "stream-json", "{prompt}"]
+workspace = "isolated"
+
+[default]
+provider = "claude"
+"#,
+        )
+        .unwrap();
+
+        let runtime = RuntimeBuilder::new(&dir)
+            .with_config(config)
+            .with_provider("claude")
+            .with_system(DEFAULT_SYSTEM)
+            .register_write_tools(true)
+            .register_exec_tools(true)
+            .enable_external_agents(true)
+            .build()
+            .unwrap();
+
+        assert!(runtime.agent.tool_names().is_empty());
+        assert!(runtime
+            .agent
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("parent coding agent"));
+        assert!(!runtime
+            .agent
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("File tools are scoped"));
+        assert!(!runtime
+            .agent
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("# External workers"));
     }
 
     /// Reproduces the reported failure: opening a folder that has no

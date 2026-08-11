@@ -37,6 +37,8 @@ function describe(event: ChatEvent): string | undefined {
       return event.name;
     case "tool_call_result":
       return event.isError ? `${event.name} failed` : event.name;
+    case "provider_activity":
+      return event.title;
     case "approval_needed":
       return `${event.tool_name} needs approval`;
     default:
@@ -97,6 +99,14 @@ export function reduceThreadActivity(
         startedAt: current?.startedAt ?? now,
         // The tool is finished; the thread is still working on the turn.
         tool: undefined,
+        lastAction: describe(event),
+      });
+
+    case "provider_activity":
+      return put({
+        state: "working",
+        startedAt: current?.startedAt ?? now,
+        tool: event.status === "running" ? event.title : undefined,
         lastAction: describe(event),
       });
 

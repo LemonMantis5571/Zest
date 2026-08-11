@@ -7,12 +7,16 @@
 ## Purpose
 
 Zest gives a coding agent a focused parent session: it reads and edits a project, runs commands,
-asks before risky work, shows diffs, and keeps the transcript recoverable.
+asks before risky work, shows diffs, and keeps the transcript recoverable. The parent can use the
+bundled gateway, a native API provider, an OpenAI-compatible endpoint, or an authenticated Claude
+Code subscription directly.
 
-When a task is better handled by another tool, Zest delegates a bounded subtask to an external
+When a task is better handled by another tool, Zest can delegate a bounded subtask to an external
 worker that is already authenticated in its own CLI. Claude Code and Gemini CLI are the first
 workers. Zest uses ACP or a non-interactive CLI, keeps the worker in an isolated workspace by
-default, requires approval before execution, and returns the answer and diff for review.
+default, requires approval before execution, and returns the answer and diff for review. Claude
+Code can also be selected as the parent provider; that path runs directly in the current project
+and does not create a delegated worker.
 
 Zest does not implement vendor OAuth for workers, embed their SDKs, or route individual tasks
 between Zest providers. External workers may opt in to their own CLI-managed MCP servers; Zest
@@ -31,9 +35,11 @@ component, no accounts or telemetry.
 - **zest** - terminal front-end. One consumer of the core.
 - **zest-desktop** - Tauri shell: provider picker, Codex Connect, API-key setup, ACP worker setup,
   project/chat history, attachments, approvals/diffs, context meter, and recovery controls.
-- **Provider layer** - one Provider per configured parent backend. Anthropic, gateway, and
-  OpenAI-compatible providers share the abstraction but do not imply task routing.
-- **ACP workers** - configured under [agents.<id>]; invoked only through delegate_external.
+- **Provider layer** - one Provider per configured parent backend. Anthropic, gateway,
+  OpenAI-compatible, and Claude Code parent providers share the abstraction but do not imply task
+  routing.
+- **ACP workers** - configured under [agents.<id>]; invoked only through delegate_external and
+  kept separate from the Claude Code parent provider.
 - **Usage ledger** - records Zest traffic honestly per provider. External CLI usage is not invented.
 - **Gateway** - bundled CLIProxyAPI sidecar for the supported subscription bootstrap. It is an
   implementation detail of provider access, not an external worker.

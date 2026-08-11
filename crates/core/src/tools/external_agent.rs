@@ -32,6 +32,7 @@ use super::prepared::PreparedToolCall;
 use super::project::ProjectRoot;
 use super::sensitive::is_sensitive_path;
 use super::Tool;
+use crate::cancel::{wait_cancel, CancelToken};
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
 use crate::usage::{ExternalCost, ExternalUsageReport};
@@ -52,6 +53,7 @@ const MAX_EXTERNAL_DIFF_BYTES: usize = 512 * 1024;
 const DIFF_CLIP_MARKER_BUDGET: usize = 96;
 const MAX_ACP_FILE_BYTES: usize = 1024 * 1024;
 const MAX_ACP_TERMINAL_OUTPUT_BYTES: usize = 64 * 1024;
+const EXTERNAL_RUN_CANCELLED: &str = "__zest_external_run_cancelled__";
 
 const EXTERNAL_WORKER_SYSTEM: &str = "You are an external worker invoked by Zest. Handle only the delegated task, inspect the project when needed, and report the result concisely. Do not address the end user or claim that Zest itself performed your work.";
 
@@ -64,6 +66,9 @@ const EXTERNAL_WORKER_SYSTEM: &str = "You are an external worker invoked by Zest
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalAgentEvent {
     Text(String),
+    /// A text fragment from a provider's live stream. It is separate from
+    /// `Text` because a final result may repeat the complete answer.
+    TextDelta(String),
     Thinking(String),
     ToolCall {
         id: String,
@@ -78,11 +83,11 @@ pub enum ExternalAgentEvent {
 }
 
 #[derive(Debug, Default)]
-struct ExternalAgentRun {
-    events: Vec<ExternalAgentEvent>,
-    malformed_lines: usize,
-    diff: String,
-    usage: Option<ExternalUsageReport>,
+pub(crate) struct ExternalAgentRun {
+    pub(crate) events: Vec<ExternalAgentEvent>,
+    pub(crate) malformed_lines: usize,
+    pub(crate) diff: String,
+    pub(crate) usage: Option<ExternalUsageReport>,
 }
 
 impl ExternalAgentRun {
@@ -97,7 +102,7 @@ impl ExternalAgentRun {
         }
     }
 
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         let mut text = String::new();
         for event in &self.events {
             let value = match event {
@@ -112,10 +117,28 @@ impl ExternalAgentRun {
             }
             text.push_str(value);
         }
+        if !text.trim().is_empty() {
+            return text;
+        }
+
+        // Some provider streams expose only partial events and no final
+        // assistant envelope. Preserve their exact chunk boundaries instead
+        // of inserting newlines between them.
+        for event in &self.events {
+            if let ExternalAgentEvent::TextDelta(value) = event {
+                text.push_str(value);
+            }
+        }
         text
     }
 
-    fn errors(&self) -> Vec<&str> {
+    pub(crate) fn has_streamed_text(&self) -> bool {
+        self.events
+            .iter()
+            .any(|event| matches!(event, ExternalAgentEvent::TextDelta(value) if !value.is_empty()))
+    }
+
+    pub(crate) fn errors(&self) -> Vec<&str> {
         self.events
             .iter()
             .filter_map(|event| match event {
@@ -123,6 +146,10 @@ impl ExternalAgentRun {
                 _ => None,
             })
             .collect()
+    }
+
+    pub(crate) fn usage(&self) -> Option<ExternalUsageReport> {
+        self.usage.clone()
     }
 
     fn has_same_text(&self, candidate: &str) -> bool {
@@ -460,6 +487,35 @@ async fn run_external(
     }
 }
 
+/// Run a headless provider while forwarding normalized events as they arrive.
+///
+/// The sink is used only for provider-owned parent loops. Explicit delegated
+/// workers continue through the non-streaming wrapper so their tool lifecycle
+/// remains represented by Zest's single delegation card.
+pub(crate) async fn run_headless_command_streaming(
+    cwd: &Path,
+    config: &ExternalAgentConfig,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+    on_event: &mut ExternalEventSink<'_>,
+) -> Result<ExternalAgentRun, crate::error::HarnessError> {
+    validate_config(config).map_err(crate::error::HarnessError::Other)?;
+    if config.mode != ExternalAgentMode::Headless {
+        return Err(crate::error::HarnessError::Other(
+            "parent CLI provider must use headless mode".into(),
+        ));
+    }
+    spawn_and_run_with_cancel(cwd, config, prompt, cancel, Some(on_event))
+        .await
+        .map_err(|error| {
+            if error == EXTERNAL_RUN_CANCELLED {
+                crate::error::HarnessError::Cancelled
+            } else {
+                crate::error::HarnessError::Other(error)
+            }
+        })
+}
+
 fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {
     if config.command.trim().is_empty() {
         return Err("the configured command is empty".to_string());
@@ -607,6 +663,18 @@ async fn spawn_and_run(
     config: &ExternalAgentConfig,
     prompt: &str,
 ) -> Result<ExternalAgentRun, String> {
+    spawn_and_run_with_cancel(cwd, config, prompt, None, None).await
+}
+
+pub(crate) type ExternalEventSink<'a> = dyn FnMut(ExternalAgentEvent) + Send + 'a;
+
+async fn spawn_and_run_with_cancel(
+    cwd: &Path,
+    config: &ExternalAgentConfig,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+    on_event: Option<&mut ExternalEventSink<'_>>,
+) -> Result<ExternalAgentRun, String> {
     let args = expanded_args(config, prompt);
     let mut command = Command::new(&config.command);
     command
@@ -655,7 +723,7 @@ async fn spawn_and_run(
     let run_result = tokio::select! {
         result = async {
             match mode {
-                ExternalAgentMode::Headless => run_headless(stdout).await,
+                ExternalAgentMode::Headless => run_headless(stdout, on_event).await,
                 ExternalAgentMode::Acp => {
                     let stdin = stdin.ok_or_else(|| "ACP agent stdin was not piped".to_string())?;
                     run_acp(stdin, stdout, cwd, prompt).await
@@ -664,6 +732,9 @@ async fn spawn_and_run(
         } => result,
         _ = sleep(timeout) => {
             Err(format!("timed out after {} seconds", timeout.as_secs()))
+        }
+        _ = wait_cancel(cancel) => {
+            Err(EXTERNAL_RUN_CANCELLED.to_string())
         }
     };
     let mut result = match run_result {
@@ -679,7 +750,17 @@ async fn spawn_and_run(
     };
 
     let remaining = timeout.saturating_sub(started.elapsed());
-    let status = match tokio::time::timeout(remaining, child.wait()).await {
+    let status = match tokio::select! {
+        result = tokio::time::timeout(remaining, child.wait()) => result,
+        _ = wait_cancel(cancel) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            if let Some(task) = stderr_task.take() {
+                let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+            }
+            return Err(EXTERNAL_RUN_CANCELLED.to_string());
+        }
+    } {
         Ok(result) => result.map_err(|error| format!("wait for {}: {error}", config.command))?,
         Err(_) => {
             let _ = child.start_kill();
@@ -961,7 +1042,10 @@ fn expand_windows_environment(value: &str) -> String {
     expanded
 }
 
-async fn run_headless(stdout: ChildStdout) -> Result<ExternalAgentRun, String> {
+async fn run_headless(
+    stdout: ChildStdout,
+    mut on_event: Option<&mut ExternalEventSink<'_>>,
+) -> Result<ExternalAgentRun, String> {
     let mut reader = BufReader::new(stdout);
     let mut run = ExternalAgentRun::default();
     let mut line = String::new();
@@ -979,14 +1063,26 @@ async fn run_headless(stdout: ChildStdout) -> Result<ExternalAgentRun, String> {
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(value) => absorb_headless_value(&value, &mut run),
+            Ok(value) => {
+                let event_start = run.events.len();
+                absorb_headless_value(&value, &mut run);
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    for event in run.events[event_start..].iter().cloned() {
+                        on_event(event);
+                    }
+                }
+            }
             Err(_) => {
                 // Some CLIs print a short startup banner even with JSONL
                 // selected. Preserve it as text, but remember the stream was
                 // not fully structured so a wholly malformed response is
                 // reported explicitly instead of looking like an empty answer.
                 run.malformed_lines += 1;
-                run.events.push(ExternalAgentEvent::Text(line.to_string()));
+                let text = line.to_string();
+                run.events.push(ExternalAgentEvent::Text(text.clone()));
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    on_event(ExternalAgentEvent::Text(text));
+                }
             }
         }
     }
@@ -1000,6 +1096,7 @@ fn absorb_headless_value(value: &Value, run: &mut ExternalAgentRun) {
     }
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
+        "stream_event" => absorb_claude_stream_event(value, run),
         "error" => {
             if let Some(text) = error_text(value.get("error")).or_else(|| error_text(Some(value))) {
                 run.events.push(ExternalAgentEvent::Error(text));
@@ -1068,12 +1165,110 @@ fn absorb_headless_value(value: &Value, run: &mut ExternalAgentRun) {
                 if let Some(text) = text_value(content) {
                     run.events.push(ExternalAgentEvent::Text(text));
                 }
+                absorb_content_tool_events(content, run);
             }
+        }
+        "user" => {
+            let content = value.get("content").or_else(|| {
+                value
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+            });
+            absorb_content_tool_events(content, run);
         }
         _ => {
             if let Some(text) = value.get("response").and_then(Value::as_str) {
                 run.events.push(ExternalAgentEvent::Text(text.to_string()));
             }
+        }
+    }
+}
+
+fn absorb_claude_stream_event(value: &Value, run: &mut ExternalAgentRun) {
+    let event = value.get("event").unwrap_or(value);
+    if let Some(report) = external_usage_from_value(event) {
+        run.merge_usage(report);
+    }
+    match event.get("type").and_then(Value::as_str).unwrap_or("") {
+        "content_block_delta" => {
+            let Some(delta) = event.get("delta") else {
+                return;
+            };
+            match delta.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text_delta" => {
+                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                        run.events
+                            .push(ExternalAgentEvent::TextDelta(text.to_string()));
+                    }
+                }
+                "thinking_delta" => {
+                    if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                        run.events
+                            .push(ExternalAgentEvent::Thinking(text.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        "content_block_start" => {
+            let Some(block) = event.get("content_block") else {
+                return;
+            };
+            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                run.events.push(ExternalAgentEvent::ToolCall {
+                    id: block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("external-tool")
+                        .to_string(),
+                    title: block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Claude tool")
+                        .to_string(),
+                    status: "in_progress".into(),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn absorb_content_tool_events(content: Option<&Value>, run: &mut ExternalAgentRun) {
+    let Some(items) = content.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        match item.get("type").and_then(Value::as_str).unwrap_or("") {
+            "tool_use" | "tool_call" => run.events.push(ExternalAgentEvent::ToolCall {
+                id: item
+                    .get("id")
+                    .or_else(|| item.get("toolCallId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("external-tool")
+                    .to_string(),
+                title: item
+                    .get("name")
+                    .or_else(|| item.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("External tool")
+                    .to_string(),
+                status: "in_progress".into(),
+            }),
+            "tool_result" => {
+                if let Some(id) = item
+                    .get("tool_use_id")
+                    .or_else(|| item.get("toolCallId"))
+                    .and_then(Value::as_str)
+                {
+                    run.events.push(ExternalAgentEvent::ToolCall {
+                        id: id.to_string(),
+                        title: "External tool".into(),
+                        status: "completed".into(),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2609,6 +2804,61 @@ mod tests {
     }
 
     #[test]
+    fn parses_claude_partial_text_and_provider_tool_activity() {
+        let mut run = ExternalAgentRun::default();
+        absorb_headless_value(
+            &json!({
+                "type":"stream_event",
+                "event":{
+                    "type":"content_block_delta",
+                    "delta":{"type":"text_delta","text":"hel"}
+                }
+            }),
+            &mut run,
+        );
+        absorb_headless_value(
+            &json!({
+                "type":"stream_event",
+                "event":{
+                    "type":"content_block_delta",
+                    "delta":{"type":"text_delta","text":"lo"}
+                }
+            }),
+            &mut run,
+        );
+        absorb_headless_value(
+            &json!({
+                "type":"stream_event",
+                "event":{
+                    "type":"content_block_start",
+                    "content_block":{"type":"tool_use","id":"tool-1","name":"Read"}
+                }
+            }),
+            &mut run,
+        );
+        absorb_headless_value(
+            &json!({
+                "type":"user",
+                "message":{"content":[{"type":"tool_result","tool_use_id":"tool-1"}]}
+            }),
+            &mut run,
+        );
+
+        assert_eq!(run.text(), "hello");
+        assert!(run.has_streamed_text());
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            ExternalAgentEvent::ToolCall { id, title, status }
+                if id == "tool-1" && title == "Read" && status == "in_progress"
+        )));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            ExternalAgentEvent::ToolCall { id, status, .. }
+                if id == "tool-1" && status == "completed"
+        )));
+    }
+
+    #[test]
     fn keeps_worker_reasoning_out_of_the_parent_answer() {
         let run = ExternalAgentRun {
             events: vec![
@@ -2793,6 +3043,51 @@ mod tests {
 
         assert_eq!(run.text(), "worker ok");
         assert!(run.errors().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn forwards_headless_partial_events_before_the_final_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ExternalAgentConfig {
+            mode: ExternalAgentMode::Headless,
+            command: "powershell.exe".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-File".into(),
+                format!(
+                    "{}\\tests\\fixtures\\external_agent_stream_smoke.ps1",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+                PROMPT_PLACEHOLDER.into(),
+            ],
+            allow_mcp: false,
+            model: None,
+            workspace: ExternalWorkspace::Current,
+            timeout_secs: 30,
+        };
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        let run =
+            run_headless_command_streaming(temp.path(), &config, "stream task", None, &mut sink)
+                .await
+                .unwrap();
+
+        assert_eq!(run.text(), "hello");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExternalAgentEvent::TextDelta(text) if text == "hello"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExternalAgentEvent::ToolCall { id, status, .. }
+                if id == "tool-1" && status == "in_progress"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExternalAgentEvent::ToolCall { id, status, .. }
+                if id == "tool-1" && status == "completed"
+        )));
     }
 
     #[tokio::test]
