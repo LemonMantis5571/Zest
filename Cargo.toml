@@ -6,7 +6,7 @@ members = ["crates/core", "crates/cli", "crates/desktop"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Plan with a frontier model, delegate the execution to the model that does each task best."
+description = "A local-first coding workspace with approvals, diffs, and optional model delegation."
 
 [workspace.lints.rust]
 linker_messages = "allow"

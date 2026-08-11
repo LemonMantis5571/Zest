@@ -1,110 +1,95 @@
 # Contributing
 
-Zest is Windows-first, with Linux coverage in CI and cross-platform code paths
-throughout core, CLI, and desktop. macOS keychain and file-open paths exist but
-are not yet CI-verified. Small, focused changes are easier to review than large
-refactors, especially around the provider, approval, gateway, and ACP
-boundaries.
+Thanks for helping improve Zest. Small, focused changes are easier to review
+and safer to release than broad refactors.
 
 ## Before you start
 
-Read:
+Read the [README](README.md) for the product workflow and supported platforms.
+For release work, also read [docs/RELEASING.md](docs/RELEASING.md).
 
-1. [`AGENTS.md`](AGENTS.md) and [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md);
-2. the relevant files under [`context/`](context/); and
-3. the matching skill and durable corrections under [`skills/`](skills/) and
-   [`memory/`](memory/).
+Use the toolchain versions pinned in `rust-toolchain.toml`, `.nvmrc`, and
+`package.json`:
 
-Use Rust 1.97.1, Node 24.16.0, and npm 11.13.0. The pinned versions are in
-`rust-toolchain.toml`, `.nvmrc`, and `package.json`.
+- Rust 1.97.1
+- Node.js 24.16.0+
+- npm 11.13.0+
 
 ## Local development
 
-~~~sh
+From the repository root:
+
+```powershell
 npm ci
+./scripts/fetch-gateway.ps1
 npm run ui:build
-npm run desktop:dev       # Tauri + Vite hot reload
-cargo run -p zest          # terminal front-end
-~~~
+npm run desktop:dev
+```
 
-The desktop UI is in `crates/desktop/ui`. The Rust command layer is in
-`crates/desktop/src`, and provider/tool behavior belongs in `crates/core`.
-Regenerate TypeScript bindings only through the documented ts-rs test when
-changing the DTOs in `crates/desktop/src/lib.rs`.
+Run the terminal client with:
 
-## Verification before a PR
+```powershell
+cargo run -p zest
+```
 
-Run the local verification gate:
+The shared Rust library is in `crates/core`, the terminal client is in
+`crates/cli`, and the desktop application is in `crates/desktop`. The desktop
+web UI lives in `crates/desktop/ui`.
 
-~~~sh
-npm run verify
-~~~
+When changing desktop data types, regenerate TypeScript bindings using the
+existing ts-rs test workflow rather than editing generated files by hand.
 
-This runs the cross-platform local UI and Rust checks without fetching a
-release sidecar or starting a gateway. The full release/CI gate, including
-binding drift, audits, and sidecar provenance, remains
-`scripts/release-verify.ps1`. Keep live-provider verification separate: it
-requires credentials and consumes real quota.
+## Verification
+
+Run the repository verification gate before opening a pull request:
+
+```powershell
+./scripts/release-verify.ps1
+```
+
+The gate checks formatting, linting, Rust and UI tests, generated bindings,
+dependency advisories, and Git whitespace. Live provider checks are separate:
+they require credentials and may consume real quota.
+
+Add a focused regression test for behavior changes. For UI changes, update the
+relevant characterization tests under `crates/desktop/ui/src`.
+
+## Keep out of commits
 
 Do not commit:
 
-- API keys, gateway keys, `.env` files, credential-manager exports, or private
-  signing keys;
+- API keys, gateway keys, `.env` files, credential-manager exports, or signing
+  keys;
 - downloaded gateway binaries or generated `ui/dist` output; or
-- signing overlays containing local certificate configuration.
+- local signing configuration or personal `zest.toml` files.
 
-`zest.toml` is ignored because it is normally a local/project override. Use
-`zest.toml.example` for shareable configuration documentation, and never force-
-add a personal config or put a secret value in either file.
-
-## Packaging
-
-The exact sidecar and release process are documented in
-[docs/RELEASING.md](docs/RELEASING.md). The short path is:
-
-~~~powershell
-./scripts/fetch-gateway.ps1 -Check
-npm run desktop:build
-./scripts/release-checksums.ps1 -OutFile SHA256SUMS.txt
-~~~
-
-The package must contain the CLIProxyAPI release pinned in
-`crates/desktop/gateway-release.json` and the matching
-`crates/desktop/licenses/CLIProxyAPI-LICENSE.txt` notice. Public or commercial
-distribution requires a current review of the upstream vendor terms; the
-notice covers the bundled software license, not every provider service.
-
-Before calling an installer ready, use a clean Windows profile with no source
-checkout, Rust, Node.js, hand-installed gateway, or existing Zest state. Test
-first-run gateway provisioning, Codex sign-in, API-key presence without key
-rendering, a denied approval, restart persistence, and useful missing-CLI
-errors.
+Use [`zest.toml.example`](zest.toml.example) for shareable configuration
+documentation.
 
 ## Code and UI conventions
 
-- Keep provider-independent agent behavior in `crates/core`.
-- Treat approval, credential, gateway, and worktree boundaries as security
-  boundaries; do not broaden them for convenience.
-- Keep user-facing copy actionable and free of internal debugging language.
-- Use the existing design tokens and local UI primitives. Avoid adding portal
-  components that regress in the Tauri WebView.
-- Add a focused regression test for behavior changes. For UI state, add or
-  update the characterization tests under `crates/desktop/ui/src`.
+- Keep provider-independent behavior in `crates/core`.
+- Preserve approval and credential boundaries when changing execution paths.
+- Keep user-facing copy actionable and free of debugging details.
+- Reuse the existing design tokens and local UI primitives.
+- Explain why non-obvious code exists, especially around process and security
+  boundaries.
 
-## Commit style
+## Pull requests
 
-Use [Conventional Commits](https://www.conventionalcommits.org/), for example:
+Use [Conventional Commits](https://www.conventionalcommits.org/), such as:
 
-~~~text
+```text
 feat(provider): add compatible endpoint setup
 fix(cli): handle streamed tool metadata
 docs(release): explain beta installers
 chore(deps): remove unused direct dependency
-~~~
+```
 
-Keep commits scoped and explain any user-visible migration in the body.
+Keep each pull request scoped. Describe user-visible behavior, verification
+performed, and any migration or release impact.
 
 ## Security reports
 
-Do not use a public issue for a vulnerability. Follow
-[SECURITY.md](SECURITY.md) and use a private GitHub Security Advisory.
+Do not open a public issue for a vulnerability. Follow the private reporting
+process in [SECURITY.md](SECURITY.md).
