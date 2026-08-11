@@ -26,12 +26,23 @@ type LinkElement = {
   props?: { href?: string; children?: ReactNode };
 };
 
+function safeHttpUrl(value: string | null | undefined): string | null {
+  const href = value?.trim();
+  if (!href) return null;
+  try {
+    const url = new URL(href);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function standaloneLink(children: ReactNode): { href: string; label: ReactNode } | null {
   const child = Array.isArray(children) && children.length === 1 ? children[0] : children;
   if (!isValidElement(child)) return null;
   const props = (child as unknown as LinkElement).props;
-  const href = props?.href?.trim();
-  if (!href || !/^https?:\/\//i.test(href)) return null;
+  const href = safeHttpUrl(props?.href);
+  if (!href) return null;
   return { href, label: props?.children ?? href };
 }
 
@@ -79,11 +90,16 @@ function componentsFor(streaming: boolean): Components {
     <strong className="font-semibold text-foreground">{children}</strong>
   ),
   em: ({ children }) => <em className="italic">{children}</em>,
-  a: ({ href, children }) => (
-    <a href={href} target="_blank" rel="noreferrer" className={linkClassName}>
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => {
+    const safeHref = safeHttpUrl(href);
+    return safeHref ? (
+      <a href={safeHref} target="_blank" rel="noreferrer" className={linkClassName}>
+        {children}
+      </a>
+    ) : (
+      <span>{children}</span>
+    );
+  },
   ul: ({ children }) => (
     <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
   ),
