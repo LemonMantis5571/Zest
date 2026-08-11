@@ -14,6 +14,7 @@ pub mod commands;
 pub mod config;
 pub mod config_edit;
 pub mod credentials;
+pub mod delegation;
 pub mod error;
 pub mod fsutil;
 pub mod gateway;
@@ -59,6 +60,13 @@ pub use config::{
     ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
     ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, ProviderConfig, Target,
     DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_USER_CONFIG,
+};
+pub use delegation::{
+    apply_diff_checked, capture_workspace_snapshot, diff_paths, validate_diff_paths,
+    validate_diff_scope, validate_review_paths, AcceptanceCheckResult, AttemptRole, CheckStatus,
+    DelegationArtifacts, DelegationAttempt, DelegationJob, DelegationStatus, DelegationStore,
+    FeatureCard, ReviewDecision, ReviewFinding, ReviewReport, ReviewSeverity, WorkerResult,
+    WorkspaceSnapshot,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
@@ -108,7 +116,10 @@ pub use tools::approval::{
     ApprovalRequest, Approver, DenyApprover, PolicyOutcome, ToolRisk,
 };
 pub use tools::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
-pub use tools::external_agent::{prepare_external_command, ExternalAgent, EXTERNAL_AGENT_TOOL};
+pub use tools::external_agent::{
+    prepare_external_command, run_delegation_reviewer, run_delegation_worker, ExternalAgent,
+    ExternalAgentResult, EXTERNAL_AGENT_TOOL,
+};
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
 pub use tools::list_dir::ListDir;
@@ -121,7 +132,8 @@ pub use tools::sensitive::is_sensitive_path;
 pub use tools::write_file::WriteFile;
 pub use tools::{
     register_browser_tool, register_question_tool, register_read_tools, register_skill_tools,
-    register_write_tools, Tool, ToolMetadata, ToolOutcome, ToolRegistry,
+    register_write_tools, FeatureDelegator, Tool, ToolMetadata, ToolOutcome, ToolRegistry,
+    DELEGATE_FEATURE_TOOL,
 };
 pub use transcripts::{CliKind, ScanResult, ScanStatus};
 pub use usage::{

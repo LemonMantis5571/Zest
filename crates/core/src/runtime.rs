@@ -22,7 +22,7 @@ use crate::tools::external_agent::ExternalAgent;
 use crate::tools::question::{DenyQuestioner, Questioner};
 use crate::tools::{
     register_browser_tool, register_exec_tools, register_question_tool, register_read_tools,
-    register_skill_tools, register_write_tools, BrowserAdapter, ToolRegistry,
+    register_skill_tools, register_write_tools, BrowserAdapter, FeatureDelegator, ToolRegistry,
 };
 use crate::usage::Ledger;
 
@@ -65,6 +65,7 @@ pub struct RuntimeBuilder {
     policy: Option<Arc<Mutex<ApprovalPolicy>>>,
     browser: Option<Arc<dyn BrowserAdapter>>,
     enable_external_agents: bool,
+    parent_thread_id: Option<String>,
     register_write: bool,
     register_exec: bool,
 }
@@ -85,6 +86,7 @@ impl RuntimeBuilder {
             policy: None,
             browser: None,
             enable_external_agents: true,
+            parent_thread_id: None,
             register_write: true,
             register_exec: true,
         }
@@ -165,6 +167,13 @@ impl RuntimeBuilder {
 
     pub fn enable_external_agents(mut self, on: bool) -> Self {
         self.enable_external_agents = on;
+        self
+    }
+
+    /// Stable coordinator identity used by feature-card jobs. Direct CLI
+    /// callers may omit it; the desktop supplies the durable thread id.
+    pub fn with_parent_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.parent_thread_id = Some(thread_id.into());
         self
     }
 
@@ -366,6 +375,12 @@ impl RuntimeBuilder {
 
         if external_delegate_enabled {
             tools.register(Arc::new(ExternalAgent::new(&root, config.agents.clone())));
+            tools.register(Arc::new(FeatureDelegator::new(
+                &root,
+                config.agents.clone(),
+                self.parent_thread_id
+                    .unwrap_or_else(|| "coordinator".to_string()),
+            )));
         }
         if self.questioner.is_some() && !provider_owns_agent_loop {
             register_question_tool(&mut tools);
@@ -565,6 +580,7 @@ provider = "codex"
             .build()
             .unwrap();
         assert!(enabled.agent.tool_names().contains(&"delegate_external"));
+        assert!(enabled.agent.tool_names().contains(&"delegate_feature"));
         assert!(enabled
             .agent
             .system

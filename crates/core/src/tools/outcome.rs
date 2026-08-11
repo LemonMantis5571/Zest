@@ -62,6 +62,16 @@ pub enum ToolMetadata {
         /// written into thread history or sent to the model.
         #[serde(skip)]
         usage: Option<crate::usage::ExternalUsageReport>,
+        /// Additive orchestration identity. Older direct delegation metadata
+        /// omits these fields and remains valid through serde defaults.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review_status: Option<String>,
     },
 }
 
@@ -95,6 +105,10 @@ mod tests {
                 input_tokens: Some(12),
                 ..Default::default()
             }),
+            job_id: None,
+            stage: None,
+            attempt: None,
+            review_status: None,
         };
         let value = serde_json::to_value(&metadata).unwrap();
         assert_eq!(value["kind"], "delegation");

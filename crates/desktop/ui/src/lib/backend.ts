@@ -9,6 +9,8 @@ import type {
   CommandView,
   AttachmentInput,
   ChatEvent,
+  DelegationEvent,
+  DelegationJob,
   ContextUsage,
   ExternalAgentCheck,
   ExternalAgentRow,
@@ -152,6 +154,12 @@ export type DesktopBackend = {
   getUserProfile(): Promise<UserProfile>;
   setUserProfile(profile: UserProfile): Promise<UserProfile>;
   onChatEvent(handler: (event: ChatEvent) => void): Promise<UnlistenFn>;
+  listDelegationJobs(): Promise<DelegationJob[]>;
+  getDelegationJob(jobId: string): Promise<DelegationJob>;
+  cancelDelegationJob(jobId: string): Promise<DelegationJob>;
+  retryDelegationJob(jobId: string): Promise<DelegationJob>;
+  applyDelegationJob(jobId: string): Promise<DelegationJob>;
+  onDelegationEvent(handler: (event: DelegationEvent) => void): Promise<UnlistenFn>;
   /** Optional boot hook (fixture streams a canned turn). */
   boot?(handler: (event: ChatEvent) => void): Promise<void> | void;
 };
@@ -232,6 +240,12 @@ export function createTauriBackend(): DesktopBackend {
     getUserProfile: () => tauriApi.getUserProfile(),
     setUserProfile: (profile) => tauriApi.setUserProfile(profile),
     onChatEvent: (handler) => tauriApi.onChatEvent(handler),
+    listDelegationJobs: () => tauriApi.listDelegationJobs(),
+    getDelegationJob: (jobId) => tauriApi.getDelegationJob(jobId),
+    cancelDelegationJob: (jobId) => tauriApi.cancelDelegationJob(jobId),
+    retryDelegationJob: (jobId) => tauriApi.retryDelegationJob(jobId),
+    applyDelegationJob: (jobId) => tauriApi.applyDelegationJob(jobId),
+    onDelegationEvent: (handler) => tauriApi.onDelegationEvent(handler),
   };
 }
 
