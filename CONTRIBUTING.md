@@ -20,9 +20,8 @@ Use Rust 1.97.1, Node 24.16.0, and npm 11.13.0. The pinned versions are in
 
 ## Local development
 
-~~~powershell
+~~~sh
 npm ci
-./scripts/fetch-gateway.ps1
 npm run ui:build
 npm run desktop:dev       # Tauri + Vite hot reload
 cargo run -p zest          # terminal front-end
@@ -35,16 +34,17 @@ changing the DTOs in `crates/desktop/src/lib.rs`.
 
 ## Verification before a PR
 
-Run the same gate as Windows CI:
+Run the local verification gate:
 
-~~~powershell
-./scripts/verify.ps1
+~~~sh
+npm run verify
 ~~~
 
-It runs the gateway pin check, `npm ci`, UI test/lint/build, Rust formatting,
-strict clippy, workspace library tests, binding drift, npm audit, RustSec, and
-Git whitespace checks. Keep live-provider verification separate: it requires
-credentials and consumes real quota.
+This runs the cross-platform local UI and Rust checks without fetching a
+release sidecar or starting a gateway. The full release/CI gate, including
+binding drift, audits, and sidecar provenance, remains
+`scripts/release-verify.ps1`. Keep live-provider verification separate: it
+requires credentials and consumes real quota.
 
 Do not commit:
 

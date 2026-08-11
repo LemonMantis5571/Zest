@@ -36,6 +36,7 @@ pub struct ClaudeCodeProvider {
 }
 
 impl ClaudeCodeProvider {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
         root: impl Into<PathBuf>,
@@ -252,7 +253,7 @@ fn parent_prompt(req: &TurnRequest) -> String {
             "user" => "User",
             other => other,
         };
-        prompt.push_str("\n");
+        prompt.push('\n');
         prompt.push_str(role);
         prompt.push_str(":\n");
         let text = render_content(&message.content);

@@ -290,6 +290,25 @@ fn default_external_timeout_secs() -> u64 {
 }
 
 impl ProviderConfig {
+    /// Whether this provider entry reaches a backend through CLIProxyAPI.
+    ///
+    /// This is deliberately a pure config decision. Callers must not infer
+    /// gateway use from a provider id, an installed sidecar, credentials, or a
+    /// listening port.
+    pub fn is_gateway(&self) -> bool {
+        matches!(self, Self::Gateway { .. })
+    }
+
+    /// The configured origin for a gateway provider, if this entry is one.
+    pub fn gateway_base_url(&self) -> Option<&str> {
+        match self {
+            Self::Gateway { base_url, .. } => Some(base_url),
+            Self::Anthropic { .. } | Self::ClaudeCode { .. } | Self::OpenaiCompatible { .. } => {
+                None
+            }
+        }
+    }
+
     pub fn key_env(&self) -> Option<&str> {
         match self {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
@@ -701,6 +720,40 @@ permission_mode = "accept_edits"
             }
             other => panic!("expected Claude Code provider, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gateway_decision_is_based_only_on_provider_kind() {
+        let config = Config::parse(
+            r#"
+[providers.gateway]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-sol"
+
+[providers.claude]
+kind = "claude_code"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+model = "local"
+"#,
+        )
+        .expect("valid provider-kind config");
+
+        assert!(config.providers["gateway"].is_gateway());
+        assert_eq!(
+            config.providers["gateway"].gateway_base_url(),
+            Some("http://127.0.0.1:8317")
+        );
+        assert!(!config.providers["claude"].is_gateway());
+        assert!(!config.providers["anthropic"].is_gateway());
+        assert!(!config.providers["local"].is_gateway());
+        assert_eq!(config.providers["local"].gateway_base_url(), None);
     }
 
     #[test]

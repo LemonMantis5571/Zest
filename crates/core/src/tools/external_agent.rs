@@ -742,10 +742,19 @@ async fn spawn_and_run_with_cancel(
         Err(error) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            if let Some(task) = stderr_task.take() {
-                let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
-            }
-            return Err(error);
+            let stderr = match stderr_task.take() {
+                Some(task) => tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            return Err(if stderr.is_empty() {
+                error
+            } else {
+                format!("{error}: {}", clip(&stderr))
+            });
         }
     };
 
@@ -3045,27 +3054,10 @@ mod tests {
         assert!(run.errors().is_empty());
     }
 
-    #[cfg(windows)]
     #[tokio::test]
     async fn forwards_headless_partial_events_before_the_final_result() {
         let temp = tempfile::tempdir().unwrap();
-        let config = ExternalAgentConfig {
-            mode: ExternalAgentMode::Headless,
-            command: "powershell.exe".into(),
-            args: vec![
-                "-NoProfile".into(),
-                "-File".into(),
-                format!(
-                    "{}\\tests\\fixtures\\external_agent_stream_smoke.ps1",
-                    env!("CARGO_MANIFEST_DIR")
-                ),
-                PROMPT_PLACEHOLDER.into(),
-            ],
-            allow_mcp: false,
-            model: None,
-            workspace: ExternalWorkspace::Current,
-            timeout_secs: 30,
-        };
+        let config = fixture_config("stream", true);
         let mut events = Vec::new();
         let mut sink = |event| events.push(event);
         let run =
@@ -3158,27 +3150,11 @@ mod tests {
         remove_worktree(temp.path(), &worktree).await.unwrap();
     }
 
-    #[cfg(windows)]
     #[tokio::test]
     async fn completes_an_acp_handshake_and_answers_child_permission_requests() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("input.txt"), "source").unwrap();
-        let config = ExternalAgentConfig {
-            mode: ExternalAgentMode::Acp,
-            command: "powershell.exe".into(),
-            args: vec![
-                "-NoProfile".into(),
-                "-File".into(),
-                format!(
-                    "{}\\tests\\fixtures\\external_agent_acp_smoke.ps1",
-                    env!("CARGO_MANIFEST_DIR")
-                ),
-            ],
-            allow_mcp: false,
-            model: None,
-            workspace: ExternalWorkspace::Current,
-            timeout_secs: 30,
-        };
+        let config = fixture_config("acp", false);
 
         let run = run_current(temp.path(), &config, "ACP task").await.unwrap();
         assert_eq!(run.text(), "acp ok");
@@ -3192,43 +3168,54 @@ mod tests {
     }
 
     fn headless_smoke_config() -> ExternalAgentConfig {
-        #[cfg(windows)]
-        {
-            ExternalAgentConfig {
-                mode: ExternalAgentMode::Headless,
-                command: "powershell.exe".into(),
-                args: vec![
-                    "-NoProfile".into(),
-                    "-File".into(),
-                    format!(
-                        "{}\\tests\\fixtures\\external_agent_smoke.ps1",
-                        env!("CARGO_MANIFEST_DIR")
-                    ),
-                    PROMPT_PLACEHOLDER.into(),
-                ],
-                allow_mcp: false,
-                model: None,
-                workspace: ExternalWorkspace::Current,
-                timeout_secs: 30,
-            }
-        }
+        fixture_config("headless", true)
+    }
 
-        #[cfg(not(windows))]
-        {
-            ExternalAgentConfig {
-                mode: ExternalAgentMode::Headless,
-                command: "sh".into(),
-                args: vec![
-                    "-c".into(),
-                    "printf '%s\\n' '{\"type\":\"result\",\"response\":\"worker ok\"}'".into(),
-                    "_".into(),
-                    PROMPT_PLACEHOLDER.into(),
-                ],
-                allow_mcp: false,
-                model: None,
-                workspace: ExternalWorkspace::Current,
-                timeout_secs: 30,
-            }
+    fn fixture_config(mode: &str, prompt: bool) -> ExternalAgentConfig {
+        let mut args = vec![mode.to_string()];
+        if prompt {
+            args.push(PROMPT_PLACEHOLDER.to_string());
         }
+        ExternalAgentConfig {
+            mode: if mode == "acp" {
+                ExternalAgentMode::Acp
+            } else {
+                ExternalAgentMode::Headless
+            },
+            command: fixture_binary().to_string_lossy().into_owned(),
+            args,
+            allow_mcp: false,
+            model: None,
+            workspace: ExternalWorkspace::Current,
+            timeout_secs: 30,
+        }
+    }
+
+    fn fixture_binary() -> &'static std::path::PathBuf {
+        static FIXTURE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("external_agent_fixture.rs");
+            let output = std::env::temp_dir().join(format!(
+                "zest-external-agent-fixture-{}{}",
+                std::process::id(),
+                std::env::consts::EXE_SUFFIX
+            ));
+            let result = std::process::Command::new("rustc")
+                .args(["--edition=2021"])
+                .arg(&source)
+                .arg("-o")
+                .arg(&output)
+                .output()
+                .expect("start rustc for external-agent fixture");
+            assert!(
+                result.status.success(),
+                "fixture compilation failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            output
+        })
     }
 }

@@ -30,9 +30,9 @@ use zest_core::{
     descriptor_from_config, detect_all, detect_claude_code, display_path, ensure_gateway_running,
     env_context, load_custom_system, load_project_docs, new_id, probe, save_custom_system,
     start_claude_code_login as core_start_claude_code_login, start_login as core_start_login,
-    truncate_chars, uses_gateway_auth, ApprovalDecision, ApprovalMode, ApprovalPolicy,
-    ApprovalRequest, Approver, AuthStatus, ChatFacts, ChatPersistence, Config, ExternalAgentMode,
-    ExternalWorkspace, GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority,
+    truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
+    AuthStatus, ChatFacts, ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace,
+    GatewayLease, GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority,
     PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderConfig,
     ProviderRegistry, ProviderSlot, QuestionRequest, Questioner, RatesStatus, RecoverableRun,
     RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint,
@@ -272,6 +272,9 @@ struct AppState {
     sessions: SessionController,
     browser: Arc<BrowserHost>,
     login: Mutex<Option<LoginProcess>>,
+    /// A gateway child started by this desktop process. An empty lease means
+    /// the selected gateway was already running or was not local.
+    gateway: Mutex<Option<GatewayLease>>,
     /// One coalescing transcript worker per open project. A background turn
     /// must keep its writer after the user navigates to another root.
     persist: Mutex<HashMap<PathBuf, PersistWorker>>,
@@ -297,6 +300,16 @@ struct AppState {
     /// Desktop-local project grouping. This is separate from the active
     /// repo/worktree boundary used by the agent.
     space_state: Mutex<SpaceState>,
+}
+
+impl AppState {
+    fn shutdown_gateway(&self) {
+        if let Ok(mut lease) = self.gateway.lock() {
+            if let Some(mut lease) = lease.take() {
+                lease.shutdown();
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -524,7 +537,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         (
             "unconfigured".to_string(),
             "Not configured".to_string(),
-            match auth_status {
+            match &auth_status {
                 AuthStatus::Ready { .. } => {
                     "Signed in. Configure this provider in Settings.".into()
                 }
@@ -542,7 +555,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         detail,
         // Both halves are required: a signed-in provider with no config cannot
         // serve a turn, and a configured provider with no sign-in cannot either.
-        selectable: slot.status.selectable() && configured,
+        selectable: auth_status.selectable() && configured,
         can_connect: desktop_can_start_login(slot.id),
         configured,
         default_model: descriptor.default_model,
@@ -1031,6 +1044,12 @@ fn remember_workspace_config(state: &AppState, config: &Config) {
 #[tauri::command]
 fn list_providers(state: State<'_, AppState>) -> Vec<ProviderView> {
     let config = load_workspace_config(&state);
+    // Provider status may inspect the gateway's credential store, but listing
+    // providers must not provision a config or start a process. Adoption only
+    // discovers a bundled sidecar for configured gateway rows.
+    if config.providers.values().any(ProviderConfig::is_gateway) {
+        zest_core::adopt_bundled_gateway();
+    }
     let mut rows: Vec<ProviderView> = detect_all()
         .iter()
         .filter(|s| PICKER_IDS.contains(&s.id))
@@ -1815,7 +1834,7 @@ async fn verify_provider(state: State<'_, AppState>, id: String) -> Result<(), S
     // opening a chat no longer probes. It stays tied to `needs_reconnect` so an
     // unreachable gateway is never reported as a credential problem — telling
     // someone to re-run OAuth cannot start a process that is not running.
-    prove_provider_serves(&config, &id)
+    prove_provider_serves(&state, &config, &id)
         .await
         .map_err(|failure| {
             if failure.needs_reconnect() && desktop_can_start_login(&id) {
@@ -1864,8 +1883,12 @@ impl ProbeFailure {
 ///
 /// Both halves, for an explicit Connect or verify. Opening a chat deliberately
 /// runs only the first half — see [`ensure_gateway_ready`].
-async fn prove_provider_serves(config: &Config, id: &str) -> Result<(), ProbeFailure> {
-    ensure_gateway_ready(config, id).await?;
+async fn prove_provider_serves(
+    state: &AppState,
+    config: &Config,
+    id: &str,
+) -> Result<(), ProbeFailure> {
+    ensure_gateway_ready(&state.gateway, config, id).await?;
     probe_provider(config, id).await
 }
 
@@ -1876,15 +1899,30 @@ async fn prove_provider_serves(config: &Config, id: &str) -> Result<(), ProbeFai
 /// is the half that has to happen before a chat opens, because every turn needs
 /// the port open; proving the *account* is a network round trip that costs tokens
 /// and belongs behind the UI rather than in front of it.
-async fn ensure_gateway_ready(config: &Config, id: &str) -> Result<(), ProbeFailure> {
+async fn ensure_gateway_ready(
+    gateway: &Mutex<Option<GatewayLease>>,
+    config: &Config,
+    id: &str,
+) -> Result<(), ProbeFailure> {
     // Start the local gateway rather than probing a port nothing is listening on.
     // Its being down is the ordinary state after a reboot, not a user error, and
     // Zest launches this same binary to sign in — so it can launch it to serve.
     if let Some(base_url) = local_gateway_url(config, id) {
-        if let GatewayState::Unavailable(_reason) = ensure_gateway_running(&base_url).await {
+        let start = ensure_gateway_running(&base_url).await;
+        if matches!(start.state, GatewayState::Unavailable(_)) {
             return Err(ProbeFailure::Setup(
                 "Zest could not start this provider. Try again.".into(),
             ));
+        }
+        if start.state == GatewayState::Listening && start.lease.is_owned() {
+            let mut owned = gateway
+                .lock()
+                .map_err(|_| ProbeFailure::Setup("Gateway state is unavailable.".into()))?;
+            // A lease may remain after its child exits unexpectedly. Replace
+            // it with the freshly verified child; dropping the old lease only
+            // targets the old retained handle.
+            let old = owned.replace(start.lease);
+            drop(old);
         }
     }
     Ok(())
@@ -2693,22 +2731,21 @@ async fn start_session_inner(
     let root = resolve_workspace_root(&state)?;
     let config = config_for_session(&state, &root)?;
 
-    let slot = detect_all()
-        .into_iter()
-        .find(|s| s.id == id)
-        .map(|slot| (slot.status.selectable(), slot.label.to_string()));
-    let (selectable, provider_label) = match slot {
-        Some(slot) => slot,
-        None => {
-            let provider = ProviderRegistry::from_config(&config)
-                .0
-                .get(&id)
-                .ok_or_else(|| format!("unknown provider `{id}`"))?;
-            (
-                provider.auth_status().selectable(),
-                configured_provider_view(&id, &config).label,
-            )
-        }
+    let (selectable, provider_label) = if config.providers.contains_key(&id) {
+        let provider = ProviderRegistry::from_config(&config)
+            .0
+            .get(&id)
+            .ok_or_else(|| format!("unknown provider `{id}`"))?;
+        (
+            provider.auth_status().selectable(),
+            configured_provider_view(&id, &config).label,
+        )
+    } else {
+        let slot = detect_all()
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| format!("unknown provider `{id}`"))?;
+        (slot.status.selectable(), slot.label.to_string())
     };
 
     if !selectable {
@@ -2723,8 +2760,8 @@ async fn start_session_inner(
     // "Opening your session…" until the model answered. The caller verifies the
     // account in the background and surfaces a banner if it turns out to be
     // unusable, so a cooled-down session is reported rather than waited for.
-    if uses_gateway_auth(&id) {
-        ensure_gateway_ready(&config, &id)
+    if local_gateway_url(&config, &id).is_some() {
+        ensure_gateway_ready(&state.gateway, &config, &id)
             .await
             .map_err(|failure| failure.user_message())?;
     }
@@ -5851,15 +5888,10 @@ timeout_secs = 900
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Discover the sidecar before bootstrapping anything that depends on it.
-    zest_core::adopt_bundled_gateway();
     if let Err(err) = zest_core::ensure_user_config() {
         eprintln!("warning: could not create the user config: {err}");
     }
     zest_core::load_env();
-    if let Err(err) = zest_core::gateway_runtime() {
-        eprintln!("warning: could not initialize the bundled gateway: {err}");
-    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -5867,6 +5899,7 @@ pub fn run() {
             sessions: SessionController::new(),
             browser: Arc::new(BrowserHost::new()),
             login: Mutex::new(None),
+            gateway: Mutex::new(None),
             persist: Mutex::new(HashMap::new()),
             // Validate the launch directory first so a project opened from a
             // terminal cannot be silently replaced by a stale remembered
@@ -5953,8 +5986,13 @@ pub fn run() {
             get_user_profile,
             set_user_profile
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Zest desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Zest desktop")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app_handle.state::<AppState>().shutdown_gateway();
+            }
+        });
 }
 
 /// The bug these guard: a packaged install starts with its own program folder

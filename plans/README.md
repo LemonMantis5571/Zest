@@ -13,10 +13,16 @@ without dropping features. Implemented on the working tree 2026-08-02.
 | 002 | Drop Brave path from `web_search` (DDG only) | P1 | S | — | DONE (implemented on WIP) |
 | 003 | Front-ends use `DEFAULT_SYSTEM` (dedupe prompts) | P1 | S | — | DONE (implemented on WIP) |
 | 004 | Optimize custom PFP (128px JPEG file, not fat JSON) | P2 | S | — | DONE (revised + implemented) |
+| 005 | Make gateway bootstrap provider-scoped | P1 | M | - | DONE |
+| 006 | Remove non-release PowerShell noise | P1 | M | 005 | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
 ## Dependency notes
+
+- Plan 006 follows Plan 005 because the manual gateway start/login helpers are
+  only safe to remove after Zest owns gateway startup, auth, and shutdown
+  in-process.
 
 - 001–003 independent; 004 revised to optimize-on-pick + `~/.zest/avatar.jpg`.
 

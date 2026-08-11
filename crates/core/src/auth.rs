@@ -129,20 +129,13 @@ pub fn detect_all() -> Vec<ProviderSlot> {
     ]
 }
 
-/// Whether Connect / live turns for this provider go through CLIProxyAPI.
-///
-/// When true, a credentials file alone is not enough — the gateway can hold a
-/// cooled-down or incomplete session that still looks "signed in" on disk.
-pub fn uses_gateway_auth(provider_id: &str) -> bool {
-    matches!(provider_id, "codex" | "claude") && cliproxy_exe().is_some()
-}
-
 /// Codex readiness for Zest's default path.
 ///
 /// When a local CLIProxyAPI install is present, Ready means the gateway's own
-/// credential store under `~/.cli-proxy-api` looks complete. Desktop still
-/// probes before opening a chat — see [`uses_gateway_auth`]. Otherwise fall
-/// back to the Codex CLI's `auth.json`.
+/// credential store under `~/.cli-proxy-api` looks complete. This reports
+/// credential state only; gateway process supervision is a selected-provider
+/// decision made from the resolved configuration. Otherwise fall back to the
+/// Codex CLI's `auth.json`.
 pub fn detect_codex() -> AuthStatus {
     if cliproxy_exe().is_some() {
         return match gateway_auth_state("codex") {
@@ -422,6 +415,9 @@ fn cliproxy_login(
     browser_title: &'static str,
     browser_body: &'static str,
 ) -> Option<LoginSpawn> {
+    // Login is an explicit gateway operation. Discovering the bundled sidecar
+    // here is allowed; provisioning and process startup remain turn-scoped.
+    let _ = adopt_bundled_gateway();
     // Same resolver the serving process uses. Signing in through a different
     // config would write credentials to an `auth-dir` the gateway never reads.
     let (exe, config) = crate::gateway::runtime().ok().flatten()?;
@@ -490,22 +486,21 @@ fn spawn_silent(program: &Path, args: &[String]) -> std::io::Result<Child> {
     spawn_with_flags(program, args, 0)
 }
 
-/// Start a long-lived background process that outlives this one.
+/// Start a managed long-lived process with no inherited console handles.
 ///
-/// Distinct from [`spawn_silent`], which starts a short login helper as an
-/// ordinary child. A daemon must not stay attached to whoever happened to launch
-/// it: an attached gateway inherits the parent's console handles, which keeps the
-/// parent from exiting cleanly and makes the gateway's lifetime an accident of
-/// which process started it.
-pub(crate) fn spawn_detached(program: &Path, args: &[String]) -> std::io::Result<()> {
+/// The returned child handle is intentionally retained by the gateway lease so
+/// the front-end can terminate only a process it started. A detached console is
+/// still useful on Windows, but detachment no longer means that the child
+/// outlives Zest.
+pub(crate) fn spawn_managed(program: &Path, args: &[String]) -> std::io::Result<Child> {
     // DETACHED_PROCESS: no console at all, rather than an invisible one.
     // Supersedes CREATE_NO_WINDOW, which Windows ignores when this is set.
     #[cfg(windows)]
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     #[cfg(windows)]
-    return spawn_with_flags(program, args, DETACHED_PROCESS).map(|_| ());
+    return spawn_with_flags(program, args, DETACHED_PROCESS);
     #[cfg(not(windows))]
-    spawn_with_flags(program, args, 0).map(|_| ())
+    spawn_with_flags(program, args, 0)
 }
 
 fn spawn_with_flags(program: &Path, args: &[String], flags: u32) -> std::io::Result<Child> {
