@@ -26,6 +26,7 @@ import { CommandPalette, type PaletteAction } from "@/components/CommandPalette"
 import { Composer } from "@/components/Composer";
 import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
+import { NeedsInputCard } from "@/components/NeedsInputCard";
 import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
 import { looksLikeDocument } from "@/lib/documentShape";
 import { buildablePlanId } from "@/lib/planActions";
@@ -189,6 +190,7 @@ type ChatMessageRowProps = {
   onCancelEdit: () => void;
   onSubmitEdit: () => void;
   onResolveQuestion: (questionId: string, answer: string) => Promise<void>;
+  pinQuestion?: boolean;
 };
 
 type MessageEditFormProps = {
@@ -392,6 +394,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onCancelEdit,
   onSubmitEdit,
   onResolveQuestion,
+  pinQuestion = false,
 }: ChatMessageRowProps) {
   if (msg.role === "user") {
     if (editing) {
@@ -466,8 +469,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
   }
 
   const structuredQuestion = isLast ? msg.question : undefined;
-  const planningQuestion =
-    structuredQuestion ?? (isLast ? planningQuestionFor(msg) : null);
+  const planningQuestion = pinQuestion
+    ? null
+    : structuredQuestion ?? (isLast ? planningQuestionFor(msg) : null);
   const submitQuestion = structuredQuestion?.questionId
     ? (answer: string) =>
         onResolveQuestion(structuredQuestion.questionId as string, answer)
@@ -719,6 +723,15 @@ export function ChatScreen({
       ),
     [messages]
   );
+  const pendingQuestion = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === "assistant" && message.question) {
+        return { messageId: message.id, question: message.question };
+      }
+    }
+    return null;
+  }, [messages]);
 
   const startEditingMessage = useCallback(
     (messageId: string, text: string) => {
@@ -1019,7 +1032,10 @@ export function ChatScreen({
                           Ask about this project — paste images, attach files, or
                           open another folder from +.
                         </p>
-                        <div className="flex flex-wrap items-center justify-center gap-2">
+                        <div
+                          className="flex flex-wrap items-center justify-center gap-2"
+                          aria-label="Suggested prompts"
+                        >
                           <Button
                             type="button"
                             variant="outline"
@@ -1030,6 +1046,28 @@ export function ChatScreen({
                             }}
                           >
                             Plan this repo
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              onDraftChange("Explain the structure and purpose of this project.");
+                              requestAnimationFrame(() => focusComposer());
+                            }}
+                          >
+                            Explain this project
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              onDraftChange("Review the current changes and point out anything risky or incomplete.");
+                              requestAnimationFrame(() => focusComposer());
+                            }}
+                          >
+                            Review current changes
                           </Button>
                           <Button
                             type="button"
@@ -1077,6 +1115,10 @@ export function ChatScreen({
                       onCancelEdit={cancelEditingMessage}
                       onSubmitEdit={() => void submitEditingMessage()}
                       onResolveQuestion={onResolveQuestion}
+                      pinQuestion={
+                        pendingApprovals.length === 0 &&
+                        pendingQuestion?.messageId === msg.id
+                      }
                     />
                   ))}
                 </MessageScrollerContent>
@@ -1086,34 +1128,23 @@ export function ChatScreen({
           </MessageScrollerProvider>
 
           {/*
-            One approval card, in one place, for the whole conversation.
+            One decision card, in one place, for the whole conversation.
             Anchored above the composer rather than inline in the transcript:
             inline it scrolled away mid-decision, and every pending call drew
-            another copy of the same three buttons. The transcript still shows
+            another copy of the same controls. The transcript still shows
             each pending call as a one-line "Awaiting approval" row, so the
             history stays readable — it just does not ask twice.
           */}
-          {pendingApprovals.length > 0 ? (
+          {pendingApprovals.length > 0 || pendingQuestion ? (
             <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-[8.5rem]">
-              <div className="pointer-events-auto mx-auto w-full max-w-[var(--chat-max)] rounded-xl border border-amber-500/30 bg-[color-mix(in_srgb,var(--card)_94%,transparent)] p-2 shadow-lg backdrop-blur-xl">
-                <div className="flex items-baseline justify-between gap-2 px-1 pb-1.5">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-amber-400/90">
-                    Needs your approval
-                  </span>
-                  {pendingApprovals.length > 1 ? (
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-                      1 of {pendingApprovals.length}
-                    </span>
-                  ) : null}
-                </div>
-                <ToolCallRow
-                  key={pendingApprovals[0].id}
-                  tool={pendingApprovals[0]}
-                  asCard
-                  onResolveApproval={onResolveApproval}
-                  onOpenDiff={openDiff}
-                />
-              </div>
+              <NeedsInputCard
+                question={pendingApprovals.length === 0 ? pendingQuestion?.question : undefined}
+                approval={pendingApprovals[0]}
+                pendingApprovalCount={pendingApprovals.length}
+                onResolveQuestion={onResolveQuestion}
+                onResolveApproval={onResolveApproval}
+                onOpenDiff={openDiff}
+              />
             </div>
           ) : null}
 
