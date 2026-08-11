@@ -30,10 +30,11 @@
     "externalBin": ["binaries/cli-proxy-api"],
     "resources": ["licenses/CLIProxyAPI-LICENSE.txt"],
     "icon": [
-      "icons/zest-icon-32.png",
-      "icons/zest-icon-128.png",
-      "icons/zest-icon.png",
-      "icons/zest-icon.ico"
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "windows": {
       "wix": {
@@ -43,8 +44,8 @@
       "nsis": {
         "headerImage": "installer/nsis-header.bmp",
         "sidebarImage": "installer/nsis-sidebar.bmp",
-        "installerIcon": "icons/zest-icon.ico",
-        "uninstallerIcon": "icons/zest-icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       }
     }
   }
