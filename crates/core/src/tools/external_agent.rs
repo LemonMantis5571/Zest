@@ -90,6 +90,34 @@ pub(crate) struct ExternalAgentRun {
     pub(crate) usage: Option<ExternalUsageReport>,
 }
 
+/// Result exposed to the desktop coordinator. The low-level stream remains
+/// private so direct delegation keeps its existing behavior while the durable
+/// pipeline gets a bounded, provider-neutral result shape.
+#[derive(Debug, Clone, Default)]
+pub struct ExternalAgentResult {
+    pub text: String,
+    pub diff: String,
+    pub errors: Vec<String>,
+    pub malformed_lines: usize,
+    pub usage: Option<ExternalUsageReport>,
+}
+
+impl ExternalAgentRun {
+    fn into_public(self) -> ExternalAgentResult {
+        let text = self.text();
+        let errors = self.errors().into_iter().map(str::to_string).collect();
+        let usage = self.usage;
+        let diff = self.diff;
+        ExternalAgentResult {
+            text,
+            diff,
+            errors,
+            malformed_lines: self.malformed_lines,
+            usage,
+        }
+    }
+}
+
 impl ExternalAgentRun {
     fn merge_usage(&mut self, report: ExternalUsageReport) {
         if report.is_empty() {
@@ -328,6 +356,10 @@ impl ExternalAgent {
                 model,
                 diff: (!run.diff.trim().is_empty()).then(|| run.diff.clone()),
                 usage: run.usage,
+                job_id: None,
+                stage: Some("direct".into()),
+                attempt: None,
+                review_status: None,
             },
         ))
     }
@@ -455,6 +487,10 @@ impl Tool for ExternalAgent {
             model,
             diff: None,
             usage: None,
+            job_id: None,
+            stage: Some("approval".into()),
+            attempt: None,
+            review_status: None,
         }))
     }
 
@@ -656,6 +692,149 @@ async fn run_isolated(
         });
     }
     Ok(run)
+}
+
+/// Run an implementation worker in the same isolated-worktree seam used by
+/// `delegate_external`, with a cancellation token owned by the coordinator.
+pub async fn run_delegation_worker(
+    root: &Path,
+    config: &ExternalAgentConfig,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+) -> Result<ExternalAgentResult, String> {
+    validate_config(config)?;
+    if config.workspace != ExternalWorkspace::Isolated {
+        return Err("feature-card workers require an isolated workspace".into());
+    }
+    run_isolated_with_cancel(root, config, prompt, cancel).await
+}
+
+/// Prepare a fresh reviewer worktree from the same project snapshot, apply the
+/// worker patch, and run a new external process. The reviewer diff is returned
+/// to the caller only so it can be rejected and discarded; it is never an
+/// integration artifact.
+pub async fn run_delegation_reviewer(
+    root: &Path,
+    config: &ExternalAgentConfig,
+    worker_diff: &str,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+) -> Result<ExternalAgentResult, String> {
+    validate_config(config)?;
+    if config.workspace != ExternalWorkspace::Isolated {
+        return Err("feature-card reviewers require an isolated workspace".into());
+    }
+    if !worker_diff.trim().is_empty() {
+        crate::delegation::validate_diff_paths(root, worker_diff)
+            .map_err(|error| format!("worker diff is unsafe: {error}"))?;
+    }
+    let base = git_output(root, &["rev-parse", "HEAD"])
+        .await
+        .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
+    let temp = tempfile::tempdir().map_err(|error| format!("create reviewer temp dir: {error}"))?;
+    let worktree = temp.path().join("workspace");
+    git_output_args(
+        root,
+        &["worktree", "add", "--detach", "--quiet"],
+        Some(&worktree),
+        Some(&base),
+    )
+    .await
+    .map_err(|error| format!("create reviewer worktree: {error}"))?;
+    let mut guard = WorktreeGuard::new(root, &worktree);
+    remove_sensitive_tracked_files(&worktree).await?;
+    copy_working_snapshot(root, &worktree, &base).await?;
+    if !worker_diff.trim().is_empty() {
+        apply_diff_to_workspace(&worktree, worker_diff).await?;
+    }
+    // The worker patch is part of the review input, not a reviewer edit. Take
+    // the reviewer baseline only after applying it so a read-only reviewer
+    // does not appear to have rewritten the worker's entire diff.
+    let baseline = snapshot_worktree(&worktree).await?;
+    let result = spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None).await;
+    let reviewer_diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
+    let cleanup = guard.cleanup().await;
+    drop(temp);
+    let mut run = result?;
+    let reviewer_diff = reviewer_diff?;
+    cleanup?;
+    run.diff = clip_diff(&reviewer_diff);
+    if !run.diff.trim().is_empty() {
+        run.events.push(ExternalAgentEvent::Diff {
+            path: "reviewer workspace (discarded)".into(),
+        });
+    }
+    Ok(run.into_public())
+}
+
+async fn run_isolated_with_cancel(
+    root: &Path,
+    config: &ExternalAgentConfig,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+) -> Result<ExternalAgentResult, String> {
+    let base = git_output(root, &["rev-parse", "HEAD"])
+        .await
+        .map_err(|_| no_repository_error(root, &contained_repositories(root)))?;
+    let temp = tempfile::tempdir().map_err(|error| format!("create worktree temp dir: {error}"))?;
+    let worktree = temp.path().join("workspace");
+    git_output_args(
+        root,
+        &["worktree", "add", "--detach", "--quiet"],
+        Some(&worktree),
+        Some(&base),
+    )
+    .await
+    .map_err(|error| format!("create isolated worktree: {error}"))?;
+    let mut guard = WorktreeGuard::new(root, &worktree);
+    remove_sensitive_tracked_files(&worktree).await?;
+    copy_working_snapshot(root, &worktree, &base).await?;
+    let baseline = snapshot_worktree(&worktree).await?;
+    let result = spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None).await;
+    let diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
+    let cleanup = guard.cleanup().await;
+    drop(temp);
+    let mut run = result?;
+    let diff = diff?;
+    cleanup?;
+    run.diff = clip_diff(&diff);
+    if !run.diff.trim().is_empty() {
+        run.events.push(ExternalAgentEvent::Diff {
+            path: "isolated worktree".into(),
+        });
+    }
+    Ok(run.into_public())
+}
+
+async fn apply_diff_to_workspace(worktree: &Path, diff: &str) -> Result<(), String> {
+    let mut command = Command::new("git");
+    command
+        .args(["apply", "--binary", "--whitespace=nowarn", "-"])
+        .current_dir(worktree)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("start worker diff apply: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(diff.as_bytes())
+            .await
+            .map_err(|error| format!("write worker diff: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| format!("apply worker diff: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not apply worker diff: {}",
+            clip(String::from_utf8_lossy(&output.stderr).trim())
+        ))
+    }
 }
 
 async fn spawn_and_run(

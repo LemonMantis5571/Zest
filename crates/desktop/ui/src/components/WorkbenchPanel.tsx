@@ -4,19 +4,27 @@ import {
   ChevronRightIcon,
   Clock3Icon,
   GitForkIcon,
+  GitMergeIcon,
   HistoryIcon,
   ListTreeIcon,
   PanelRightCloseIcon,
+  PlayIcon,
   RefreshCwIcon,
   TriangleAlertIcon,
   WrenchIcon,
+  XIcon,
   XCircleIcon,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { ChatMessage, SessionInfo, WorkspaceReview } from "@/lib/types";
+import type {
+  ChatMessage,
+  DelegationJob,
+  SessionInfo,
+  WorkspaceReview,
+} from "@/lib/types";
 
 type Props = PanelProps & { open: boolean };
 
@@ -31,9 +39,14 @@ type PanelProps = {
   onVerify: () => Promise<void>;
   onRewind: (checkpointId: string) => Promise<void>;
   onJump: (messageId: string) => void;
+  delegationJobs: DelegationJob[];
+  onApproveDelegation: (jobId: string) => Promise<void>;
+  onCancelDelegation: (jobId: string) => Promise<void>;
+  onRetryDelegation: (jobId: string) => Promise<void>;
+  onApplyDelegation: (jobId: string) => Promise<void>;
 };
 
-type Tab = "activity" | "outline";
+type Tab = "activity" | "outline" | "delegation";
 
 function formatAge(epochSecs: number) {
   const delta = Math.max(0, Math.floor(Date.now() / 1000) - epochSecs);
@@ -102,9 +115,18 @@ function WorkbenchBody({
   onVerify,
   onRewind,
   onJump,
+  delegationJobs,
+  onApproveDelegation,
+  onCancelDelegation,
+  onRetryDelegation,
+  onApplyDelegation,
 }: PanelProps) {
   const [tab, setTab] = useState<Tab>("activity");
   const [busyAction, setBusyAction] = useState<"fork" | string | null>(null);
+  const [expandedDelegation, setExpandedDelegation] = useState<{
+    jobId: string;
+    section: "worker" | "review";
+  } | null>(null);
   const panelRef = useRef<HTMLElement>(null);
   const titleId = useId();
   const descriptionId = useId();
@@ -171,6 +193,18 @@ function WorkbenchBody({
     [messages]
   );
 
+  const jobMessageIds = useMemo(() => {
+    const ids = new Map<string, string>();
+    for (const message of messages) {
+      if (message.role !== "assistant") continue;
+      for (const tool of message.tools) {
+        const jobId = tool.metadata?.kind === "delegation" ? tool.metadata.job_id : undefined;
+        if (jobId && !ids.has(jobId)) ids.set(jobId, message.id);
+      }
+    }
+    return ids;
+  }, [messages]);
+
   async function runFork() {
     setBusyAction("fork");
     try {
@@ -196,6 +230,24 @@ function WorkbenchBody({
     } finally {
       setBusyAction(null);
     }
+  }
+
+  async function runDelegationAction(
+    id: string,
+    action: (jobId: string) => Promise<void>
+  ) {
+    setBusyAction(id);
+    try {
+      await action(id);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function delegationStatusLabel(status: DelegationJob["status"]) {
+    return status
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
 
 
@@ -242,11 +294,12 @@ function WorkbenchBody({
       <div
         role="tablist"
         aria-label="Workbench views"
-        className="grid grid-cols-2 gap-1 border-b border-border/60 p-1.5"
+        className="grid grid-cols-3 gap-1 border-b border-border/60 p-1.5"
       >
         {([
           ["activity", "Activity", Clock3Icon],
           ["outline", "Outline", ListTreeIcon],
+          ["delegation", "Delegation", GitMergeIcon],
         ] as const).map(([id, label, Icon]) => (
           <button
             key={id}
@@ -272,10 +325,18 @@ function WorkbenchBody({
                 event.key === "Home"
                   ? "activity"
                   : event.key === "End"
-                    ? "outline"
-                    : id === "activity"
-                      ? "outline"
-                      : "activity";
+                    ? "delegation"
+                    : event.key === "ArrowRight" || event.key === "ArrowDown"
+                      ? id === "activity"
+                        ? "outline"
+                        : id === "outline"
+                          ? "delegation"
+                          : "activity"
+                      : id === "activity"
+                        ? "delegation"
+                        : id === "outline"
+                          ? "activity"
+                          : "outline";
               setTab(next);
               requestAnimationFrame(() => {
                 document.getElementById(`workbench-tab-${next}`)?.focus();
@@ -520,7 +581,7 @@ function WorkbenchBody({
               ) : null}
             </section>
           </div>
-        ) : (
+        ) : tab === "outline" ? (
           <section>
             <div className="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               Transcript map
@@ -552,6 +613,245 @@ function WorkbenchBody({
                     <ChevronRightIcon className="mt-1 size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
                   </button>
                 ))}
+              </div>
+            )}
+          </section>
+        ) : (
+          <section className="flex flex-col gap-2">
+            <div className="flex items-center justify-between px-1">
+              <div>
+                <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Coordinator board
+                </div>
+                <div className="mt-1 text-xs text-foreground/80">
+                  Isolated implementation lanes with independent review.
+                </div>
+              </div>
+              <span className="text-[10px] text-muted-foreground">
+                {delegationJobs.length} {delegationJobs.length === 1 ? "job" : "jobs"}
+              </span>
+            </div>
+            {delegationJobs.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border/70 px-3 py-5 text-center text-xs text-muted-foreground">
+                Feature cards created by the coordinator will appear here.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {delegationJobs.map((job) => {
+                  const sourceMessage = jobMessageIds.get(job.jobId);
+                  const checksPassed = job.acceptanceChecks.filter(
+                    (check) => check.status === "passed"
+                  ).length;
+                  const blocking = job.reviewerFindings.filter(
+                    (finding) => finding.severity === "blocking"
+                  );
+                  return (
+                    <article
+                      key={job.jobId}
+                      className="rounded-lg border border-border/70 bg-secondary/20 p-2.5"
+                    >
+                      <div className="flex items-start gap-2">
+                        <span className="mt-0.5 shrink-0" aria-hidden="true">
+                          {job.status === "accepted" || job.status === "ready_to_apply" ? (
+                            <CheckCircle2Icon className="size-4 text-primary" />
+                          ) : job.status === "failed" || job.status === "blocked" || job.status === "apply_conflict" ? (
+                            <TriangleAlertIcon className="size-4 text-amber-400" />
+                          ) : job.status === "cancelled" ? (
+                            <XCircleIcon className="size-4 text-muted-foreground" />
+                          ) : (
+                            <RefreshCwIcon className="size-4 animate-spin text-primary" />
+                          )}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <h3 className="truncate text-xs font-semibold">{job.title}</h3>
+                            <span className="shrink-0 text-[10px] text-muted-foreground">
+                              {delegationStatusLabel(job.status)}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+                            <span>{job.lane}</span>
+                            <span>Worker: {job.agent}</span>
+                            <span>Reviewer: {job.reviewerAgent}</span>
+                            <span>Attempt {job.attempt || 1}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <p className="mt-2 line-clamp-3 text-[11px] leading-relaxed text-foreground/80">
+                        {job.workerSummary ?? job.objective}
+                      </p>
+                      <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
+                        <div className="rounded-md bg-secondary/60 px-2 py-1.5">
+                          <div className="text-muted-foreground">Changed files</div>
+                          <div className="mt-0.5 font-mono text-foreground">{job.changedFileCount}</div>
+                        </div>
+                        <div className="rounded-md bg-secondary/60 px-2 py-1.5">
+                          <div className="text-muted-foreground">Checks</div>
+                          <div className="mt-0.5 font-mono text-foreground">
+                            {checksPassed}/{job.acceptanceChecks.length || 0} passed
+                          </div>
+                        </div>
+                      </div>
+                      {job.changedFiles.length > 0 ? (
+                        <div className="mt-2 rounded-md bg-secondary/50 px-2 py-1.5 font-mono text-[10px] text-foreground/80">
+                          {job.changedFiles.slice(0, 4).map((file) => (
+                            <div key={file} className="truncate">{file}</div>
+                          ))}
+                          {job.changedFileCount > 4 ? <div className="text-muted-foreground">+{job.changedFileCount - 4} more</div> : null}
+                        </div>
+                      ) : null}
+                      {blocking.length > 0 ? (
+                        <div className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-1.5 text-[10px] text-amber-200">
+                          {blocking.slice(0, 2).map((finding) => (
+                            <div key={`${finding.path}:${finding.message}`} className="line-clamp-2">
+                              <span className="font-mono">{finding.path}</span>: {finding.message}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      {job.error ? (
+                        <div className="mt-2 line-clamp-3 text-[10px] text-amber-300">{job.error}</div>
+                      ) : null}
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setExpandedDelegation((current) =>
+                              current?.jobId === job.jobId && current.section === "worker"
+                                ? null
+                                : { jobId: job.jobId, section: "worker" }
+                            )
+                          }
+                        >
+                          <BotIcon data-icon="inline-start" />
+                          Worker result
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setExpandedDelegation((current) =>
+                              current?.jobId === job.jobId && current.section === "review"
+                                ? null
+                                : { jobId: job.jobId, section: "review" }
+                            )
+                          }
+                        >
+                          <TriangleAlertIcon data-icon="inline-start" />
+                          Reviewer findings
+                        </Button>
+                        {sourceMessage ? (
+                          <Button type="button" variant="ghost" size="sm" onClick={() => onJump(sourceMessage)}>
+                            <ChevronRightIcon data-icon="inline-start" />
+                            Coordinator message
+                          </Button>
+                        ) : null}
+                        {job.status === "ready_to_apply" ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={busyAction !== null}
+                            onClick={() => void runDelegationAction(job.jobId, onApplyDelegation)}
+                          >
+                            <GitMergeIcon data-icon="inline-start" />
+                            Apply accepted changes
+                          </Button>
+                        ) : null}
+                        {job.status === "changes_requested" || job.status === "apply_conflict" || job.status === "blocked" || job.status === "failed" ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={busyAction !== null}
+                            onClick={() => void runDelegationAction(job.jobId, onRetryDelegation)}
+                          >
+                            <PlayIcon data-icon="inline-start" />
+                            Approve fresh attempt
+                          </Button>
+                        ) : null}
+                        {job.status === "awaiting_approval" ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={busyAction !== null}
+                            onClick={() => void runDelegationAction(job.jobId, onApproveDelegation)}
+                          >
+                            <PlayIcon data-icon="inline-start" />
+                            Approve and start
+                          </Button>
+                        ) : null}
+                        {!['accepted', 'cancelled', 'failed'].includes(job.status) ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={busyAction !== null}
+                            onClick={() => void runDelegationAction(job.jobId, onCancelDelegation)}
+                          >
+                            <XIcon data-icon="inline-start" />
+                            Cancel
+                          </Button>
+                        ) : null}
+                      </div>
+                      {expandedDelegation?.jobId === job.jobId ? (
+                        <div className="mt-2 rounded-md border border-border/60 bg-background/50 p-2 text-[10px]">
+                          {expandedDelegation.section === "worker" ? (
+                            <>
+                              <div className="font-medium text-foreground">Worker result</div>
+                              <div className="mt-1 whitespace-pre-wrap text-foreground/80">
+                                {job.workerSummary ?? "No usable worker result was persisted."}
+                              </div>
+                              {job.acceptanceChecks.length > 0 ? (
+                                <div className="mt-2 flex flex-col gap-1">
+                                  {job.acceptanceChecks.map((check) => (
+                                    <div key={check.command}>
+                                      <div className="font-mono text-foreground/80">{check.command}</div>
+                                      <div className="text-muted-foreground">
+                                        {check.status}: {check.output || "no output"}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </>
+                          ) : (
+                            <>
+                              <div className="font-medium text-foreground">Reviewer findings</div>
+                              {job.reviewerFindings.length > 0 ? (
+                                <div className="mt-1 flex flex-col gap-1">
+                                  {job.reviewerFindings.map((finding) => (
+                                    <div key={`${finding.severity}:${finding.path}:${finding.message}`}>
+                                      <span className="font-mono text-foreground/80">{finding.path}</span>{" "}
+                                      <span className="text-muted-foreground">({finding.severity}) {finding.message}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="mt-1 text-muted-foreground">
+                                  No structured reviewer findings were persisted.
+                                </div>
+                              )}
+                              {job.acceptanceChecks.length > 0 ? (
+                                <div className="mt-2 flex flex-col gap-1">
+                                  {job.acceptanceChecks.map((check) => (
+                                    <div key={check.command} className="text-muted-foreground">
+                                      <span className="font-mono text-foreground/80">{check.command}</span>: {check.status}
+                                      {check.output ? ` — ${check.output}` : ""}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </>
+                          )}
+                        </div>
+                      ) : null}
+                    </article>
+                  );
+                })}
               </div>
             )}
           </section>

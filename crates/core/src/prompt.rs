@@ -81,12 +81,14 @@ pub const MAX_CUSTOM_PROMPT_BYTES: usize = 32 * 1024;
 pub const EXTERNAL_DELEGATION_SYSTEM: &str = "\
 # External workers
 
-Configured CLI/ACP workers are available through `delegate_external`. Choose
-one only for a self-contained task with a clear result. The worker normally
-runs in an isolated Git worktree, so review its returned answer and diff before
-making changes in the user's project. ACP file and terminal requests stay
-inside the worker workspace, and the parent delegation approval is the
-boundary.";
+Configured CLI/ACP workers are available through `delegate_feature` for
+implementation work and `delegate_external` for compatibility or ad-hoc work.
+Use `delegate_feature` when the work belongs on the coordinator board: it
+creates a bounded card, uses an isolated worktree, and sends the result through
+an independent reviewer before the user can apply it. Use `delegate_external`
+only for a self-contained compatibility task with a clear result. ACP file and
+terminal requests stay inside the worker workspace, and delegation approval is
+the boundary.";
 
 /// Added when the parent runtime registers `ask_user`. The tool is deliberately
 /// explicit: the model decides when a real user decision is needed, and the

@@ -7,6 +7,7 @@
 mod attachments;
 mod browser;
 mod context_meter;
+mod delegation;
 mod session;
 mod spaces;
 
@@ -47,6 +48,10 @@ use attachments::{
 };
 use browser::BrowserHost;
 use context_meter::{estimate_context, ContextUsageView};
+pub(crate) use delegation::{
+    get_view as get_delegation_view, list_views as list_delegation_views, DelegationCoordinator,
+    DelegationJobView,
+};
 use session::{Session, SessionController, SessionError};
 use spaces::{SpaceState, DEFAULT_SPACE_ID};
 
@@ -301,6 +306,10 @@ struct AppState {
     /// Desktop-local project grouping. This is separate from the active
     /// repo/worktree boundary used by the agent.
     space_state: Mutex<SpaceState>,
+    /// Project-scoped durable coordinator. Jobs remain in `.zest` when the
+    /// active chat or window changes; this handle only owns live cancellation
+    /// and bounded worker lanes.
+    delegations: Arc<DelegationCoordinator>,
 }
 
 impl AppState {
@@ -742,6 +751,18 @@ enum ToolMetaView {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "export-bindings", ts(optional))]
         diff: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        job_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        stage: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "export-bindings", ts(optional))]
+        review_status: Option<String>,
     },
 }
 
@@ -752,11 +773,19 @@ impl From<ToolMetadata> for ToolMetaView {
                 provider_id,
                 model,
                 diff,
+                job_id,
+                stage,
+                attempt,
+                review_status,
                 usage: _,
             } => Self::Delegation {
                 provider_id,
                 model,
                 diff,
+                job_id,
+                stage,
+                attempt,
+                review_status,
             },
         }
     }
@@ -2718,11 +2747,19 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
                     provider_id,
                     model,
                     diff,
+                    job_id,
+                    stage,
+                    attempt,
+                    review_status,
                 } => ToolMetadata::Delegation {
                     provider_id,
                     model,
                     diff,
                     usage: None,
+                    job_id,
+                    stage,
+                    attempt,
+                    review_status,
                 },
             });
             thread.apply_tool_result(
@@ -2901,6 +2938,7 @@ async fn start_session_inner(
         .with_questioner(questioner)
         .with_policy(state.policy.clone())
         .with_browser_adapter(state.browser.adapter())
+        .with_parent_thread_id(&thread.id)
         .with_remembered_options(prefs.model, prefs.effort)
         .enable_external_agents(true)
         .register_write_tools(true)
@@ -4441,6 +4479,8 @@ async fn send_message(
 
     let live_thread = Arc::new(Mutex::new(std::mem::take(&mut session.thread)));
     let cancel = turn.cancel.clone();
+    let delegation_coordinator = state.delegations.clone();
+    let delegation_root = session.root.clone();
 
     let result = {
         let app = app.clone();
@@ -4539,9 +4579,12 @@ async fn send_message(
                     diff,
                     metadata,
                 } => {
+                    let delegation_job_id = metadata.as_ref().and_then(|metadata| match metadata {
+                        ToolMetadata::Delegation { job_id, .. } => job_id.clone(),
+                    });
                     // Whatever the model says next belongs to a new round.
                     round_break_pending = true;
-                    ChatEvent::ToolCallResult {
+                    let event = ChatEvent::ToolCallResult {
                         session_id: session_id.clone(),
                         thread_id: thread_id.clone(),
                         turn_id: turn_id.clone(),
@@ -4553,7 +4596,15 @@ async fn send_message(
                         path: path.map(str::to_string),
                         diff: diff.map(str::to_string),
                         metadata: metadata.map(ToolMetaView::from),
+                    };
+                    if let Some(job_id) = delegation_job_id {
+                        delegation_coordinator.enqueue(
+                            app.clone(),
+                            delegation_root.clone(),
+                            job_id,
+                        );
                     }
+                    event
                 }
                 StreamEvent::ApprovalNeeded {
                     approval_id,
@@ -5831,6 +5882,55 @@ async fn verify_workspace(state: State<'_, AppState>) -> Result<WorkspaceReview,
 }
 
 #[tauri::command]
+fn list_delegation_jobs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<DelegationJobView>, String> {
+    let root = resolve_workspace_root(&state)?;
+    let _ = state.delegations.reconcile(&app, &root)?;
+    list_delegation_views(&root)
+}
+
+#[tauri::command]
+fn get_delegation_job(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    get_delegation_view(&root, &job_id)
+}
+
+#[tauri::command]
+fn cancel_delegation_job(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.cancel(&app, &root, &job_id)
+}
+
+#[tauri::command]
+fn retry_delegation_job(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.retry(&app, &root, &job_id)
+}
+
+#[tauri::command]
+fn apply_delegation_job(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<DelegationJobView, String> {
+    let root = resolve_workspace_root(&state)?;
+    state.delegations.apply(&app, &root, &job_id)
+}
+
+#[tauri::command]
 fn context_usage(state: State<'_, AppState>) -> Result<ContextUsageView, String> {
     state
         .sessions
@@ -6197,6 +6297,7 @@ pub fn run() {
             config_edit: Mutex::new(()),
             chat_summary_cache: Mutex::new(ChatSummaryCache::default()),
             space_state: Mutex::new(load_space_state()),
+            delegations: Arc::new(DelegationCoordinator::new()),
         })
         .setup(|app| {
             app.state::<AppState>().browser.attach(app.handle().clone());
@@ -6271,7 +6372,12 @@ pub fn run() {
             verify_workspace,
             context_usage,
             get_user_profile,
-            set_user_profile
+            set_user_profile,
+            list_delegation_jobs,
+            get_delegation_job,
+            cancel_delegation_job,
+            retry_delegation_job,
+            apply_delegation_job
         ])
         .build(tauri::generate_context!())
         .expect("error while building Zest desktop")

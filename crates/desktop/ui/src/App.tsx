@@ -70,6 +70,8 @@ import type {
   ApprovalMode,
   ChatEvent,
   ChatMessage,
+  DelegationEvent,
+  DelegationJob,
   GitContext,
   PreparedAttachment,
   ProviderRow,
@@ -123,6 +125,14 @@ const BUILD_PLAN_PROMPT =
 
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function normalizedWorkspacePath(value: string) {
+  return value
+    .replace(/^\\\\\?\\/, "")
+    .replaceAll("\\", "/")
+    .replace(/\/+$/, "")
+    .toLowerCase();
 }
 
 /** Collapse adjacent text/thinking deltas for the same message before reduce. */
@@ -343,6 +353,7 @@ export default function App() {
   });
   const [sending, setSending] = useState(false);
   const [threadActivity, setThreadActivity] = useState<ThreadActivityMap>({});
+  const [delegationJobs, setDelegationJobs] = useState<DelegationJob[]>([]);
   const [threadQueues, setThreadQueues] = useState<ThreadQueueMap>({});
   const [compacting, setCompacting] = useState(false);
   const [model, setModel] = useState(DEFAULT_CODEX_MODEL);
@@ -383,6 +394,7 @@ export default function App() {
   const currentTurnIdRef = useRef<string | null>(null);
   const turnStartedAtByThreadRef = useRef(new Map<string, number>());
   const notifiedApprovalIdsByThreadRef = useRef(new Map<string, Set<string>>());
+  const notifiedDelegationEventsRef = useRef(new Set<string>());
   const compactionInFlightRef = useRef(false);
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -408,6 +420,49 @@ export default function App() {
     threadActivityRef.current = next;
     setThreadActivity(next);
   }, []);
+
+  const replaceDelegationJob = useCallback((job: DelegationJob) => {
+    setDelegationJobs((current) => {
+      const next = current.filter((candidate) => candidate.jobId !== job.jobId);
+      next.push(job);
+      next.sort((left, right) => right.updatedAt - left.updatedAt);
+      return next;
+    });
+  }, []);
+
+  const handleDelegationEvent = useCallback(
+    (event: DelegationEvent) => {
+      const activeRoot = session?.root;
+      if (
+        !activeRoot ||
+        normalizedWorkspacePath(event.job.projectRoot) !== normalizedWorkspacePath(activeRoot)
+      ) {
+        return;
+      }
+      replaceDelegationJob(event.job);
+      if (
+        !["ready_to_apply", "changes_requested", "blocked", "failed", "applied", "cancelled"].includes(
+          event.kind
+        )
+      ) {
+        return;
+      }
+      const notificationId = `${event.kind}:${event.job.jobId}:${event.job.updatedAt}`;
+      if (notifiedDelegationEventsRef.current.has(notificationId)) return;
+      notifiedDelegationEventsRef.current.add(notificationId);
+      const copy: Record<string, [string, "warning" | "success"]> = {
+        ready_to_apply: ["Changes ready to apply", "success"],
+        changes_requested: ["Review requested changes", "warning"],
+        blocked: ["Delegation needs attention", "warning"],
+        failed: ["Delegation failed", "warning"],
+        applied: ["Accepted changes applied", "success"],
+        cancelled: ["Delegation cancelled", "warning"],
+      };
+      const [title, type] = copy[event.kind as keyof typeof copy];
+      void showAttention(title, event.job.title, type);
+    },
+    [replaceDelegationJob, session?.root]
+  );
 
   const publishThreadQueues = useCallback((next: ThreadQueueMap) => {
     threadQueuesRef.current = next;
@@ -1125,6 +1180,43 @@ export default function App() {
       unlisten?.();
     };
   }, [handleChatEvent]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    backend.onDelegationEvent(handleDelegationEvent).then((fn) => {
+      if (disposed) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleDelegationEvent]);
+
+  const activeDelegationRoot = session?.root;
+  useEffect(() => {
+    const activeRoot = activeDelegationRoot;
+    if (!activeRoot) {
+      setDelegationJobs([]);
+      return;
+    }
+    let cancelled = false;
+    void backend
+      .listDelegationJobs()
+      .then((jobs) => {
+        if (!cancelled) setDelegationJobs(jobs);
+      })
+      .catch(() => {
+        if (!cancelled) setDelegationJobs([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDelegationRoot]);
 
   // Persist sticky draft for the active thread.
   useEffect(() => {
@@ -1969,6 +2061,65 @@ export default function App() {
     }
   }
 
+  async function onApproveDelegation(jobId: string) {
+    try {
+      const job = await backend.retryDelegationJob(jobId);
+      replaceDelegationJob(job);
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not start feature card",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
+  }
+
+  async function onCancelDelegation(jobId: string) {
+    try {
+      const job = await backend.cancelDelegationJob(jobId);
+      replaceDelegationJob(job);
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not cancel feature card",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
+  }
+
+  async function onRetryDelegation(jobId: string) {
+    await onApproveDelegation(jobId);
+  }
+
+  async function onApplyDelegation(jobId: string) {
+    try {
+      const job = await backend.applyDelegationJob(jobId);
+      replaceDelegationJob(job);
+      if (job.status === "accepted") {
+        toast.add({
+          type: "success",
+          title: "Accepted changes applied",
+          description: `${job.title} is now in the active workspace.`,
+        });
+      } else if (job.status === "apply_conflict") {
+        toast.add({
+          type: "warning",
+          title: "Apply conflict",
+          description: "The workspace changed. Review the conflicting card before retrying.",
+        });
+      }
+    } catch (err) {
+      toast.add({
+        type: "error",
+        title: "Could not apply accepted changes",
+        description: formatInvokeError(err),
+      });
+      throw err;
+    }
+  }
+
   const authMode = screen !== "chat";
 
   return (
@@ -2085,6 +2236,11 @@ export default function App() {
             onBuildPlan={() => void onBuildPlan()}
             onOpenProfile={() => setScreen("profile")}
             onOpenUsage={() => setScreen("usage")}
+            delegationJobs={delegationJobs}
+            onApproveDelegation={onApproveDelegation}
+            onCancelDelegation={onCancelDelegation}
+            onRetryDelegation={onRetryDelegation}
+            onApplyDelegation={onApplyDelegation}
             settingsRequest={settingsRequest}
             sessionWarning={sessionWarning}
             onDismissWarning={() => setSessionWarning(null)}

@@ -2,6 +2,7 @@ pub mod approval;
 pub mod bash;
 pub mod browser;
 pub mod capture;
+pub mod delegate_feature;
 pub mod edit_file;
 pub mod external_agent;
 pub mod glob_files;
@@ -40,6 +41,7 @@ use self::web_search::WebSearch;
 use self::write_file::WriteFile;
 
 pub use self::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
+pub use self::delegate_feature::{FeatureDelegator, DELEGATE_FEATURE_TOOL};
 pub use self::outcome::{ToolMetadata, ToolOutcome};
 pub use self::question::{
     parse_question_input, AskUser, DenyQuestioner, QuestionRequest, Questioner, ASK_USER_TOOL,

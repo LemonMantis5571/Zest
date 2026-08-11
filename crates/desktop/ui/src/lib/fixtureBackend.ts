@@ -19,6 +19,8 @@ import type {
   AttachmentInput,
   ChatEvent,
   ChatMessage,
+  DelegationEvent,
+  DelegationJob,
   GitContext,
   SessionInfo,
   SpacesSnapshot,
@@ -900,6 +902,24 @@ export function createFixtureBackend(): DesktopBackend {
           chatHandler = null;
         }
       };
+    },
+    async listDelegationJobs(): Promise<DelegationJob[]> {
+      return [];
+    },
+    async getDelegationJob() {
+      return notAvailable("getDelegationJob");
+    },
+    async cancelDelegationJob() {
+      return notAvailable("cancelDelegationJob");
+    },
+    async retryDelegationJob() {
+      return notAvailable("retryDelegationJob");
+    },
+    async applyDelegationJob() {
+      return notAvailable("applyDelegationJob");
+    },
+    async onDelegationEvent(_handler: (event: DelegationEvent) => void) {
+      return () => {};
     },
     async boot(handler) {
       chatHandlerGeneration += 1;

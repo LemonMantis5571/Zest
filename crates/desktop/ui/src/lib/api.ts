@@ -7,6 +7,8 @@ import type {
   CommandView,
   AttachmentInput,
   ChatEvent,
+  DelegationEvent,
+  DelegationJob,
   ContextUsage,
   GitContext,
   ExternalAgentCheck,
@@ -389,6 +391,32 @@ export function endSession() {
 
 export function onChatEvent(handler: (event: ChatEvent) => void): Promise<UnlistenFn> {
   return listen<ChatEvent>("chat-event", (event) => handler(event.payload));
+}
+
+export function listDelegationJobs() {
+  return invoke<DelegationJob[]>("list_delegation_jobs");
+}
+
+export function getDelegationJob(jobId: string) {
+  return invoke<DelegationJob>("get_delegation_job", { jobId });
+}
+
+export function cancelDelegationJob(jobId: string) {
+  return invoke<DelegationJob>("cancel_delegation_job", { jobId });
+}
+
+export function retryDelegationJob(jobId: string) {
+  return invoke<DelegationJob>("retry_delegation_job", { jobId });
+}
+
+export function applyDelegationJob(jobId: string) {
+  return invoke<DelegationJob>("apply_delegation_job", { jobId });
+}
+
+export function onDelegationEvent(
+  handler: (event: DelegationEvent) => void
+): Promise<UnlistenFn> {
+  return listen<DelegationEvent>("delegation-event", (event) => handler(event.payload));
 }
 
 export type SystemPromptInfo = {

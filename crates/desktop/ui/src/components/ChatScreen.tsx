@@ -69,6 +69,7 @@ import type {
   ApprovalChoice,
   ApprovalMode,
   ChatMessage,
+  DelegationJob,
   GitContext,
   PreparedAttachment,
   ProviderActivityPart,
@@ -156,6 +157,11 @@ type Props = {
   onPasteImages: (files: File[]) => void;
   onProfileChange: (profile: UserProfile) => void;
   optionsDisabled?: boolean;
+  delegationJobs: DelegationJob[];
+  onApproveDelegation: (jobId: string) => Promise<void>;
+  onCancelDelegation: (jobId: string) => Promise<void>;
+  onRetryDelegation: (jobId: string) => Promise<void>;
+  onApplyDelegation: (jobId: string) => Promise<void>;
 };
 
 function focusComposer() {
@@ -675,6 +681,11 @@ export function ChatScreen({
   onOpenUsage,
   settingsRequest = 0,
   optionsDisabled = false,
+  delegationJobs,
+  onApproveDelegation,
+  onCancelDelegation,
+  onRetryDelegation,
+  onApplyDelegation,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [focusUser, setFocusUser] = useState(false);
@@ -1248,6 +1259,11 @@ export function ChatScreen({
         onVerify={onVerifyWorkspace}
         onRewind={onRewindThread}
         onJump={jumpToMessage}
+        delegationJobs={delegationJobs}
+        onApproveDelegation={onApproveDelegation}
+        onCancelDelegation={onCancelDelegation}
+        onRetryDelegation={onRetryDelegation}
+        onApplyDelegation={onApplyDelegation}
       />
 
       <CommandPalette

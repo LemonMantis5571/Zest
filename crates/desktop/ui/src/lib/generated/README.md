@@ -17,6 +17,8 @@ Committed files:
 - `ProviderView.ts` — picker row with configured + catalogue
 - `ModelCapability.ts` — model id + efforts
 - `ToolMetaView.ts` — delegation provenance side-channel
+- `DelegationJobView.ts` / `DelegationEvent.ts` — coordinator job board and lifecycle events
+- `DelegationStatus.ts` / `AcceptanceCheckView.ts` / `ReviewFinding.ts` — review pipeline state
 
 `GitContext.ts` / `PullRequestView.ts` expose the active Git checkout and optional PR metadata.
 
