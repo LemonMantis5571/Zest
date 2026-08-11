@@ -41,7 +41,8 @@ pub use anthropic::types::{
 };
 pub use auth::{
     adopt_bundled_gateway, can_start_login, cliproxy_exe, cliproxy_install, detect_all,
-    gateway_auth_present, login_command, resolve_login, start_login, uses_gateway_auth, AuthStatus,
+    detect_claude_code, gateway_auth_present, login_command, resolve_claude_code_login,
+    resolve_login, start_claude_code_login, start_login, uses_gateway_auth, AuthStatus,
     LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
@@ -55,8 +56,9 @@ pub use commands::{
     ParsedCommand,
 };
 pub use config::{
-    ensure_user_config, load_env, user_config_path, Config, ExternalAgentConfig, ExternalAgentMode,
-    ExternalWorkspace, ProviderConfig, Target, DEFAULT_USER_CONFIG,
+    ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
+    ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, ProviderConfig, Target,
+    DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_USER_CONFIG,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};
@@ -79,6 +81,7 @@ pub use prompt::{
     MAX_PROJECT_DOCS_BYTES, PROJECT_DOC_FILES,
 };
 pub use provider::anthropic::AnthropicProvider;
+pub use provider::claude_code::ClaudeCodeProvider;
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue_for_provider, catalogue_from_lists, catalogue_without_efforts,

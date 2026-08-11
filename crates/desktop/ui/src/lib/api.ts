@@ -76,12 +76,16 @@ export function configureApiProvider(input: {
 }
 
 export function configureAnthropicProvider(input: {
-  id: string;
-  model: string;
-  credential: string;
-  key: string;
+    id: string;
+    model: string;
+    credential: string;
+    key: string;
 }) {
   return invoke<void>("configure_anthropic_provider", input);
+}
+
+export function configureClaudeCodeProvider(input: { id: string; model: string }) {
+  return invoke<void>("configure_claude_code_provider", input);
 }
 
 export function openProjectConfig(root: string) {

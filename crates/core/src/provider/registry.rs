@@ -6,9 +6,11 @@
 //! loading. The reasons come back so the picker can show them.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::anthropic::AnthropicProvider;
+use super::claude_code::ClaudeCodeProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
 use super::{catalogue_for_provider, catalogue_without_efforts, Provider};
 use crate::config::{Config, ProviderConfig};
@@ -31,11 +33,18 @@ impl ProviderRegistry {
     /// Returns the registry plus everything skipped. Never errors: an empty
     /// registry with reasons is more useful than a failed startup.
     pub fn from_config(config: &Config) -> (Self, Vec<Skipped>) {
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::from_config_at(config, &root)
+    }
+
+    /// Build providers with the active project root available to providers
+    /// whose vendor runtime operates on the workspace, such as Claude Code.
+    pub fn from_config_at(config: &Config, root: &Path) -> (Self, Vec<Skipped>) {
         let mut providers: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::new();
         let mut skipped = Vec::new();
 
         for (id, entry) in &config.providers {
-            match build(id, entry) {
+            match build(id, entry, root) {
                 Ok(provider) => {
                     providers.insert(id.clone(), provider);
                 }
@@ -72,7 +81,11 @@ impl ProviderRegistry {
     }
 }
 
-fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provider>, String> {
+fn build(
+    id: &str,
+    entry: &ProviderConfig,
+    root: &Path,
+) -> std::result::Result<Arc<dyn Provider>, String> {
     match entry {
         ProviderConfig::Anthropic {
             api_key_env,
@@ -99,6 +112,28 @@ fn build(id: &str, entry: &ProviderConfig) -> std::result::Result<Arc<dyn Provid
                 provider = provider.with_default_model(model.clone());
             }
             Ok(Arc::new(provider.with_id(id.to_string())))
+        }
+
+        ProviderConfig::ClaudeCode {
+            command,
+            model,
+            models,
+            allow_mcp,
+            permission_mode,
+            timeout_secs,
+        } => {
+            let provider = ClaudeCodeProvider::new(
+                id.to_string(),
+                root,
+                command.clone(),
+                model.clone(),
+                models.clone(),
+                *allow_mcp,
+                *permission_mode,
+                *timeout_secs,
+            )
+            .map_err(|error| format!("could not build Claude Code provider: {error}"))?;
+            Ok(Arc::new(provider))
         }
 
         ProviderConfig::Gateway {

@@ -320,6 +320,12 @@ fn emit_stream_json(event: StreamEvent<'_>) {
         StreamEvent::Thinking(text) if !text.is_empty() => {
             emit_json(serde_json::json!({ "kind": "thinking", "text": text }));
         }
+        StreamEvent::ProviderActivity { id, title, status } => emit_json(serde_json::json!({
+            "kind": "provider_activity",
+            "id": id,
+            "title": title,
+            "status": status,
+        })),
         StreamEvent::ToolCallStart { name, id } => emit_json(serde_json::json!({
             "kind": "tool_call_start",
             "name": name,
@@ -493,6 +499,14 @@ async fn run_doctor_live() -> anyhow::Result<()> {
                 print!("\x1b[90m{t}\x1b[0m");
                 let _ = std::io::stdout().flush();
             }
+        }
+        StreamEvent::ProviderActivity { title, status, .. } => {
+            let marker = match status {
+                "running" | "in_progress" => "→",
+                "done" | "completed" | "complete" => "✓",
+                _ => "✕",
+            };
+            println!("\n{marker} {title}");
         }
         StreamEvent::ToolCallStart { name, .. } => {
             println!("\n→ {name}");
@@ -899,6 +913,18 @@ impl Renderer {
                 }
                 print!("{t}");
                 let _ = std::io::stdout().flush();
+            }
+            StreamEvent::ProviderActivity { title, status, .. } => {
+                if self.thinking_open {
+                    println!("\x1b[0m");
+                    self.thinking_open = false;
+                }
+                let marker = match status {
+                    "running" | "in_progress" => "→",
+                    "done" | "completed" | "complete" => "✓",
+                    _ => "✕",
+                };
+                println!("\n\x1b[90m{marker} {title}\x1b[0m");
             }
             StreamEvent::Text(t) => {
                 if self.thinking_open {

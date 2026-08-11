@@ -14,6 +14,25 @@ Impact:
 
 ---
 
+### 2026-08-10 — Claude Code can own the parent session
+
+Decision: add a first-class `claude_code` provider that runs the authenticated `claude` CLI in
+the current project. It is separate from `[agents.claude]`: a Claude Code parent owns its model
+and built-in tool loop, so Zest does not attach local tools or expose `delegate_external` for that
+session.
+
+Reason: Claude Code subscriptions are useful as the main Zest session, not only as delegated
+workers. The Rust runtime constraint favors the installed CLI boundary, while preserving the
+subscription's existing authentication and avoiding a second SDK/runtime dependency.
+
+Impact: the desktop picker can launch direct `claude login`, enable the parent provider, and keep
+the existing Claude worker preset available independently. The provider runs in the current
+workspace, uses bounded non-interactive JSONL output, forwards partial text and provider-owned
+activity live to the desktop, and honors Zest turn cancellation. The completed CLI result remains
+the source for persisted answer text and reported usage; provider-owned activity is ephemeral.
+
+---
+
 ### 2026-08-06 — Chat lifecycle state is separate from the transcript
 
 Decision: adopt the useful persistence boundary from TanStack AI without adding TanStack AI as

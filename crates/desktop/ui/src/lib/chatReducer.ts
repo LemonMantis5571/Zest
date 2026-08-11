@@ -1,4 +1,9 @@
-import type { ChatEvent, ChatMessage, ToolPart } from "./types.ts";
+import type {
+  ChatEvent,
+  ChatMessage,
+  ProviderActivityPart,
+  ToolPart,
+} from "./types.ts";
 
 /** Pure chat UI projection state reduced from desktop `chat-event` payloads. */
 export type ChatUiState = {
@@ -160,6 +165,35 @@ function patchAssistant(
   };
 }
 
+function providerActivityStatus(status: string): ProviderActivityPart["status"] {
+  switch (status.toLowerCase()) {
+    case "done":
+    case "complete":
+    case "completed":
+    case "success":
+    case "succeeded":
+      return "done";
+    case "error":
+    case "failed":
+    case "failure":
+    case "cancelled":
+    case "canceled":
+      return "error";
+    default:
+      return "running";
+  }
+}
+
+function finishProviderActivities(
+  activities: ProviderActivityPart[] | undefined,
+  status: ProviderActivityPart["status"]
+): ProviderActivityPart[] | undefined {
+  if (!activities?.length) return activities;
+  return activities.map((activity) =>
+    activity.status === "running" ? { ...activity, status } : activity
+  );
+}
+
 /**
  * Characterize / apply a single chat-event to UI state.
  * Mirrors the former App.tsx `handleChatEvent` switch (no side effects).
@@ -240,6 +274,36 @@ export function reduceChatEvent(
           thinking: joinThinkingStream(m.thinking, event.text),
           streaming: true,
         })),
+        effects,
+      };
+    }
+    case "provider_activity": {
+      const ensured = ensureAssistant(state, event.message_id, newId);
+      const activity: ProviderActivityPart = {
+        id: event.id,
+        title: event.title || "Provider activity",
+        status: providerActivityStatus(event.status),
+      };
+      return {
+        state: patchAssistant(ensured.state, ensured.id, (m) => {
+          const current = m.providerActivity ?? [];
+          const existing = current.find((item) => item.id === activity.id);
+          const next = existing
+            ? current.map((item) =>
+                item.id === activity.id
+                  ? {
+                      ...item,
+                      title:
+                        activity.title === "External tool"
+                          ? item.title
+                          : activity.title,
+                      status: activity.status,
+                    }
+                  : item
+              )
+            : [...current, activity];
+          return { ...m, providerActivity: next, streaming: true };
+        }),
         effects,
       };
     }
@@ -347,6 +411,7 @@ export function reduceChatEvent(
           ...m,
           streaming: false,
           question: undefined,
+          providerActivity: finishProviderActivities(m.providerActivity, "done"),
         }));
       } else if (next.activeAssistantId) {
         const id = next.activeAssistantId;
@@ -354,6 +419,7 @@ export function reduceChatEvent(
           ...m,
           streaming: false,
           question: undefined,
+          providerActivity: finishProviderActivities(m.providerActivity, "done"),
         }));
       }
       return {
@@ -374,6 +440,7 @@ export function reduceChatEvent(
             ...m,
             streaming: false,
             question: undefined,
+            providerActivity: finishProviderActivities(m.providerActivity, "error"),
             error: m.error ?? "turn cancelled",
           })),
           activeAssistantId: null,
@@ -392,6 +459,7 @@ export function reduceChatEvent(
             ...m,
             streaming: false,
             question: undefined,
+            providerActivity: finishProviderActivities(m.providerActivity, "error"),
             error: event.message,
             // Only set when signing in again is the actual fix.
             reconnectProvider: event.reconnect_provider ?? undefined,

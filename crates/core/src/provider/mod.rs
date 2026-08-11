@@ -11,6 +11,7 @@
 //! anything above noticing.
 
 pub mod anthropic;
+pub mod claude_code;
 pub mod openai_compatible;
 pub mod registry;
 
@@ -32,6 +33,16 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
                 id: provider_id.to_string(),
                 default_model: default_model.clone(),
                 models: catalogue_for_provider(provider_id, &default_model, &[], &[]),
+            }
+        }
+        ProviderConfig::ClaudeCode { model, models, .. } => {
+            let default_model = model
+                .clone()
+                .unwrap_or_else(|| crate::config::DEFAULT_CLAUDE_CODE_MODEL.to_string());
+            ProviderDescriptor {
+                id: provider_id.to_string(),
+                default_model: default_model.clone(),
+                models: catalogue_without_efforts(&default_model, models),
             }
         }
         ProviderConfig::Gateway {
@@ -303,6 +314,17 @@ impl ResumeHandle {
 pub enum StreamEvent<'a> {
     Text(&'a str),
     Thinking(&'a str),
+    /// Activity owned by a provider's internal agent loop.
+    ///
+    /// This is intentionally distinct from `ToolCallStart`/`ToolCallResult`:
+    /// those variants are Zest tool lifecycle events and cause the Agent to
+    /// coordinate local tool execution. Provider-owned activity is display
+    /// metadata only; the provider remains responsible for running it.
+    ProviderActivity {
+        id: &'a str,
+        title: &'a str,
+        status: &'a str,
+    },
     ToolCallStart {
         name: &'a str,
         id: &'a str,
@@ -479,6 +501,14 @@ pub trait Provider: Send + Sync {
     /// Whether this provider can be used right now. Rendered by the launch
     /// picker and checked before starting a parent conversation here.
     fn auth_status(&self) -> AuthStatus;
+
+    /// Whether this provider owns the model/tool loop itself, as Claude Code
+    /// does through its authenticated CLI runtime. Such a provider receives
+    /// the parent conversation but must not be given Zest's local tool loop or
+    /// the explicit external-delegation tool.
+    fn owns_agent_loop(&self) -> bool {
+        false
+    }
 
     /// Whether the endpoint honours Anthropic prompt caching (`cache_control`).
     ///

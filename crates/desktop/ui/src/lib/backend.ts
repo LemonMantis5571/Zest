@@ -58,6 +58,7 @@ export type DesktopBackend = {
     credential: string;
     key: string;
   }): Promise<void>;
+  configureClaudeCodeProvider(input: { id: string; model: string }): Promise<void>;
   openProjectConfig(root: string): Promise<void>;
   usageSnapshot(): Promise<UsageSnapshot>;
   usageReport(days: number): Promise<UsageReport>;
@@ -167,6 +168,7 @@ export function createTauriBackend(): DesktopBackend {
     providerKeyPresent: (id) => tauriApi.providerKeyPresent(id),
     configureApiProvider: (input) => tauriApi.configureApiProvider(input),
     configureAnthropicProvider: (input) => tauriApi.configureAnthropicProvider(input),
+    configureClaudeCodeProvider: (input) => tauriApi.configureClaudeCodeProvider(input),
     openProjectConfig: (root) => tauriApi.openProjectConfig(root),
     usageSnapshot: () => tauriApi.usageSnapshot(),
     usageReport: (days) => tauriApi.usageReport(days),

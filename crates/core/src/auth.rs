@@ -16,11 +16,10 @@
 //!    encrypted blob. Reporting those as logged-out would push the user to
 //!    re-authenticate for no reason, so they get `Unknown` instead.
 //!
-//! The desktop exposes a native shell only for the Zest-managed Codex sign-in:
-//! it spawns the helper with no console window, lets the system browser finish,
-//! then re-detects. Claude Code and Gemini CLI authenticate their own ACP
-//! workers; Zest never exchanges those tokens or presents duplicate Connect
-//! flows for them.
+//! The desktop exposes native shells for the Zest-managed Codex sign-in and the
+//! first-class Claude Code parent sign-in. Claude Code and Gemini CLI workers
+//! still authenticate in their own tools; Zest never exchanges those tokens or
+//! presents a worker session as the parent.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -223,6 +222,13 @@ pub fn detect_claude() -> AuthStatus {
         };
     }
 
+    detect_claude_code()
+}
+
+/// Readiness for the Claude Code CLI itself, deliberately ignoring any local
+/// CLIProxyAPI installation. A Claude Code parent provider must use the
+/// subscription session owned by the CLI, not silently switch to a gateway.
+pub fn detect_claude_code() -> AuthStatus {
     let Some(dir) = home_dir().map(|h| h.join(".claude")) else {
         return AuthStatus::Unknown {
             reason: "no home directory".into(),
@@ -399,6 +405,19 @@ pub fn resolve_login(provider_id: &str) -> Option<LoginSpawn> {
     }
 }
 
+/// Resolve the direct Claude Code CLI login used by the first-class parent
+/// provider. This deliberately bypasses CLIProxyAPI: the parent provider must
+/// authenticate the same subscription session that the `claude` executable
+/// will later use.
+pub fn resolve_claude_code_login() -> LoginSpawn {
+    LoginSpawn {
+        program: PathBuf::from("claude"),
+        args: vec!["login".into()],
+        browser_title: "Sign in with Claude",
+        browser_body: "Finish in your browser. This window will update when you’re done.",
+    }
+}
+
 fn cliproxy_login(
     flag: &str,
     browser_title: &'static str,
@@ -445,6 +464,15 @@ pub fn start_login(provider_id: &str) -> std::result::Result<LoginProcess, Strin
         )
     })?;
 
+    Ok(LoginProcess { spawn, child })
+}
+
+/// Start the direct Claude Code subscription login without routing through a
+/// gateway-owned authentication store.
+pub fn start_claude_code_login() -> std::result::Result<LoginProcess, String> {
+    let spawn = resolve_claude_code_login();
+    let child = spawn_silent(&spawn.program, &spawn.args)
+        .map_err(|e| format!("could not start Claude Code login: {e}"))?;
     Ok(LoginProcess { spawn, child })
 }
 
