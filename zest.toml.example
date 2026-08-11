@@ -28,6 +28,18 @@ enabled = true
 # model = "claude-opus-5"
 # credential = "anthropic"
 #
+# Claude Code can also be the parent provider for the whole Zest session. Run
+# `claude login`, then uncomment this block and set `default.provider = "claude"`.
+# It uses the Claude Code subscription and does not delegate through `[agents]`.
+# [providers.claude]
+# kind = "claude_code"
+# command = "claude"
+# model = "sonnet"
+# models = ["sonnet", "opus", "haiku"]
+# allow_mcp = false
+# permission_mode = "accept_edits"
+# timeout_secs = 900
+#
 # [providers.deepseek]
 # kind = "openai_compatible"
 # base_url = "https://api.deepseek.com"

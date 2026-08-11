@@ -27,17 +27,17 @@ use tokio::sync::oneshot;
 use ts_rs::TS;
 use zest_core::{
     can_start_login, compose_system_with_docs, derive_profile_stats, descriptor_for_picker_id,
-    descriptor_from_config, detect_all, display_path, ensure_gateway_running, env_context,
-    load_custom_system, load_project_docs, new_id, probe, save_custom_system,
-    start_login as core_start_login, truncate_chars, uses_gateway_auth, ApprovalDecision,
-    ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver, AuthStatus, ChatFacts,
-    ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace, GatewayState, HarnessError,
-    Ledger, LoginProcess, PersistPriority, PersistSnapshot, PersistWorker, Prices, ProfileStats,
-    ProjectSessionState, ProviderConfig, ProviderRegistry, ProviderSlot, QuestionRequest,
-    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
-    StreamEvent, Thread, ThreadCheckpoint, ThreadLoadError, ThreadStore, ThreadSummary,
-    ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION,
+    descriptor_from_config, detect_all, detect_claude_code, display_path, ensure_gateway_running,
+    env_context, load_custom_system, load_project_docs, new_id, probe, save_custom_system,
+    start_claude_code_login as core_start_claude_code_login, start_login as core_start_login,
+    truncate_chars, uses_gateway_auth, ApprovalDecision, ApprovalMode, ApprovalPolicy,
+    ApprovalRequest, Approver, AuthStatus, ChatFacts, ChatPersistence, Config, ExternalAgentMode,
+    ExternalWorkspace, GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority,
+    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderConfig,
+    ProviderRegistry, ProviderSlot, QuestionRequest, Questioner, RatesStatus, RecoverableRun,
+    RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint,
+    ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata, ToolRisk, UsageReport,
+    UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -51,14 +51,13 @@ use spaces::{SpaceState, DEFAULT_SPACE_ID};
 
 /// Providers shown in the desktop launch picker.
 ///
-/// Claude Code and Gemini CLI are external workers. Their sessions are owned
-/// by their CLIs and are configured under Settings → External workers rather
-/// than presented as Zest sign-in choices.
-const PICKER_IDS: &[&str] = &["codex"];
+/// Claude Code is available as a first-class parent and remains separately
+/// configurable as a delegated worker. Gemini remains worker-only.
+const PICKER_IDS: &[&str] = &["codex", "claude"];
 
-/// Sign-in flows Zest can launch from the desktop. Keep this narrower than the
-/// core auth catalogue: vendor CLI workers authenticate in their own tools.
-const DESKTOP_CONNECT_IDS: &[&str] = &["codex"];
+/// Sign-in flows Zest can launch from the desktop. Claude here means the
+/// first-class parent provider; worker authentication remains CLI-owned.
+const DESKTOP_CONNECT_IDS: &[&str] = &["codex", "claude"];
 
 fn desktop_can_start_login(provider_id: &str) -> bool {
     DESKTOP_CONNECT_IDS.contains(&provider_id) && can_start_login(provider_id)
@@ -471,7 +470,13 @@ struct ExternalAgentCheckView {
 }
 
 fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView {
-    let (status_kind, status_label, detail) = match &slot.status {
+    let configured_provider = config.providers.get(slot.id);
+    let auth_status = if matches!(configured_provider, Some(ProviderConfig::ClaudeCode { .. })) {
+        detect_claude_code()
+    } else {
+        slot.status.clone()
+    };
+    let (status_kind, status_label, detail) = match &auth_status {
         AuthStatus::Ready { account } => (
             "ready".into(),
             "Signed in".into(),
@@ -501,10 +506,13 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         ),
     };
 
-    let (configured, descriptor) = match config.providers.get(slot.id) {
+    let (configured, descriptor) = match configured_provider {
         Some(pc) => (true, descriptor_from_config(slot.id, pc)),
         None => (false, descriptor_for_picker_id(slot.id)),
     };
+    let method = configured_provider
+        .map(provider_method)
+        .unwrap_or(slot.method);
 
     // Being signed in is not the same as being reachable. A vendor CLI can hold
     // a perfectly good session for a provider this project has no entry for,
@@ -516,7 +524,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
         (
             "unconfigured".to_string(),
             "Not configured".to_string(),
-            match slot.status {
+            match auth_status {
                 AuthStatus::Ready { .. } => {
                     "Signed in. Configure this provider in Settings.".into()
                 }
@@ -528,7 +536,7 @@ fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView
     ProviderView {
         id: slot.id.to_string(),
         label: slot.label.to_string(),
-        method: slot.method.to_string(),
+        method: method.to_string(),
         status_kind,
         status_label,
         detail,
@@ -626,6 +634,7 @@ fn provider_method(config: &ProviderConfig) -> &'static str {
                 "Environment key"
             }
         }
+        ProviderConfig::ClaudeCode { .. } => "Claude Code subscription",
         ProviderConfig::Gateway { .. } => "Gateway",
         ProviderConfig::OpenaiCompatible {
             credential,
@@ -800,6 +809,18 @@ enum ChatEvent {
         turn_id: String,
         message_id: String,
         text: String,
+    },
+    /// Ephemeral activity from a provider-owned loop (for example Claude
+    /// Code reading a file). It is deliberately not persisted as a Zest tool
+    /// call and never enters the local tool executor.
+    ProviderActivity {
+        session_id: String,
+        thread_id: String,
+        turn_id: String,
+        message_id: String,
+        id: String,
+        title: String,
+        status: String,
     },
     ToolCallStart {
         session_id: String,
@@ -1026,7 +1047,9 @@ fn append_configured_direct_provider_views(rows: &mut Vec<ProviderView>, config:
         if existing.contains(id)
             || !matches!(
                 entry,
-                ProviderConfig::Anthropic { .. } | ProviderConfig::OpenaiCompatible { .. }
+                ProviderConfig::Anthropic { .. }
+                    | ProviderConfig::ClaudeCode { .. }
+                    | ProviderConfig::OpenaiCompatible { .. }
             )
         {
             continue;
@@ -1566,6 +1589,33 @@ fn configure_anthropic_provider(
     Ok(())
 }
 
+#[tauri::command]
+fn configure_claude_code_provider(
+    state: State<'_, AppState>,
+    id: String,
+    model: String,
+) -> Result<(), String> {
+    let _edit_guard = state
+        .config_edit
+        .lock()
+        .map_err(|_| "settings are busy; try again".to_string())?;
+    let path = editable_config_path(&state)?;
+    zest_core::config_edit::add_claude_code_provider(
+        &path,
+        &zest_core::config_edit::ClaudeCodeProviderInput {
+            id,
+            command: "claude".into(),
+            model,
+            models: vec!["sonnet".into(), "opus".into(), "haiku".into()],
+            allow_mcp: false,
+            permission_mode: zest_core::ClaudeCodePermissionMode::AcceptEdits,
+            timeout_secs: 900,
+        },
+    )?;
+    clear_workspace_config_cache(&state);
+    Ok(())
+}
+
 /// Open the project-local configuration in the user's default editor.
 ///
 /// Provider ownership is deliberately configured in `zest.toml`; this keeps
@@ -1875,7 +1925,9 @@ async fn probe_provider(config: &Config, id: &str) -> Result<(), ProbeFailure> {
 fn local_gateway_url(config: &Config, id: &str) -> Option<String> {
     match config.providers.get(id)? {
         ProviderConfig::Gateway { base_url, .. } => Some(base_url.clone()),
-        ProviderConfig::Anthropic { .. } | ProviderConfig::OpenaiCompatible { .. } => None,
+        ProviderConfig::Anthropic { .. }
+        | ProviderConfig::ClaudeCode { .. }
+        | ProviderConfig::OpenaiCompatible { .. } => None,
     }
 }
 
@@ -1884,7 +1936,7 @@ fn start_login(state: State<'_, AppState>, id: String) -> Result<LoginStarted, S
     if !desktop_can_start_login(&id) {
         return Err(match id.as_str() {
             "claude" => {
-                "Claude Code sign-in is managed by the Claude Code CLI. Run `claude login`, then enable Claude Code under Settings → External workers.".into()
+                "Claude Code sign-in is managed by the Claude Code CLI. Run `claude login`, then enable Claude Code as a parent provider.".into()
             }
             "antigravity" => {
                 "Gemini sign-in is managed by the Gemini CLI. Sign in there, then enable Gemini CLI under Settings → External workers.".into()
@@ -1908,7 +1960,11 @@ fn start_login(state: State<'_, AppState>, id: String) -> Result<LoginStarted, S
         *active = None;
     }
 
-    let process = core_start_login(&id)?;
+    let process = if id == "claude" {
+        core_start_claude_code_login()?
+    } else {
+        core_start_login(&id)?
+    };
     let spawn = &process.spawn;
     let started = LoginStarted {
         browser_title: spawn.browser_title.to_string(),
@@ -2534,6 +2590,7 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
         ChatEvent::ThinkingDelta {
             message_id, text, ..
         } => thread.apply_thinking_delta(message_id, text),
+        ChatEvent::ProviderActivity { .. } => {}
         ChatEvent::ToolCallStart {
             message_id,
             name,
@@ -4337,6 +4394,17 @@ async fn send_message(
                     message_id: assistant_message_id.clone(),
                     text: t.to_string(),
                 },
+                StreamEvent::ProviderActivity { id, title, status } => {
+                    ChatEvent::ProviderActivity {
+                        session_id: session_id.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        message_id: assistant_message_id.clone(),
+                        id: id.to_string(),
+                        title: title.to_string(),
+                        status: provider_activity_status(status).into(),
+                    }
+                }
                 StreamEvent::ToolCallStart { name, id } => ChatEvent::ToolCallStart {
                     session_id: session_id.clone(),
                     thread_id: thread_id.clone(),
@@ -4500,13 +4568,17 @@ async fn send_message(
 
             // The lock is released before the worker is told anything, so the
             // deferred read below can never wait on this event's own guard.
-            let priority = match live_thread.lock() {
-                Ok(mut thread) => {
-                    let priority = event_priority(&event);
-                    apply_event_to_thread(&mut thread, &event);
-                    Some(priority)
+            let priority = if matches!(&event, ChatEvent::ProviderActivity { .. }) {
+                None
+            } else {
+                match live_thread.lock() {
+                    Ok(mut thread) => {
+                        let priority = event_priority(&event);
+                        apply_event_to_thread(&mut thread, &event);
+                        Some(priority)
+                    }
+                    Err(_) => None,
                 }
-                Err(_) => None,
             };
 
             if let Some(priority) = priority {
@@ -5594,6 +5666,14 @@ fn tool_risk_wire(risk: ToolRisk) -> &'static str {
     }
 }
 
+fn provider_activity_status(status: &str) -> &'static str {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "completed" | "complete" | "done" | "success" | "succeeded" => "done",
+        "failed" | "failure" | "error" | "cancelled" | "canceled" => "error",
+        _ => "running",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5637,7 +5717,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_worker_auth_failures_point_back_to_the_cli() {
+    fn auth_failures_offer_the_right_recovery_path() {
         let failure = HarnessError::Api {
             status: 401,
             body: r#"{"error":{"message":"authentication failed"}}"#.into(),
@@ -5645,7 +5725,7 @@ mod tests {
 
         assert_eq!(
             format_turn_error_for_provider(&failure, "claude"),
-            "Claude Code could not authenticate this request. Sign in with the Claude Code CLI, then try again."
+            "This provider needs you to sign in again. Reconnect, then send your message again."
         );
         assert_eq!(
             format_turn_error_for_provider(&failure, "antigravity"),
@@ -5816,6 +5896,7 @@ pub fn run() {
             provider_key_present,
             configure_api_provider,
             configure_anthropic_provider,
+            configure_claude_code_provider,
             open_project_config,
             usage_snapshot,
             usage_report,
@@ -6161,7 +6242,7 @@ mod characterization {
             view.detail,
             "Signed in. Configure this provider in Settings."
         );
-        assert!(!view.can_connect);
+        assert!(view.can_connect);
     }
 
     #[test]
@@ -6177,10 +6258,10 @@ mod characterization {
     }
 
     #[test]
-    fn desktop_uses_cli_auth_for_claude_and_gemini_workers() {
-        assert_eq!(PICKER_IDS, &["codex"]);
+    fn desktop_exposes_claude_as_a_parent_login_choice() {
+        assert_eq!(PICKER_IDS, &["codex", "claude"]);
         assert!(desktop_can_start_login("codex"));
-        assert!(!desktop_can_start_login("claude"));
+        assert!(desktop_can_start_login("claude"));
         assert!(!desktop_can_start_login("antigravity"));
     }
 
@@ -6216,6 +6297,17 @@ model = "gpt-5.6-sol"
 
     #[test]
     fn configured_provider_methods_match_the_secret_source() {
+        assert_eq!(
+            provider_method(&ProviderConfig::ClaudeCode {
+                command: "claude".into(),
+                model: Some("sonnet".into()),
+                models: vec!["sonnet".into()],
+                allow_mcp: false,
+                permission_mode: zest_core::ClaudeCodePermissionMode::AcceptEdits,
+                timeout_secs: 900,
+            }),
+            "Claude Code subscription"
+        );
         assert_eq!(
             provider_method(&ProviderConfig::Anthropic {
                 api_key_env: "ANTHROPIC_API_KEY".into(),

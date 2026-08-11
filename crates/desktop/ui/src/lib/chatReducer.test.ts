@@ -86,6 +86,37 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(state.currentTurnId, null);
   });
 
+  it("shows provider-owned activity without creating a local tool card", () => {
+    const state = reduceAll([
+      { kind: "user", ...ID, message_id: "u1", text: "inspect" },
+      { kind: "assistant_start", ...ID, message_id: "a1" },
+      {
+        kind: "provider_activity",
+        ...ID,
+        message_id: "a1",
+        id: "claude-tool-1",
+        title: "Read",
+        status: "running",
+      },
+      {
+        kind: "provider_activity",
+        ...ID,
+        message_id: "a1",
+        id: "claude-tool-1",
+        title: "External tool",
+        status: "done",
+      },
+      { kind: "text_delta", ...ID, message_id: "a1", text: "done" },
+      { kind: "done", ...ID, message_id: "a1" },
+    ]);
+
+    const a = assistant(state);
+    assert.deepEqual(a.tools, []);
+    assert.deepEqual(a.providerActivity, [
+      { id: "claude-tool-1", title: "Read", status: "done" },
+    ]);
+  });
+
   it("separates thinking sentence chunks that arrive without whitespace", () => {
     const state = reduceAll([
       { kind: "assistant_start", ...ID, message_id: "a1" },

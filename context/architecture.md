@@ -101,23 +101,28 @@ instead of staying higher-ranked.
 API-key providers own their credentials; Zest reads only whether a usable setup exists.
 `AuthStatus` distinguishes `NotLoggedIn` from `Unknown` — Claude and Antigravity can keep
 credentials somewhere unreadable on Windows, and reporting those as logged-out would push the user
-to re-authenticate for nothing. The desktop **Connect** button is limited to the Zest-managed Codex
-flow; Claude Code and Gemini CLI sign in through their own tools before an ACP worker is enabled.
-A hand-installed gateway with its own config keeps precedence.
+to re-authenticate for nothing. The desktop **Connect** button supports the Zest-managed Codex flow
+and the direct Claude Code parent login. Claude Code and Gemini CLI workers still sign in through
+their own tools before an ACP worker is enabled. A hand-installed gateway with its own config keeps
+precedence.
 
 Crucially, *how* a provider is reached is an implementation detail behind the trait. Anthropic is
 native today. Codex and Antigravity can be reached through CLIProxyAPI to get working quickly, then
 swapped to native clients later without the agent loop noticing.
 
-**ACP workers.** The parent conversation stays pinned to the provider chosen at session start.
-Bounded delegation runs through `delegate_external`, which invokes an explicitly configured
+**Claude Code parent and ACP workers.** A `claude_code` provider may own the parent model/tool loop
+directly through the authenticated Claude Code CLI; RuntimeBuilder does not attach Zest's local
+tools or `delegate_external` in that mode. The parent conversation stays pinned to the provider
+chosen at session start. Bounded delegation runs through `delegate_external`, which invokes an explicitly configured
 `[agents.*]` ACP or headless CLI worker. The worker is isolated, approval-gated, and returns an
 answer or diff for review. There is no automatic per-turn routing and no Zest-to-Zest delegate
 tool; `[default]` selects only the parent provider. `allow_mcp = true` is an explicit pass-through
 for the worker's own MCP configuration. It is disabled by default: Claude receives
 `--strict-mcp-config`, and Gemini receives an empty MCP allowlist. Zest preserves the worker's MCP
 environment after removing Zest's own provider credentials, but does not inspect or individually
-approve MCP calls; native Zest MCP remains a later design.
+approve MCP calls; native Zest MCP remains a later design. Claude's `stream-json` partial events
+are forwarded as ordinary text/thinking deltas, while internal tool activity uses a separate
+provider-owned UI event so the Agent never executes those calls as local Zest tools.
 
 **ModelSpec.** Each `Provider` owns a catalogue (`ModelSpec` / `ProviderDescriptor`). Gateway
 config may list `models` and `efforts`; when `models` is omitted, only the configured default is

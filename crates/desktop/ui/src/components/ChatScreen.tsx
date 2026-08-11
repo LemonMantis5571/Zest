@@ -1,15 +1,18 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  CheckCircle2Icon,
   ChevronRightIcon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
   ImageIcon,
   CommandIcon,
+  LoaderCircleIcon,
   PanelRightOpenIcon,
   PencilIcon,
   SettingsIcon,
   TriangleAlertIcon,
+  XCircleIcon,
   XIcon,
 } from "lucide-react";
 
@@ -66,6 +69,7 @@ import type {
   ApprovalMode,
   ChatMessage,
   PreparedAttachment,
+  ProviderActivityPart,
   ProviderRow,
   SessionInfo,
   SessionWarning,
@@ -328,6 +332,40 @@ function ThinkingTrace({
   );
 }
 
+function ProviderActivityTrace({
+  activities,
+}: {
+  activities: ProviderActivityPart[];
+}) {
+  if (activities.length === 0) return null;
+  return (
+    <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground" aria-label="Provider activity">
+      <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
+        Claude Code
+      </div>
+      {activities.map((activity) => {
+        const icon =
+          activity.status === "done" ? (
+            <CheckCircle2Icon className="size-3.5 shrink-0 text-primary/90" aria-hidden />
+          ) : activity.status === "error" ? (
+            <XCircleIcon className="size-3.5 shrink-0 text-destructive/90" aria-hidden />
+          ) : (
+            <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden />
+          );
+        return (
+          <div key={activity.id} className="flex min-w-0 items-center gap-1.5">
+            {icon}
+            <span className="min-w-0 truncate text-foreground/75">{activity.title}</span>
+            <span className="shrink-0 text-[10px] text-muted-foreground/60">
+              {activity.status}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Keep settled messages out of the streaming render path. Appending a delta
  * still updates the active row, but unchanged rows now retain their existing
@@ -462,6 +500,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
                 )
               )}
             </div>
+          ) : null}
+
+          {msg.providerActivity ? (
+            <ProviderActivityTrace activities={msg.providerActivity} />
           ) : null}
 
           {msg.thinking ? (

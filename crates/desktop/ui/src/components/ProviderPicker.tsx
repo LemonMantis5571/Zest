@@ -48,6 +48,8 @@ export function ProviderPicker({
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [addingApiProvider, setAddingApiProvider] = useState(false);
+  const [configuringClaudeCode, setConfiguringClaudeCode] = useState(false);
+  const [claudeCodeError, setClaudeCodeError] = useState<string | null>(null);
   const selected = providers.find((p) => p.id === selectedId) ?? null;
   const selectedNeedsConnect =
     selected != null && recentVerifyFailed(selected.id);
@@ -212,6 +214,39 @@ export function ProviderPicker({
 
       {error && !error.workspace ? (
         <p className="mt-3 text-xs text-destructive">{error.message}</p>
+      ) : null}
+
+      {selected?.id === "claude" && !selected.configured ? (
+        <div className="mt-4 rounded-lg border border-border/70 bg-card/40 p-3">
+          <div className="text-xs font-medium">Use Claude Code subscription</div>
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+            Zest will use your Claude Code CLI session as the parent agent, with no
+            delegated worker involved.
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            className="mt-2.5 w-full"
+            disabled={continuing || configuringClaudeCode}
+            onClick={() => {
+              setConfiguringClaudeCode(true);
+              setClaudeCodeError(null);
+              void getBackend()
+                .configureClaudeCodeProvider({ id: "claude", model: "sonnet" })
+                .then(async () => {
+                  await onRefresh();
+                  onSelect("claude");
+                })
+                .catch(() => setClaudeCodeError("Could not enable Claude Code. Try again."))
+                .finally(() => setConfiguringClaudeCode(false));
+            }}
+          >
+            {configuringClaudeCode ? "Enabling…" : "Enable Claude Code"}
+          </Button>
+          {claudeCodeError ? (
+            <p className="mt-2 text-xs text-destructive">{claudeCodeError}</p>
+          ) : null}
+        </div>
       ) : null}
 
       {/*

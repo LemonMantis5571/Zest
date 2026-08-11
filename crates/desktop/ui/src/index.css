@@ -191,41 +191,31 @@
   animation: zest-shimmer 1.4s ease-in-out infinite;
 }
 
-@keyframes zest-pulse-mark {
+@keyframes zest-pulse-dot {
   0%,
   100% {
-    transform: scale(1);
+    opacity: 0.28;
+    transform: scale(0.68);
+  }
+  32% {
     opacity: 1;
+    transform: scale(1);
   }
-  50% {
-    transform: scale(1.06);
-    opacity: 0.88;
-  }
-}
-
-@keyframes zest-pulse-ring {
-  0%,
-  100% {
-    transform: scale(0.92);
-    opacity: 0.35;
-  }
-  50% {
-    transform: scale(1.15);
-    opacity: 0.08;
+  62% {
+    opacity: 0.56;
+    transform: scale(0.84);
   }
 }
 
-.zest-pulse-mark {
-  animation: zest-pulse-mark 1.5s ease-in-out infinite;
+.zest-pulse-dots {
+  align-items: center;
+  justify-items: center;
 }
 
-.zest-pulse-ring {
-  background: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--primary) 45%, transparent) 0%,
-    transparent 70%
-  );
-  animation: zest-pulse-ring 1.5s ease-in-out infinite;
+.zest-pulse-dot {
+  width: 100%;
+  background: color-mix(in srgb, var(--foreground) 68%, var(--primary) 32%);
+  animation: zest-pulse-dot 1.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -247,7 +237,8 @@
     scroll-behavior: auto !important;
   }
 
-  .zest-pulse-ring {
-    opacity: 0.2;
+  .zest-pulse-dot {
+    opacity: 0.7;
+    transform: none;
   }
 }

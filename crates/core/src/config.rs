@@ -19,6 +19,7 @@ use serde::Deserialize;
 use crate::error::{HarnessError, Result};
 
 pub const CONFIG_FILE: &str = "zest.toml";
+pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "sonnet";
 
 /// Safe starter config embedded in every build. It contains provider metadata,
 /// never a credential, so a fresh install can bootstrap user-global config
@@ -144,6 +145,29 @@ pub enum ProviderConfig {
         #[serde(default)]
         credential: Option<String>,
     },
+    /// Claude Code owns the authenticated subscription session and its
+    /// built-in coding tools. Unlike an external agent, this provider is the
+    /// identity of the parent conversation.
+    ClaudeCode {
+        /// Executable name or absolute path. No shell is involved.
+        #[serde(default = "default_claude_code_command")]
+        command: String,
+        /// Optional CLI-owned model alias or model id. Omitted uses 'sonnet'.
+        #[serde(default)]
+        model: Option<String>,
+        /// Optional allow-list for the Claude Code model picker.
+        #[serde(default)]
+        models: Vec<String>,
+        /// Let Claude Code load MCP servers from its own configuration.
+        #[serde(default)]
+        allow_mcp: bool,
+        /// Permission mode passed to Claude Code's non-interactive runtime.
+        #[serde(default)]
+        permission_mode: ClaudeCodePermissionMode,
+        /// Parent process limit, capped at the same bound as delegated workers.
+        #[serde(default = "default_external_timeout_secs")]
+        timeout_secs: u64,
+    },
     Gateway {
         /// Origin only — `http://127.0.0.1:8317`, not `.../v1/messages`.
         base_url: String,
@@ -181,6 +205,31 @@ pub enum ProviderConfig {
         #[serde(default)]
         api_key_env: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeCodePermissionMode {
+    /// Let Claude Code apply its own interactive/default permission policy.
+    #[default]
+    Default,
+    /// Allow file edits while retaining Claude Code's command safeguards.
+    AcceptEdits,
+    /// Keep the parent session read-only and plan-oriented.
+    Plan,
+    /// Disable Claude Code permission prompts. Use only in a throwaway tree.
+    BypassPermissions,
+}
+
+impl ClaudeCodePermissionMode {
+    pub fn cli_value(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Plan => "plan",
+            Self::BypassPermissions => "bypassPermissions",
+        }
+    }
 }
 
 /// An external coding agent Zest may invoke as an explicit delegated worker.
@@ -244,6 +293,7 @@ impl ProviderConfig {
     pub fn key_env(&self) -> Option<&str> {
         match self {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
+            ProviderConfig::ClaudeCode { .. } => None,
             ProviderConfig::Gateway { api_key_env, .. } => api_key_env.as_deref(),
             ProviderConfig::OpenaiCompatible { api_key_env, .. } => api_key_env.as_deref(),
         }
@@ -252,6 +302,10 @@ impl ProviderConfig {
 
 fn default_anthropic_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
+}
+
+fn default_claude_code_command() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -486,6 +540,23 @@ impl Config {
                 ));
             }
         }
+        for (id, provider) in &self.providers {
+            if let ProviderConfig::ClaudeCode {
+                command,
+                timeout_secs,
+                ..
+            } = provider
+            {
+                if command.trim().is_empty() {
+                    issues.push(format!("Claude Code provider {id} has an empty command"));
+                }
+                if *timeout_secs == 0 || *timeout_secs > 3_600 {
+                    issues.push(format!(
+                        "Claude Code provider {id} timeout_secs must be between 1 and 3600"
+                    ));
+                }
+            }
+        }
         issues
     }
 }
@@ -597,6 +668,38 @@ credential = "deepseek"
                 assert_eq!(credential.as_deref(), Some("deepseek"));
             }
             other => panic!("expected OpenAI-compatible provider, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_claude_code_parent_defaults() {
+        let config = Config::parse(
+            r#"
+[providers.claude]
+kind = "claude_code"
+model = "opus"
+permission_mode = "accept_edits"
+"#,
+        )
+        .expect("valid Claude Code provider config");
+
+        match &config.providers["claude"] {
+            ProviderConfig::ClaudeCode {
+                command,
+                model,
+                models,
+                allow_mcp,
+                permission_mode,
+                timeout_secs,
+            } => {
+                assert_eq!(command, "claude");
+                assert_eq!(model.as_deref(), Some("opus"));
+                assert!(models.is_empty());
+                assert!(!allow_mcp);
+                assert_eq!(*permission_mode, ClaudeCodePermissionMode::AcceptEdits);
+                assert_eq!(*timeout_secs, 900);
+            }
+            other => panic!("expected Claude Code provider, got {other:?}"),
         }
     }
 
