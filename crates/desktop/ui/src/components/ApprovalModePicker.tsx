@@ -61,7 +61,7 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
   }, [open, mode, onModeChange]);
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative shrink-0">
       <button
         type="button"
         disabled={disabled}
@@ -69,7 +69,7 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors",
+          "flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] transition-colors",
           "hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
           disabled && "cursor-not-allowed opacity-50",
           // Bypass is the one mode worth noticing from across the room.
@@ -89,7 +89,7 @@ export function ApprovalModePicker({ mode, disabled, onModeChange }: Props) {
         <div
           role="menu"
           className={cn(
-            "absolute bottom-[calc(100%+6px)] left-0 z-40 w-64",
+            "absolute right-0 bottom-[calc(100%+6px)] z-40 w-64 max-w-[calc(100vw-1rem)] max-h-[min(24rem,calc(100vh-1rem))] overflow-y-auto",
             "rounded-lg border border-border/80 bg-popover p-1 shadow-xl"
           )}
         >
