@@ -18,6 +18,8 @@ Committed files:
 - `ModelCapability.ts` — model id + efforts
 - `ToolMetaView.ts` — delegation provenance side-channel
 
+`GitContext.ts` / `PullRequestView.ts` expose the active Git checkout and optional PR metadata.
+
 `WorkspaceReview.ts` is the read-only Git workspace review result.
 
 `ChatMessage` / `ToolPart` / `UsageSnapshot` stay handwritten in `../types.ts`

@@ -19,6 +19,7 @@ import type {
   AttachmentInput,
   ChatEvent,
   ChatMessage,
+  GitContext,
   SessionInfo,
   SpacesSnapshot,
 } from "./types";
@@ -845,6 +846,17 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async gitBranch() {
       return "master";
+    },
+    async gitContext(): Promise<GitContext> {
+      return {
+        branch: "master",
+        baseBranch: "master",
+        branchChanged: false,
+        additions: 12,
+        deletions: 3,
+        changedFiles: 1,
+        statsSource: "branch",
+      };
     },
     async verifyWorkspace() {
       return {

@@ -68,6 +68,7 @@ import type {
   ApprovalChoice,
   ApprovalMode,
   ChatMessage,
+  GitContext,
   PreparedAttachment,
   ProviderActivityPart,
   ProviderRow,
@@ -91,6 +92,7 @@ type Props = {
   draft: string;
   attachments: PreparedAttachment[];
   branch: string | null;
+  gitContext: GitContext | null;
   profile: UserProfile;
   sending: boolean;
   queuedMessages: ReadonlyArray<QueuedTurn>;
@@ -624,6 +626,7 @@ export function ChatScreen({
   draft,
   attachments,
   branch,
+  gitContext,
   profile,
   sending,
   queuedMessages,
@@ -1124,6 +1127,7 @@ export function ChatScreen({
             defaultModel={session.defaultModel}
             folderLabel={folderLabel}
             branch={branch}
+            gitContext={gitContext}
             contextRefreshKey={`${session.threadId}:${messages.length}:${session.checkpoints.length}:${sending ? 1 : 0}`}
             sending={sending}
             queuedMessages={queuedMessages}

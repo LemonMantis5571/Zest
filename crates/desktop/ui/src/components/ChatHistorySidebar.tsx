@@ -9,7 +9,9 @@ import {
   ChevronsRightIcon,
   FolderIcon,
   FolderOpenIcon,
+  GitBranchIcon,
   GitForkIcon,
+  GitPullRequestIcon,
   Layers3Icon,
   LoaderCircleIcon,
   MoreHorizontalIcon,
@@ -86,6 +88,7 @@ function formatAge(epochSecs: number) {
 
 const STORAGE_KEY = "zest.sidebarOpen";
 const EXPANDED_KEY = "zest.sidebarProjectsExpanded";
+const GIT_METADATA_POLL_MS = 30_000;
 
 export function readSidebarOpen(): boolean {
   try {
@@ -293,6 +296,12 @@ export function ChatHistorySidebar({
       cancelled = true;
     };
   }, [open, activeThreadId, activeProjectPath, activeProviderId, tick]);
+
+  useEffect(() => {
+    if (!open) return;
+    const interval = window.setInterval(() => setTick((value) => value + 1), GIT_METADATA_POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -528,6 +537,16 @@ export function ChatHistorySidebar({
       activity && activity.state !== "idle"
         ? activityDescription(activity, now)
         : undefined;
+    const git = thread.gitContext;
+    const branchChanged = Boolean(
+      git?.branch && git.baseBranch && git.branch !== git.baseBranch
+    );
+    const pullRequest = git?.pullRequest;
+    const gitText = pullRequest
+      ? `Pull request #${pullRequest.number}: +${pullRequest.additions} −${pullRequest.deletions} · ${pullRequest.changedFiles} files`
+      : branchChanged
+        ? `Branch ${git?.branch} differs from ${git?.baseBranch}`
+        : undefined;
     // Shown on every row now that it is a mark rather than a word. The name
     // used to be hidden unless a project mixed providers, because `anthropic`
     // spelled out next to every chat was noise — a glyph is not, and knowing
@@ -544,7 +563,7 @@ export function ChatHistorySidebar({
               /* Parent handlers surface the actionable error. */
             });
           }}
-          aria-label={activityText ? `${title}. ${activityText}` : undefined}
+          aria-label={[activityText, gitText].filter(Boolean).join(". ") || undefined}
           className={cn(
             "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-24 pl-2 text-left outline-none transition-colors",
             "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
@@ -555,6 +574,24 @@ export function ChatHistorySidebar({
           )}
         >
           <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
+          {branchChanged ? (
+            <span
+              title={`This chat is on ${git?.branch}; its original branch was ${git?.baseBranch}.`}
+              aria-label={gitText}
+              className="flex shrink-0 items-center text-muted-foreground"
+            >
+              <GitBranchIcon className="size-3.5 opacity-80" />
+            </span>
+          ) : null}
+          {pullRequest ? (
+            <span
+              title={`PR #${pullRequest.number}: ${pullRequest.title} · +${pullRequest.additions} −${pullRequest.deletions} · ${pullRequest.changedFiles} files`}
+              aria-label={`Pull request #${pullRequest.number}`}
+              className="flex shrink-0 items-center text-muted-foreground hover:text-foreground"
+            >
+              <GitPullRequestIcon className="size-3.5 opacity-80" />
+            </span>
+          ) : null}
           {owner ? (
             <span
               title={`This chat belongs to ${owner}. Zest will keep the original provider or let you open a copy.`}

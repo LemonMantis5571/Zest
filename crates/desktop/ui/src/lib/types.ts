@@ -9,6 +9,8 @@ import type { SessionMeta as GeneratedSessionMeta } from "./generated/SessionMet
 import type { ThreadCheckpointView } from "./generated/ThreadCheckpoint.ts";
 import type { TurnRecoveryView } from "./generated/TurnRecovery.ts";
 import type { ToolMetaView } from "./generated/ToolMetaView.ts";
+import type { GitContextView as GeneratedGitContext } from "./generated/GitContext.ts";
+import type { PullRequestView } from "./generated/PullRequestView.ts";
 import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/WorkspaceReview.ts";
 import type { PlanningQuestion } from "./planningQuestion.ts";
 
@@ -154,6 +156,18 @@ export type SessionMeta = GeneratedSessionMeta;
 
 export type ThreadCheckpoint = ThreadCheckpointView;
 export type TurnRecovery = TurnRecoveryView;
+export type PullRequestLink = PullRequestView & {
+  repository?: string;
+};
+export type GitContext = GeneratedGitContext;
+
+/** Durable checkout/PR association stored on a chat summary. */
+export type ThreadGitContext = {
+  baseBranch?: string;
+  branch?: string;
+  startCommit?: string;
+  pullRequest?: PullRequestLink;
+};
 
 export type ThreadSummary = {
   id: string;
@@ -163,6 +177,7 @@ export type ThreadSummary = {
   pinned: boolean;
   providerId?: string;
   messageCount: number;
+  gitContext?: ThreadGitContext;
 };
 
 /** Sidebar grouping: one project folder + its chats. */

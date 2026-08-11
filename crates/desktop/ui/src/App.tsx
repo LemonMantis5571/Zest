@@ -70,6 +70,7 @@ import type {
   ApprovalMode,
   ChatEvent,
   ChatMessage,
+  GitContext,
   PreparedAttachment,
   ProviderRow,
   SessionInfo,
@@ -94,6 +95,8 @@ const POLL_MS = 1500;
 const POLL_MAX_TICKS = 120;
 /** How often to re-read .git/HEAD while a chat is open. */
 const BRANCH_POLL_MS = 2000;
+/** PR metadata is remote-backed and changes much less often than .git/HEAD. */
+const GIT_CONTEXT_POLL_MS = 30_000;
 
 async function showAttention(
   title: string,
@@ -333,6 +336,7 @@ export default function App() {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [workspaceReview, setWorkspaceReview] = useState<WorkspaceReview | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
+  const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [profile, setProfile] = useState<UserProfile>({
     displayName: "",
     avatarDataUrl: "",
@@ -862,6 +866,34 @@ export default function App() {
     };
   }, [session]);
 
+  const activeThreadId = session?.threadId;
+  useEffect(() => {
+    if (!activeThreadId) {
+      setGitContext(null);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await backend.gitContext();
+        if (cancelled) return;
+        setGitContext(next);
+        const nextBranch = next.branch;
+        if (nextBranch) {
+          setBranch((current) => (current === nextBranch ? current : nextBranch));
+        }
+      } catch {
+        /* GitHub CLI is optional; keep the last known context visible. */
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, GIT_CONTEXT_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [activeThreadId]);
+
   const applySession = useCallback((info: SessionInfo, opts?: { clearDraft?: boolean }) => {
     const prevThread = threadIdRef.current;
     if (prevThread && prevThread !== info.threadId) {
@@ -871,7 +903,9 @@ export default function App() {
     setSession(info);
     setWorkspacePath(info.root);
     setWorkspaceReview(null);
+    setGitContext(null);
     void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
+    void backend.gitContext().then(setGitContext).catch(() => setGitContext(null));
     setSelectedId(info.provider);
     setModel(info.model);
     setEffort(effortFromSession(info.effort, DEFAULT_EFFORT));
@@ -1986,6 +2020,7 @@ export default function App() {
             draft={draft}
             attachments={attachments}
             branch={branch}
+            gitContext={gitContext}
             profile={profile}
             sending={sending}
             queuedMessages={threadQueues[session.threadId] ?? []}
