@@ -608,7 +608,7 @@ export function Composer({
               <span className="hidden truncate sm:inline">· {modelLabel(model)}</span>
             ) : null}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             <ApprovalModePicker
               mode={approvalMode}
               disabled={optionsDisabled || compacting}
@@ -616,6 +616,7 @@ export function Composer({
             />
             <ContextUsageButton
               refreshKey={contextRefreshKey}
+              className="shrink-0"
             />
           </div>
         </div>

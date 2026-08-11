@@ -72,7 +72,7 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
         aria-haspopup="dialog"
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "inline-flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground outline-none transition-colors",
+          "inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground outline-none transition-colors",
           "hover:bg-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
           open && "bg-secondary text-foreground"
         )}
