@@ -148,7 +148,7 @@ function Set-UnixExecutable([string]$path) {
     if (-not $chmod) {
         throw "Cannot set Unix executable permissions for $path. Run this target fetch on the packaging OS."
     }
-    & $chmod.Source +x -- $path
+    & $chmod.Source -- +x $path
     if ($LASTEXITCODE -ne 0) { throw "chmod failed for $path" }
     Assert-UnixExecutable $path
 }
