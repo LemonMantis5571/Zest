@@ -8,15 +8,16 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 const SERVICE: &str = "zest";
+type CachedCredential = Result<Option<String>, String>;
+type CredentialCache = HashMap<String, CachedCredential>;
 
 // A denied or failed OS keychain lookup is re-asked by the UI's status poll
 // every couple of seconds; without this, that turns one "Deny" click into a
 // prompt repeating for as long as the poll runs. Cache the outcome for the
 // life of the process: a denial (or a success) sticks until the caller
 // explicitly changes it via `set`/`delete`, or the app restarts.
-fn cache() -> &'static Mutex<HashMap<String, Result<Option<String>, String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Result<Option<String>, String>>>> =
-        OnceLock::new();
+fn cache() -> &'static Mutex<CredentialCache> {
+    static CACHE: OnceLock<Mutex<CredentialCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
