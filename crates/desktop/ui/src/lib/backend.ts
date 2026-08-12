@@ -118,6 +118,11 @@ export type DesktopBackend = {
     projectPath: string | null | undefined,
     pinned: boolean
   ): Promise<void>;
+  renameThread(
+    id: string,
+    projectPath: string | null | undefined,
+    title: string
+  ): Promise<ThreadSummary>;
   sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
   cancelTurn(threadId?: string): Promise<void>;
@@ -213,6 +218,8 @@ export function createTauriBackend(): DesktopBackend {
     deleteThread: (id, projectPath) => tauriApi.deleteThread(id, projectPath),
     setThreadPinned: (id, projectPath, pinned) =>
       tauriApi.setThreadPinned(id, projectPath, pinned),
+    renameThread: (id, projectPath, title) =>
+      tauriApi.renameThread(id, projectPath, title),
     sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
     saveMarkdown: (suggestedName, markdown) =>
       tauriApi.saveMarkdown(suggestedName, markdown),

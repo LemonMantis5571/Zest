@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   CheckCircle2Icon,
   ChevronRightIcon,
@@ -743,6 +751,45 @@ export function ChatScreen({
     }
     return null;
   }, [messages]);
+  const hasNeedsInput = pendingApprovals.length > 0 || pendingQuestion !== null;
+  const pendingApprovalId = pendingApprovals[0]?.id;
+  const pendingQuestionId = pendingQuestion?.messageId;
+  const pendingQuestionText = pendingQuestion?.question;
+  const needsInputCardRef = useRef<HTMLDivElement>(null);
+  const [needsInputCardHeight, setNeedsInputCardHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!hasNeedsInput) {
+      setNeedsInputCardHeight(0);
+      return;
+    }
+
+    const card = needsInputCardRef.current;
+    if (!card) return;
+
+    const updateHeight = () => {
+      setNeedsInputCardHeight(Math.ceil(card.getBoundingClientRect().height));
+    };
+
+    updateHeight();
+    if (typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(card);
+    return () => observer.disconnect();
+  }, [
+    hasNeedsInput,
+    pendingApprovalId,
+    pendingQuestionId,
+    pendingQuestionText,
+  ]);
+
+  // The card is positioned above the composer, so shrink the transcript
+  // viewport by the card's actual height and leave a small visual gap. The
+  // fallback keeps the first paint safe before ResizeObserver reports it.
+  const transcriptBottomPadding = hasNeedsInput
+    ? Math.max(needsInputCardHeight, 160) + 152
+    : undefined;
 
   const startEditingMessage = useCallback(
     (messageId: string, text: string) => {
@@ -1033,7 +1080,15 @@ export function ChatScreen({
 
         <div className="relative min-h-0 flex-1">
           <MessageScrollerProvider autoScroll scrollEdgeThreshold={24}>
-            <MessageScroller className="absolute inset-0 pb-40">
+            <MessageScroller
+              className={cn("absolute inset-0", !hasNeedsInput && "pb-40")}
+              style={{
+                paddingBottom:
+                  transcriptBottomPadding === undefined
+                    ? undefined
+                    : `${transcriptBottomPadding}px`,
+              }}
+            >
               <MessageScrollerViewport className="scroll-fade-b">
                 <MessageScrollerContent className="mx-auto w-full max-w-[var(--chat-max)] gap-6 px-4 py-6">
                   {messages.length === 0 ? (
@@ -1146,9 +1201,10 @@ export function ChatScreen({
             each pending call as a one-line "Awaiting approval" row, so the
             history stays readable — it just does not ask twice.
           */}
-          {pendingApprovals.length > 0 || pendingQuestion ? (
+          {hasNeedsInput ? (
             <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-[8.5rem]">
               <NeedsInputCard
+                cardRef={needsInputCardRef}
                 question={pendingApprovals.length === 0 ? pendingQuestion?.question : undefined}
                 approval={pendingApprovals[0]}
                 pendingApprovalCount={pendingApprovals.length}

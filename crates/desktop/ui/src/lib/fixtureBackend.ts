@@ -10,9 +10,9 @@
  * compile-time constant, so the import is statically dead in a production
  * build and the bundler removes the whole module.
  */
-import { runFixtureStream } from "./fixture";
-import { safeMarkdownFilename } from "./markdownExport";
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT } from "./models";
+import { runFixtureStream } from "./fixture.ts";
+import { safeMarkdownFilename } from "./markdownExport.ts";
+import { CODEX_MODELS, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT } from "./models.ts";
 import type { DesktopBackend } from "./backend";
 import type {
   ApprovalMode,
@@ -24,6 +24,7 @@ import type {
   GitContext,
   SessionInfo,
   SpacesSnapshot,
+  ThreadSummary,
 } from "./types";
 
 const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
@@ -54,6 +55,7 @@ function notAvailable(op: string): never {
 const DEFAULT_FIXTURE_SPACE_ID = "space:default";
 const MAX_FIXTURE_SPACE_NAME_CHARS = 60;
 const MAX_FIXTURE_EMOJI_CHARS = 16;
+const MAX_FIXTURE_THREAD_TITLE_CHARS = 200;
 
 function takeFixtureChars(value: string, max: number) {
   return [...value].slice(0, max).join("");
@@ -90,6 +92,10 @@ export function createFixtureBackend(): DesktopBackend {
   let chatHandlerGeneration = 0;
   let workspace = ".";
   let fixturePinned = false;
+  const fixtureThreadTitles = new Map<string, string>([
+    ["fixture", "Fixture"],
+    ["fixture-local", "Local model chat"],
+  ]);
   const fixtureSpaces: SpacesSnapshot = {
     activeSpaceId: "space:default",
     spaces: [
@@ -128,6 +134,97 @@ export function createFixtureBackend(): DesktopBackend {
       "gemini-2.5-flash",
     ],
   };
+
+  let delegationHandler: ((event: DelegationEvent) => void) | null = null;
+  let delegationHandlerGeneration = 0;
+  let fixtureDelegationJob: DelegationJob = {
+    jobId: "fixture-delegation-1",
+    parentThreadId: session.threadId,
+    projectRoot: workspace,
+    cardId: "fixture-card-1",
+    title: "Add the fixture lifecycle",
+    objective: "Exercise the coordinator, worker, reviewer, and apply handoff.",
+    lane: "product",
+    scope: ["src"],
+    context: ["README.md"],
+    dependsOn: [],
+    agent: "claude",
+    reviewerAgent: "claude",
+    attempt: 0,
+    status: "awaiting_approval",
+    changedFiles: [],
+    changedFileCount: 0,
+    acceptanceChecks: [
+      { command: "npm test", status: "pending", output: "" },
+    ],
+    reviewerFindings: [],
+    workerSummary: undefined,
+    error: undefined,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+  };
+
+  function delegationSnapshot(): DelegationJob {
+    return {
+      ...fixtureDelegationJob,
+      scope: [...fixtureDelegationJob.scope],
+      context: [...fixtureDelegationJob.context],
+      dependsOn: [...fixtureDelegationJob.dependsOn],
+      changedFiles: [...fixtureDelegationJob.changedFiles],
+      acceptanceChecks: fixtureDelegationJob.acceptanceChecks.map((check) => ({ ...check })),
+      reviewerFindings: fixtureDelegationJob.reviewerFindings.map((finding) => ({ ...finding })),
+    };
+  }
+
+  function emitDelegation(kind: DelegationEvent["kind"]) {
+    delegationHandler?.({ kind, job: delegationSnapshot() } as DelegationEvent);
+  }
+
+  function updateDelegation(
+    status: DelegationJob["status"],
+    kind: DelegationEvent["kind"],
+    update: Partial<DelegationJob> = {}
+  ) {
+    fixtureDelegationJob = {
+      ...fixtureDelegationJob,
+      ...update,
+      status,
+      updatedAt: fixtureDelegationJob.updatedAt + 1,
+    };
+    emitDelegation(kind);
+  }
+
+  async function runFixtureDelegation(jobId: string) {
+    if (jobId !== fixtureDelegationJob.jobId) {
+      throw new Error(`fixture backend: delegation job ${jobId} was not found`);
+    }
+    if (
+      !["awaiting_approval", "changes_requested", "blocked", "failed"].includes(
+        fixtureDelegationJob.status
+      )
+    ) {
+      return delegationSnapshot();
+    }
+    updateDelegation("worker_running", "worker_started", {
+      attempt: fixtureDelegationJob.attempt + 1,
+      workerAttemptId: `fixture-worker-${fixtureDelegationJob.attempt + 1}`,
+      error: undefined,
+    });
+    updateDelegation("worker_running", "worker_completed", {
+      changedFiles: ["src/fixture.ts"],
+      changedFileCount: 1,
+      workerSummary: "Worker created a deterministic fixture change.",
+      acceptanceChecks: [
+        { command: "npm test", status: "passed", output: "fixture tests passed" },
+      ],
+    });
+    updateDelegation("review_running", "reviewer_started", {
+      reviewerAttemptId: `fixture-reviewer-${fixtureDelegationJob.attempt}`,
+    });
+    updateDelegation("review_running", "reviewer_completed");
+    updateDelegation("ready_to_apply", "ready_to_apply");
+    return delegationSnapshot();
+  }
 
   return {
     mode: "fixture",
@@ -523,12 +620,12 @@ export function createFixtureBackend(): DesktopBackend {
       return meta;
     },
     async listThreads() {
-      return [
+      const threads: ThreadSummary[] = [
         {
           id: session.threadId,
           createdAt: 0,
           updatedAt: Math.floor(Date.now() / 1000),
-          title: "Fixture",
+          title: fixtureThreadTitles.get(session.threadId) || "Fixture",
           pinned: fixturePinned,
           providerId: "codex",
           messageCount: session.messages.length,
@@ -540,12 +637,13 @@ export function createFixtureBackend(): DesktopBackend {
           id: "fixture-local",
           createdAt: Math.floor(Date.now() / 1000) - 3600,
           updatedAt: Math.floor(Date.now() / 1000) - 3600,
-          title: "Local model chat",
+          title: fixtureThreadTitles.get("fixture-local") || "Local model chat",
           pinned: false,
           providerId: "ollama",
           messageCount: 0,
         },
       ];
+      return threads;
     },
     async listSpaces() {
       return structuredClone(fixtureSpaces);
@@ -695,6 +793,20 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async setThreadPinned(_id, _projectPath, pinned) {
       fixturePinned = pinned;
+    },
+    async renameThread(id, _projectPath, title) {
+      const normalized = title.trim();
+      if (!normalized) throw new Error("fixture: chat title is empty");
+      if ([...normalized].length > MAX_FIXTURE_THREAD_TITLE_CHARS) {
+        throw new Error("fixture: chat title is too long");
+      }
+      if (id !== session.threadId && id !== "fixture-local") {
+        throw new Error(`fixture: unknown thread ${id}`);
+      }
+      fixtureThreadTitles.set(id, normalized);
+      const summary = (await this.listThreads()).find((thread) => thread.id === id);
+      if (!summary) throw new Error(`fixture: unknown thread ${id}`);
+      return summary;
     },
     async sendMessage(text: string, attachments?: AttachmentInput[]) {
       if (!chatHandler) return;
@@ -904,22 +1016,44 @@ export function createFixtureBackend(): DesktopBackend {
       };
     },
     async listDelegationJobs(): Promise<DelegationJob[]> {
-      return [];
+      return [delegationSnapshot()];
     },
-    async getDelegationJob() {
-      return notAvailable("getDelegationJob");
+    async getDelegationJob(jobId: string): Promise<DelegationJob> {
+      if (jobId !== fixtureDelegationJob.jobId) {
+        throw new Error(`fixture backend: delegation job ${jobId} was not found`);
+      }
+      return delegationSnapshot();
     },
-    async cancelDelegationJob() {
-      return notAvailable("cancelDelegationJob");
+    async cancelDelegationJob(jobId: string): Promise<DelegationJob> {
+      if (jobId !== fixtureDelegationJob.jobId) {
+        throw new Error(`fixture backend: delegation job ${jobId} was not found`);
+      }
+      if (!["accepted", "cancelled", "failed"].includes(fixtureDelegationJob.status)) {
+        updateDelegation("cancelled", "cancelled", { error: "Cancelled in the fixture." });
+      }
+      return delegationSnapshot();
     },
-    async retryDelegationJob() {
-      return notAvailable("retryDelegationJob");
+    async retryDelegationJob(jobId: string): Promise<DelegationJob> {
+      return runFixtureDelegation(jobId);
     },
-    async applyDelegationJob() {
-      return notAvailable("applyDelegationJob");
+    async applyDelegationJob(jobId: string): Promise<DelegationJob> {
+      if (jobId !== fixtureDelegationJob.jobId) {
+        throw new Error(`fixture backend: delegation job ${jobId} was not found`);
+      }
+      if (fixtureDelegationJob.status !== "ready_to_apply") {
+        throw new Error("fixture backend: only a ready delegation can be applied");
+      }
+      updateDelegation("accepted", "applied", { error: undefined });
+      return delegationSnapshot();
     },
-    async onDelegationEvent(_handler: (event: DelegationEvent) => void) {
-      return () => {};
+    async onDelegationEvent(handler: (event: DelegationEvent) => void) {
+      const generation = ++delegationHandlerGeneration;
+      delegationHandler = handler;
+      return () => {
+        if (delegationHandlerGeneration === generation && delegationHandler === handler) {
+          delegationHandler = null;
+        }
+      };
     },
     async boot(handler) {
       chatHandlerGeneration += 1;

@@ -374,7 +374,11 @@ impl RuntimeBuilder {
         let registry = Arc::new(registry);
 
         if external_delegate_enabled {
-            tools.register(Arc::new(ExternalAgent::new(&root, config.agents.clone())));
+            tools.register(Arc::new(ExternalAgent::with_parent_secret_envs(
+                &root,
+                config.agents.clone(),
+                config.provider_key_env_names(),
+            )));
             tools.register(Arc::new(FeatureDelegator::new(
                 &root,
                 config.agents.clone(),

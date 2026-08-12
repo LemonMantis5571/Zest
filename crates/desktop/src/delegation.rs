@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::Semaphore;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
-    apply_diff_checked, capture_workspace_snapshot, diff_paths, run_delegation_reviewer,
-    run_delegation_worker, validate_diff_scope, AttemptRole, CheckStatus, Config, DelegationJob,
-    DelegationStatus as CoreDelegationStatus, DelegationStore, ReviewReport,
+    apply_diff_checked, capture_workspace_snapshot, dependency_blocker, diff_paths,
+    run_delegation_reviewer, run_delegation_worker, validate_diff_scope, AttemptRole, CheckStatus,
+    Config, DelegationJob, DelegationStatus as CoreDelegationStatus, DelegationStore, ReviewReport,
     ReviewSeverity as CoreReviewSeverity, WorkerResult,
 };
 
@@ -311,7 +311,12 @@ impl DelegationCoordinator {
         }
     }
 
-    pub fn enqueue(self: &Arc<Self>, app: AppHandle, root: PathBuf, job_id: String) {
+    pub fn enqueue<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: AppHandle<R>,
+        root: PathBuf,
+        job_id: String,
+    ) {
         let cancel = Arc::new(zest_core::CancelToken::new());
         let inserted = self
             .running
@@ -358,7 +363,12 @@ impl DelegationCoordinator {
         });
     }
 
-    pub fn cancel(&self, app: &AppHandle, root: &Path, job_id: &str) -> ResultView {
+    pub fn cancel<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: &AppHandle<R>,
+        root: &Path,
+        job_id: &str,
+    ) -> ResultView {
         if let Ok(running) = self.running.lock() {
             if let Some(cancel) = running.get(job_id) {
                 cancel.cancel();
@@ -381,11 +391,17 @@ impl DelegationCoordinator {
                 return Err(error.to_string());
             }
             self.emit(app, &store, &job, EventKind::Cancelled);
+            self.kick_pending(app, root, &store);
         }
         Ok(job_view(&store, &job))
     }
 
-    pub fn retry(self: &Arc<Self>, app: &AppHandle, root: &Path, job_id: &str) -> ResultView {
+    pub fn retry<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: &AppHandle<R>,
+        root: &Path,
+        job_id: &str,
+    ) -> ResultView {
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let mut job = store
             .load(job_id)
@@ -413,9 +429,9 @@ impl DelegationCoordinator {
         Ok(job_view(&store, &job))
     }
 
-    pub fn reconcile(
+    pub fn reconcile<R: Runtime + 'static>(
         self: &Arc<Self>,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         root: &Path,
     ) -> Result<Vec<DelegationJobView>, String> {
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
@@ -440,6 +456,7 @@ impl DelegationCoordinator {
             }
             job.transition(CoreDelegationStatus::Blocked)
                 .map_err(|error| error.to_string())?;
+            job.finish_active_attempts();
             job.set_error("external delegation process was interrupted; review and retry");
             store
                 .update(job.clone())
@@ -457,7 +474,12 @@ impl DelegationCoordinator {
         Ok(views)
     }
 
-    pub fn apply(self: &Arc<Self>, app: &AppHandle, root: &Path, job_id: &str) -> ResultView {
+    pub fn apply<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: &AppHandle<R>,
+        root: &Path,
+        job_id: &str,
+    ) -> ResultView {
         let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
         let mut job = store
             .load(job_id)
@@ -492,10 +514,26 @@ impl DelegationCoordinator {
         Ok(job_view(&store, &job))
     }
 
-    fn kick_pending(self: &Arc<Self>, app: &AppHandle, root: &Path, store: &DelegationStore) {
+    fn kick_pending<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: &AppHandle<R>,
+        root: &Path,
+        store: &DelegationStore,
+    ) {
         let Ok(jobs) = store.list() else { return };
         for candidate in &jobs {
             if candidate.status != CoreDelegationStatus::AwaitingApproval {
+                continue;
+            }
+            if let Some(reason) = dependency_blocker(candidate, &jobs) {
+                let mut blocked = candidate.clone();
+                if blocked.transition(CoreDelegationStatus::Blocked).is_err() {
+                    continue;
+                }
+                blocked.set_error(reason);
+                if store.update(blocked.clone()).is_ok() {
+                    self.emit(app, store, &blocked, EventKind::Blocked);
+                }
                 continue;
             }
             let ready = candidate.card.depends_on.iter().all(|dependency| {
@@ -512,9 +550,9 @@ impl DelegationCoordinator {
         }
     }
 
-    async fn run_job(
+    async fn run_job<R: Runtime>(
         &self,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         root: &Path,
         job_id: &str,
         cancel: &zest_core::CancelToken,
@@ -528,11 +566,21 @@ impl DelegationCoordinator {
             return Ok(());
         }
         let dependencies = store.list().map_err(|error| error.to_string())?;
+        if let Some(reason) = dependency_blocker(&job, &dependencies) {
+            job.transition(CoreDelegationStatus::Blocked)
+                .map_err(|error| error.to_string())?;
+            job.set_error(reason);
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(app, &store, &job, EventKind::Blocked);
+            return Ok(());
+        }
         if job.card.depends_on.iter().any(|dependency| {
             dependencies
                 .iter()
                 .find(|candidate| &candidate.job_id == dependency)
-                .is_some_and(|candidate| candidate.status != CoreDelegationStatus::Accepted)
+                .is_none_or(|candidate| candidate.status != CoreDelegationStatus::Accepted)
         }) {
             return Ok(());
         }
@@ -540,6 +588,7 @@ impl DelegationCoordinator {
             return self.cancelled(app, &store, job).await;
         }
         let config = Config::find(root).map_err(|error| error.to_string())?;
+        let parent_secret_envs = config.provider_key_env_names();
         let agent =
             config.agents.get(&job.card.agent).cloned().ok_or_else(|| {
                 format!("external agent {} is no longer configured", job.card.agent)
@@ -591,7 +640,14 @@ impl DelegationCoordinator {
         } else {
             worker_prompt
         };
-        let worker = run_delegation_worker(root, &agent, &worker_prompt, Some(cancel)).await;
+        let worker = run_delegation_worker(
+            root,
+            &agent,
+            &worker_prompt,
+            Some(cancel),
+            &parent_secret_envs,
+        )
+        .await;
         if cancel.is_cancelled() {
             return self.cancelled(app, &store, job).await;
         }
@@ -629,10 +685,16 @@ impl DelegationCoordinator {
             .map_err(|error| error.to_string())?;
         self.emit(app, &store, &job, EventKind::ReviewerStarted);
         let review_prompt = job.card.review_prompt(root, &snapshot, &worker_result);
-        let review =
-            run_delegation_reviewer(root, &agent, &worker.diff, &review_prompt, Some(cancel))
-                .await
-                .map_err(|error| format!("reviewer failed: {error}"))?;
+        let review = run_delegation_reviewer(
+            root,
+            &agent,
+            &worker.diff,
+            &review_prompt,
+            Some(cancel),
+            &parent_secret_envs,
+        )
+        .await
+        .map_err(|error| format!("reviewer failed: {error}"))?;
         if cancel.is_cancelled() {
             return self.cancelled(app, &store, job).await;
         }
@@ -733,13 +795,14 @@ impl DelegationCoordinator {
         Ok(())
     }
 
-    async fn cancelled(
+    async fn cancelled<R: Runtime>(
         &self,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         store: &DelegationStore,
         mut job: DelegationJob,
     ) -> Result<(), String> {
         if !job.status.is_terminal() {
+            job.finish_active_attempts();
             job.transition(CoreDelegationStatus::Cancelled)
                 .map_err(|error| error.to_string())?;
             store
@@ -750,9 +813,9 @@ impl DelegationCoordinator {
         Ok(())
     }
 
-    fn fail(
-        &self,
-        app: &AppHandle,
+    fn fail<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: &AppHandle<R>,
         root: &Path,
         job_id: &str,
         error: &str,
@@ -766,16 +829,24 @@ impl DelegationCoordinator {
         if !job.status.is_terminal() {
             job.transition(CoreDelegationStatus::Failed)
                 .map_err(|error| error.to_string())?;
+            job.finish_active_attempts();
             job.set_error(error);
             store
                 .update(job.clone())
                 .map_err(|error| error.to_string())?;
             self.emit(app, &store, &job, kind);
+            self.kick_pending(app, root, &store);
         }
         Ok(job_view(&store, &job))
     }
 
-    fn emit(&self, app: &AppHandle, store: &DelegationStore, job: &DelegationJob, kind: EventKind) {
+    fn emit<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        store: &DelegationStore,
+        job: &DelegationJob,
+        kind: EventKind,
+    ) {
         if matches!(
             job.status,
             CoreDelegationStatus::ReadyToApply
@@ -831,4 +902,185 @@ pub fn get_view(root: &Path, job_id: &str) -> Result<DelegationJobView, String> 
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "delegation job was not found".to_string())?;
     Ok(job_view(&store, &job))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    use zest_core::{FeatureCard, DELEGATION_FORMAT_VERSION};
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn fixture_binary() -> &'static PathBuf {
+        static FIXTURE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("core")
+                .join("tests")
+                .join("fixtures")
+                .join("external_agent_fixture.rs");
+            let output = std::env::temp_dir().join(format!(
+                "zest-desktop-delegation-fixture-{}{}",
+                std::process::id(),
+                std::env::consts::EXE_SUFFIX
+            ));
+            let result = Command::new("rustc")
+                .args(["--edition=2021"])
+                .arg(source)
+                .arg("-o")
+                .arg(&output)
+                .output()
+                .expect("start rustc for delegation fixture");
+            assert!(
+                result.status.success(),
+                "delegation fixture compilation failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            output
+        })
+    }
+
+    #[tokio::test]
+    async fn worker_review_and_apply_lifecycle_runs_with_a_real_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init", "--quiet"]);
+        git(root, &["config", "user.name", "Zest Test"]);
+        git(root, &["config", "user.email", "zest-test@localhost"]);
+        std::fs::write(root.join("README.md"), "fixture project\n").unwrap();
+        git(root, &["add", "."]);
+        git(
+            root,
+            &["commit", "--quiet", "--no-verify", "-m", "baseline"],
+        );
+
+        let command =
+            serde_json::to_string(&fixture_binary().to_string_lossy().to_string()).unwrap();
+        std::fs::write(
+            root.join("zest.toml"),
+            format!(
+                "[agents.worker]\nmode = \"headless\"\ncommand = {command}\nargs = [\"delegation\", \"{{prompt}}\"]\nworkspace = \"isolated\"\ntimeout_secs = 30\n"
+            ),
+        )
+        .unwrap();
+
+        let store = DelegationStore::open(root).unwrap();
+        let card = FeatureCard {
+            version: DELEGATION_FORMAT_VERSION,
+            card_id: "card-fixture".into(),
+            title: "Fixture delegation".into(),
+            objective: "Create the fixture change".into(),
+            lane: "test".into(),
+            scope: vec![".".into()],
+            context: vec![],
+            depends_on: vec![],
+            agent: "worker".into(),
+            acceptance_checks: vec![],
+            review_required: true,
+            created_at: 0,
+        };
+        let job = store
+            .create(
+                "thread-fixture",
+                card,
+                zest_core::capture_workspace_snapshot(root),
+            )
+            .unwrap();
+
+        let config = Config::find(root).unwrap();
+        let agent = config.agents.get("worker").unwrap();
+        let parent_secret_envs = config.provider_key_env_names();
+        let snapshot = job.base_workspace_snapshot.clone();
+        let worker_prompt = job.card.prompt(root, &snapshot, "");
+        let mut job = job;
+        job.transition(CoreDelegationStatus::WorkerRunning).unwrap();
+        let worker_attempt = job.start_attempt(AttemptRole::Worker, "worker").unwrap();
+        store.update(job.clone()).unwrap();
+
+        let worker = run_delegation_worker(root, agent, &worker_prompt, None, &parent_secret_envs)
+            .await
+            .unwrap();
+        assert!(
+            !worker.diff.trim().is_empty(),
+            "fixture worker produced no diff; text={:?}",
+            worker.text
+        );
+        let worker_result = WorkerResult::from_external(&worker.text, &worker.diff).unwrap();
+        validate_diff_scope(root, &worker.diff, &job.card.scope).unwrap();
+        store
+            .write_artifact(job.job_id.as_str(), "worker.diff", worker.diff.as_bytes())
+            .unwrap();
+        store
+            .write_artifact(
+                job.job_id.as_str(),
+                "worker-result.json",
+                &serde_json::to_vec(&worker_result).unwrap(),
+            )
+            .unwrap();
+        job.finish_attempt(&worker_attempt);
+        job.transition(CoreDelegationStatus::ReviewRunning).unwrap();
+        let reviewer_attempt = job.start_attempt(AttemptRole::Reviewer, "worker").unwrap();
+        store.update(job.clone()).unwrap();
+
+        let review_prompt = job.card.review_prompt(root, &snapshot, &worker_result);
+        let review = run_delegation_reviewer(
+            root,
+            agent,
+            &worker.diff,
+            &review_prompt,
+            None,
+            &parent_secret_envs,
+        )
+        .await
+        .unwrap();
+        assert!(review.diff.trim().is_empty());
+        let report = ReviewReport::parse(&review.text, &job.card.acceptance_checks).unwrap();
+        assert!(report.can_accept(&job.card.acceptance_checks));
+        store
+            .write_artifact(
+                job.job_id.as_str(),
+                "review-result.json",
+                &serde_json::to_vec(&report).unwrap(),
+            )
+            .unwrap();
+        job.finish_attempt(&reviewer_attempt);
+        job.transition(CoreDelegationStatus::ReadyToApply).unwrap();
+        store.update(job.clone()).unwrap();
+
+        let ready = store.load(&job.job_id).unwrap().unwrap();
+        assert_eq!(ready.status, CoreDelegationStatus::ReadyToApply);
+        assert!(
+            String::from_utf8(store.read_artifact(&job.job_id, "worker.diff").unwrap())
+                .unwrap()
+                .contains("delegated.txt")
+        );
+        assert!(store
+            .read_artifact(&job.job_id, "review-result.json")
+            .is_ok());
+
+        apply_diff_checked(root, &worker.diff).unwrap();
+        job.transition(CoreDelegationStatus::Accepted).unwrap();
+        store.update(job).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("delegated.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "fixture worker change\n"
+        );
+    }
 }

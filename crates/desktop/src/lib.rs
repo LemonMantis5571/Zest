@@ -4315,6 +4315,59 @@ fn set_thread_pinned(
     Ok(())
 }
 
+/// Rename a saved chat without changing its activity timestamp. This is
+/// allowed for any known project because renaming only changes navigation
+/// metadata; it never opens, rewinds, or executes the conversation.
+#[tauri::command]
+fn rename_thread(
+    state: State<'_, AppState>,
+    id: String,
+    project_path: Option<String>,
+    title: String,
+) -> Result<ThreadSummary, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err(desktop_err("invalid", "chat id is empty"));
+    }
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err(desktop_err("invalid", "chat title is empty"));
+    }
+
+    let (target_root, summary) = state
+        .sessions
+        .with_session_mut(|session| -> Result<(PathBuf, ThreadSummary), String> {
+            let target_root = match project_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+                None => session.root.clone(),
+            };
+            let store = open_store(&target_root)?;
+            let summary = store.rename(&id, &title).map_err(|e| e.to_string())?;
+
+            let same_project = display_path(&session.root) == display_path(&target_root)
+                || session.root == target_root;
+            if same_project && session.thread_id == id {
+                session.thread.title = summary.title.clone();
+            }
+            Ok((target_root, summary))
+        })
+        .map_err(map_session_err)
+        .and_then(|result| result)?;
+
+    // Remove the cached summary explicitly so a rename is visible immediately
+    // even on filesystems with coarse timestamp resolution.
+    if let Ok(mut cache) = state.chat_summary_cache.lock() {
+        cache.projects.remove(&target_root);
+    }
+    Ok(summary)
+}
+
 #[tauri::command]
 async fn send_message(
     app: AppHandle,
@@ -6349,6 +6402,7 @@ pub fn run() {
             compact_context,
             delete_thread,
             set_thread_pinned,
+            rename_thread,
             send_message,
             save_markdown,
             cancel_turn,

@@ -62,11 +62,11 @@ pub use config::{
     DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_USER_CONFIG,
 };
 pub use delegation::{
-    apply_diff_checked, capture_workspace_snapshot, diff_paths, validate_diff_paths,
-    validate_diff_scope, validate_review_paths, AcceptanceCheckResult, AttemptRole, CheckStatus,
-    DelegationArtifacts, DelegationAttempt, DelegationJob, DelegationStatus, DelegationStore,
-    FeatureCard, ReviewDecision, ReviewFinding, ReviewReport, ReviewSeverity, WorkerResult,
-    WorkspaceSnapshot,
+    apply_diff_checked, capture_workspace_snapshot, dependency_blocker, diff_paths,
+    validate_diff_paths, validate_diff_scope, validate_review_paths, AcceptanceCheckResult,
+    AttemptRole, CheckStatus, DelegationArtifacts, DelegationAttempt, DelegationJob,
+    DelegationStatus, DelegationStore, FeatureCard, ReviewDecision, ReviewFinding, ReviewReport,
+    ReviewSeverity, WorkerResult, WorkspaceSnapshot, DELEGATION_FORMAT_VERSION,
 };
 pub use error::{HarnessError, Result};
 pub use fsutil::{atomic_write, atomic_write_json, display_path, display_path_str};

@@ -194,15 +194,17 @@ struct AcpSession {
     root: ProjectRoot,
     terminals: BTreeMap<String, AcpTerminal>,
     next_terminal_id: u64,
+    parent_secret_envs: Vec<String>,
 }
 
 impl AcpSession {
-    fn new(root: &Path) -> Result<Self, String> {
+    fn new(root: &Path, parent_secret_envs: &[String]) -> Result<Self, String> {
         Ok(Self {
             root: ProjectRoot::new(root)
                 .map_err(|error| format!("prepare ACP workspace: {error}"))?,
             terminals: BTreeMap::new(),
             next_terminal_id: 1,
+            parent_secret_envs: parent_secret_envs.to_vec(),
         })
     }
 
@@ -268,14 +270,24 @@ impl Drop for AcpTerminal {
 pub struct ExternalAgent {
     root: PathBuf,
     agents: BTreeMap<String, ExternalAgentConfig>,
+    parent_secret_envs: Vec<String>,
     handoff: RwLock<Option<ContextHandoff>>,
 }
 
 impl ExternalAgent {
     pub fn new(root: impl Into<PathBuf>, agents: BTreeMap<String, ExternalAgentConfig>) -> Self {
+        Self::with_parent_secret_envs(root, agents, Vec::new())
+    }
+
+    pub fn with_parent_secret_envs(
+        root: impl Into<PathBuf>,
+        agents: BTreeMap<String, ExternalAgentConfig>,
+        parent_secret_envs: Vec<String>,
+    ) -> Self {
         Self {
             root: root.into(),
             agents,
+            parent_secret_envs,
             handoff: RwLock::new(None),
         }
     }
@@ -320,9 +332,14 @@ impl ExternalAgent {
             }
         }
 
-        let run = run_external(&self.root, config, &self.worker_prompt(task))
-            .await
-            .map_err(|error| format!("external agent {agent_id} failed: {error}"))?;
+        let run = run_external(
+            &self.root,
+            config,
+            &self.worker_prompt(task),
+            &self.parent_secret_envs,
+        )
+        .await
+        .map_err(|error| format!("external agent {agent_id} failed: {error}"))?;
         let answer = run.text();
         let errors = run.errors();
         if answer.trim().is_empty() {
@@ -515,11 +532,12 @@ async fn run_external(
     root: &Path,
     config: &ExternalAgentConfig,
     prompt: &str,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
     validate_config(config)?;
     match config.workspace {
-        ExternalWorkspace::Current => run_current(root, config, prompt).await,
-        ExternalWorkspace::Isolated => run_isolated(root, config, prompt).await,
+        ExternalWorkspace::Current => run_current(root, config, prompt, parent_secret_envs).await,
+        ExternalWorkspace::Isolated => run_isolated(root, config, prompt, parent_secret_envs).await,
     }
 }
 
@@ -541,7 +559,7 @@ pub(crate) async fn run_headless_command_streaming(
             "parent CLI provider must use headless mode".into(),
         ));
     }
-    spawn_and_run_with_cancel(cwd, config, prompt, cancel, Some(on_event))
+    spawn_and_run_with_cancel(cwd, config, prompt, cancel, Some(on_event), &[])
         .await
         .map_err(|error| {
             if error == EXTERNAL_RUN_CANCELLED {
@@ -578,12 +596,13 @@ async fn run_current(
     root: &Path,
     config: &ExternalAgentConfig,
     prompt: &str,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
     let base = git_output(root, &["rev-parse", "HEAD"])
         .await
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let mut run = spawn_and_run(root, config, prompt).await?;
+    let mut run = spawn_and_run(root, config, prompt, parent_secret_envs).await?;
     if let Some(base) = base {
         let diff = collect_git_diff(root, &base).await?;
         run.diff = clip_diff(&diff);
@@ -655,6 +674,7 @@ async fn run_isolated(
     root: &Path,
     config: &ExternalAgentConfig,
     prompt: &str,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
     let base = git_output(root, &["rev-parse", "HEAD"])
         .await
@@ -677,7 +697,7 @@ async fn run_isolated(
     copy_working_snapshot(root, &worktree, &base).await?;
     let baseline = snapshot_worktree(&worktree).await?;
 
-    let result = spawn_and_run(&worktree, config, prompt).await;
+    let result = spawn_and_run(&worktree, config, prompt, parent_secret_envs).await;
     let diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
     let cleanup = worktree_guard.cleanup().await;
     drop(temp);
@@ -701,12 +721,13 @@ pub async fn run_delegation_worker(
     config: &ExternalAgentConfig,
     prompt: &str,
     cancel: Option<&CancelToken>,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentResult, String> {
     validate_config(config)?;
     if config.workspace != ExternalWorkspace::Isolated {
         return Err("feature-card workers require an isolated workspace".into());
     }
-    run_isolated_with_cancel(root, config, prompt, cancel).await
+    run_isolated_with_cancel(root, config, prompt, cancel, parent_secret_envs).await
 }
 
 /// Prepare a fresh reviewer worktree from the same project snapshot, apply the
@@ -719,6 +740,7 @@ pub async fn run_delegation_reviewer(
     worker_diff: &str,
     prompt: &str,
     cancel: Option<&CancelToken>,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentResult, String> {
     validate_config(config)?;
     if config.workspace != ExternalWorkspace::Isolated {
@@ -751,7 +773,9 @@ pub async fn run_delegation_reviewer(
     // the reviewer baseline only after applying it so a read-only reviewer
     // does not appear to have rewritten the worker's entire diff.
     let baseline = snapshot_worktree(&worktree).await?;
-    let result = spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None).await;
+    let result =
+        spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None, parent_secret_envs)
+            .await;
     let reviewer_diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
     let cleanup = guard.cleanup().await;
     drop(temp);
@@ -772,6 +796,7 @@ async fn run_isolated_with_cancel(
     config: &ExternalAgentConfig,
     prompt: &str,
     cancel: Option<&CancelToken>,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentResult, String> {
     let base = git_output(root, &["rev-parse", "HEAD"])
         .await
@@ -790,7 +815,9 @@ async fn run_isolated_with_cancel(
     remove_sensitive_tracked_files(&worktree).await?;
     copy_working_snapshot(root, &worktree, &base).await?;
     let baseline = snapshot_worktree(&worktree).await?;
-    let result = spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None).await;
+    let result =
+        spawn_and_run_with_cancel(&worktree, config, prompt, cancel, None, parent_secret_envs)
+            .await;
     let diff = collect_git_diff_with_untracked(&worktree, root, &baseline).await;
     let cleanup = guard.cleanup().await;
     drop(temp);
@@ -841,8 +868,9 @@ async fn spawn_and_run(
     cwd: &Path,
     config: &ExternalAgentConfig,
     prompt: &str,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
-    spawn_and_run_with_cancel(cwd, config, prompt, None, None).await
+    spawn_and_run_with_cancel(cwd, config, prompt, None, None, parent_secret_envs).await
 }
 
 pub(crate) type ExternalEventSink<'a> = dyn FnMut(ExternalAgentEvent) + Send + 'a;
@@ -853,6 +881,7 @@ async fn spawn_and_run_with_cancel(
     prompt: &str,
     cancel: Option<&CancelToken>,
     on_event: Option<&mut ExternalEventSink<'_>>,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
     let args = expanded_args(config, prompt);
     let mut command = Command::new(&config.command);
@@ -869,9 +898,9 @@ async fn spawn_and_run_with_cancel(
         .kill_on_drop(true);
     prepare_external_command(&mut command);
     if config.allow_mcp {
-        scrub_zest_secret_environment(&mut command);
+        scrub_zest_secret_environment(&mut command, parent_secret_envs);
     } else {
-        scrub_secret_environment(&mut command);
+        scrub_secret_environment(&mut command, parent_secret_envs);
     }
 
     let mut child = command
@@ -905,7 +934,7 @@ async fn spawn_and_run_with_cancel(
                 ExternalAgentMode::Headless => run_headless(stdout, on_event).await,
                 ExternalAgentMode::Acp => {
                     let stdin = stdin.ok_or_else(|| "ACP agent stdin was not piped".to_string())?;
-                    run_acp(stdin, stdout, cwd, prompt).await
+                    run_acp(stdin, stdout, cwd, prompt, parent_secret_envs).await
                 }
             }
         } => result,
@@ -1128,22 +1157,21 @@ fn remove_gemini_mcp_allowlist(args: Vec<String>) -> Vec<String> {
     output
 }
 
-fn scrub_secret_environment(command: &mut Command) {
+fn scrub_secret_environment(command: &mut Command, parent_secret_envs: &[String]) {
     for (name, _) in std::env::vars() {
-        let upper = name.to_ascii_uppercase();
-        if ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
-            .iter()
-            .any(|marker| upper.contains(marker))
-        {
+        if should_scrub_secret_env(&name, parent_secret_envs) {
             command.env_remove(name);
         }
+    }
+    for name in parent_secret_envs {
+        command.env_remove(name);
     }
 }
 
 /// MCP pass-through is an explicit trust decision, so preserve the user's
 /// MCP environment while still keeping Zest's own provider credentials out of
 /// the worker process.
-fn scrub_zest_secret_environment(command: &mut Command) {
+fn scrub_zest_secret_environment(command: &mut Command, parent_secret_envs: &[String]) {
     const PARENT_SECRET_ENV: &[&str] = &[
         "ZEST_GATEWAY_KEY",
         "ANTHROPIC_API_KEY",
@@ -1154,6 +1182,19 @@ fn scrub_zest_secret_environment(command: &mut Command) {
     for name in PARENT_SECRET_ENV {
         command.env_remove(name);
     }
+    for name in parent_secret_envs {
+        command.env_remove(name);
+    }
+}
+
+fn should_scrub_secret_env(name: &str, parent_secret_envs: &[String]) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
+        .iter()
+        .any(|marker| upper.contains(marker))
+        || parent_secret_envs
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 /// Make a child see the current user-installed CLI locations even when Zest
@@ -1696,10 +1737,11 @@ async fn run_acp(
     stdout: ChildStdout,
     cwd: &Path,
     prompt: &str,
+    parent_secret_envs: &[String],
 ) -> Result<ExternalAgentRun, String> {
     let mut reader = BufReader::new(stdout);
     let mut run = ExternalAgentRun::default();
-    let mut session = AcpSession::new(cwd)?;
+    let mut session = AcpSession::new(cwd, parent_secret_envs)?;
     let mut next_id = 1u64;
 
     send_rpc(
@@ -2031,7 +2073,7 @@ async fn create_acp_terminal(session: &mut AcpSession, params: &Value) -> Result
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    scrub_secret_environment(&mut command);
+    scrub_secret_environment(&mut command, &session.parent_secret_envs);
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not start ACP terminal `{command_name}`: {error}"))?;
@@ -2518,12 +2560,12 @@ async fn collect_git_diff_with_untracked(
         }
         let source = source_root.join(&relative);
         let output = if source.is_file() {
-            git_no_index_diff(root, &source, &path).await?
+            git_no_index_diff(root, &source, &path, &relative).await?
         } else {
-            git_no_index_diff(root, null_device(), &path).await?
+            git_no_index_diff(root, null_device(), &path, &relative).await?
         };
-        if !output.stdout.is_empty() {
-            diff.push_str(&String::from_utf8_lossy(&output.stdout));
+        if !output.is_empty() {
+            diff.push_str(&output);
         }
     }
 
@@ -2543,9 +2585,9 @@ async fn collect_git_diff_with_untracked(
         let source = source_root.join(&relative);
         let target = root.join(&relative);
         if source.is_file() && !target.exists() && !git_path_is_tracked(root, &relative).await? {
-            let output = git_no_index_diff(root, &source, null_device()).await?;
-            if !output.stdout.is_empty() {
-                diff.push_str(&String::from_utf8_lossy(&output.stdout));
+            let output = git_no_index_diff(root, &source, null_device(), &relative).await?;
+            if !output.is_empty() {
+                diff.push_str(&output);
             }
         }
     }
@@ -2603,7 +2645,8 @@ async fn git_no_index_diff(
     cwd: &Path,
     left: &Path,
     right: &Path,
-) -> Result<std::process::Output, String> {
+    relative: &str,
+) -> Result<String, String> {
     let output = Command::new("git")
         .args(["diff", "--no-index", "--no-ext-diff", "--"])
         .arg(left)
@@ -2613,9 +2656,34 @@ async fn git_no_index_diff(
         .await
         .map_err(|error| format!("diff untracked file: {error}"))?;
     if output.status.success() || output.status.code() == Some(1) {
-        return Ok(output);
+        return Ok(normalize_no_index_diff(
+            &String::from_utf8_lossy(&output.stdout),
+            relative,
+        ));
     }
     Err(clip(String::from_utf8_lossy(&output.stderr).trim()))
+}
+
+fn normalize_no_index_diff(raw: &str, relative: &str) -> String {
+    let relative = relative.replace('\\', "/");
+    let mut normalized = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let replacement = if line.starts_with("diff --git ") {
+            Some(format!("diff --git a/{relative} b/{relative}"))
+        } else if line.starts_with("--- ") && !line.starts_with("--- /dev/null") {
+            Some(format!("--- a/{relative}"))
+        } else if line.starts_with("+++ ") && !line.starts_with("+++ /dev/null") {
+            Some(format!("+++ b/{relative}"))
+        } else {
+            None
+        };
+        normalized.push_str(replacement.as_deref().unwrap_or(line));
+        normalized.push('\n');
+    }
+    if !raw.ends_with('\n') {
+        normalized.pop();
+    }
+    normalized
 }
 
 fn null_device() -> &'static Path {
@@ -3067,6 +3135,32 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_no_index_diff_headers_to_project_relative_paths() {
+        let raw = concat!(
+            "diff --git \"a/C:\\\\Users\\\\worker\\\\delegated.txt\" ",
+            "\"b/C:\\\\Users\\\\worker\\\\delegated.txt\"\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ \"b/C:\\\\Users\\\\worker\\\\delegated.txt\"\n",
+            "@@ -0,0 +1 @@\n",
+            "+fixture worker change\n"
+        );
+        let normalized = normalize_no_index_diff(raw, "delegated.txt");
+        assert!(normalized.contains("diff --git a/delegated.txt b/delegated.txt"));
+        assert!(normalized.contains("+++ b/delegated.txt"));
+        assert!(!normalized.contains("C:\\\\Users"));
+    }
+
+    #[test]
+    fn configured_parent_secret_names_are_scrubbed_even_without_secret_markers() {
+        let configured = vec!["CUSTOM_AUTH".to_string()];
+        assert!(should_scrub_secret_env("CUSTOM_AUTH", &configured));
+        assert!(should_scrub_secret_env("custom_auth", &configured));
+        assert!(should_scrub_secret_env("OPENAI_API_KEY", &[]));
+        assert!(!should_scrub_secret_env("MCP_SERVER_URL", &configured));
+    }
+
+    #[test]
     fn does_not_duplicate_a_final_result_after_assistant_text() {
         let mut run = ExternalAgentRun::default();
         absorb_headless_value(
@@ -3225,7 +3319,7 @@ mod tests {
     async fn runs_a_headless_child_process_and_reads_its_jsonl_result() {
         let temp = tempfile::tempdir().unwrap();
         let config = headless_smoke_config();
-        let run = run_current(temp.path(), &config, "quoted && task")
+        let run = run_current(temp.path(), &config, "quoted && task", &[])
             .await
             .unwrap();
 
@@ -3335,7 +3429,9 @@ mod tests {
         std::fs::write(temp.path().join("input.txt"), "source").unwrap();
         let config = fixture_config("acp", false);
 
-        let run = run_current(temp.path(), &config, "ACP task").await.unwrap();
+        let run = run_current(temp.path(), &config, "ACP task", &[])
+            .await
+            .unwrap();
         assert_eq!(run.text(), "acp ok");
         assert!(run.errors().is_empty());
         assert_eq!(run.usage.as_ref().unwrap().context_used, Some(22));

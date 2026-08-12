@@ -264,6 +264,8 @@ fn validate_paths(root: &Path, paths: &[String], field: &str) -> Result<()> {
             "too many feature card {field} paths"
         )));
     }
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| HarnessError::Other(format!("cannot resolve project root: {error}")))?;
     for raw in paths {
         if raw.chars().count() > MAX_FEATURE_PATH_CHARS {
             return Err(HarnessError::Other(format!(
@@ -271,24 +273,38 @@ fn validate_paths(root: &Path, paths: &[String], field: &str) -> Result<()> {
             )));
         }
         let path = safe_relative_path(raw, field)?;
+        if is_protected_delegation_path(&path) {
+            return Err(HarnessError::Other(format!(
+                "feature card {field} path {raw} is protected"
+            )));
+        }
         let candidate = root.join(&path);
-        if candidate.exists() {
-            let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+        let existing = if candidate.exists() {
+            std::fs::canonicalize(&candidate).map_err(|error| {
                 HarnessError::Other(format!(
                     "cannot resolve feature card {field} path {raw}: {error}"
                 ))
-            })?;
-            let root = std::fs::canonicalize(root).map_err(|error| {
-                HarnessError::Other(format!("cannot resolve project root: {error}"))
-            })?;
-            if !resolved.starts_with(root) {
-                return Err(HarnessError::Other(format!(
-                    "feature card {field} path {raw} resolves outside the project"
-                )));
-            }
+            })?
+        } else {
+            nearest_existing(candidate.parent().unwrap_or(root))
+        };
+        if !existing.starts_with(&canonical_root) {
+            return Err(HarnessError::Other(format!(
+                "feature card {field} path {raw} resolves outside the project"
+            )));
         }
     }
     Ok(())
+}
+
+fn is_protected_delegation_path(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(value) if value == ".git" || value == ".zest"
+        )
+    }) || is_sensitive_path(&normalized)
 }
 
 fn safe_relative_path(raw: &str, field: &str) -> Result<PathBuf> {
@@ -345,8 +361,20 @@ fn bounded_context(root: &Path, paths: &[String]) -> String {
         let Ok(relative) = safe_relative_path(raw, "context") else {
             continue;
         };
+        if is_protected_delegation_path(&relative) {
+            continue;
+        }
         let path = root.join(&relative);
-        let Ok(content) = fs::read_to_string(&path) else {
+        let Ok(resolved) = fs::canonicalize(&path) else {
+            continue;
+        };
+        let Ok(canonical_root) = fs::canonicalize(root) else {
+            continue;
+        };
+        if !resolved.starts_with(canonical_root) {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&resolved) else {
             continue;
         };
         let take = remaining.min(6_000);
@@ -441,6 +469,30 @@ pub struct DelegationJob {
     pub error: Option<String>,
 }
 
+/// Explain why a queued job cannot proceed because one of its prerequisites
+/// can no longer reach `Accepted` without an explicit user action.
+pub fn dependency_blocker(job: &DelegationJob, jobs: &[DelegationJob]) -> Option<String> {
+    for dependency in &job.card.depends_on {
+        let Some(other) = jobs
+            .iter()
+            .find(|candidate| &candidate.job_id == dependency)
+        else {
+            return Some(format!("dependency {dependency} is missing"));
+        };
+        let status = match other.status {
+            DelegationStatus::Failed => Some("failed"),
+            DelegationStatus::Cancelled => Some("cancelled"),
+            _ => None,
+        };
+        if let Some(status) = status {
+            return Some(format!(
+                "dependency {dependency} is {status}; resolve it before starting this job"
+            ));
+        }
+    }
+    None
+}
+
 impl DelegationJob {
     pub fn transition(&mut self, next: DelegationStatus) -> Result<bool> {
         if self.status == next {
@@ -455,23 +507,43 @@ impl DelegationJob {
                 self.status
             )));
         }
-        let allowed = match (self.status, next) {
-            (DelegationStatus::Planned, DelegationStatus::AwaitingApproval)
-            | (DelegationStatus::AwaitingApproval, DelegationStatus::WorkerRunning)
-            | (DelegationStatus::WorkerRunning, DelegationStatus::ReviewRunning)
-            | (DelegationStatus::ReviewRunning, DelegationStatus::ReadyToApply)
-            | (DelegationStatus::ReviewRunning, DelegationStatus::ChangesRequested)
-            | (DelegationStatus::ChangesRequested, DelegationStatus::AwaitingApproval)
-            | (DelegationStatus::Blocked, DelegationStatus::AwaitingApproval)
-            | (DelegationStatus::Failed, DelegationStatus::AwaitingApproval)
-            | (DelegationStatus::ApplyConflict, DelegationStatus::AwaitingApproval)
-            | (DelegationStatus::ReadyToApply, DelegationStatus::Accepted)
-            | (DelegationStatus::ReadyToApply, DelegationStatus::ApplyConflict)
-            | (_, DelegationStatus::Blocked)
-            | (_, DelegationStatus::Failed)
-            | (_, DelegationStatus::Cancelled) => true,
-            _ => false,
-        };
+        let allowed = matches!(
+            (self.status, next),
+            (
+                DelegationStatus::Planned,
+                DelegationStatus::AwaitingApproval
+            ) | (
+                DelegationStatus::AwaitingApproval,
+                DelegationStatus::WorkerRunning
+            ) | (
+                DelegationStatus::WorkerRunning,
+                DelegationStatus::ReviewRunning
+            ) | (
+                DelegationStatus::ReviewRunning,
+                DelegationStatus::ReadyToApply
+            ) | (
+                DelegationStatus::ReviewRunning,
+                DelegationStatus::ChangesRequested
+            ) | (
+                DelegationStatus::ChangesRequested,
+                DelegationStatus::AwaitingApproval
+            ) | (
+                DelegationStatus::Blocked,
+                DelegationStatus::AwaitingApproval
+            ) | (DelegationStatus::Failed, DelegationStatus::AwaitingApproval)
+                | (
+                    DelegationStatus::ApplyConflict,
+                    DelegationStatus::AwaitingApproval
+                )
+                | (DelegationStatus::ReadyToApply, DelegationStatus::Accepted)
+                | (
+                    DelegationStatus::ReadyToApply,
+                    DelegationStatus::ApplyConflict
+                )
+                | (_, DelegationStatus::Blocked)
+                | (_, DelegationStatus::Failed)
+                | (_, DelegationStatus::Cancelled)
+        );
         if !allowed {
             return Err(HarnessError::Other(format!(
                 "invalid delegation transition {:?} -> {:?}",
@@ -523,6 +595,20 @@ impl DelegationJob {
             attempt.finished_at = Some(now_millis());
         }
         self.updated_at = now_millis();
+    }
+
+    pub fn finish_active_attempts(&mut self) {
+        let now = now_millis();
+        let mut changed = false;
+        for attempt in &mut self.attempts {
+            if attempt.finished_at.is_none() {
+                attempt.finished_at = Some(now);
+                changed = true;
+            }
+        }
+        if changed {
+            self.updated_at = now;
+        }
     }
 }
 
@@ -882,6 +968,7 @@ impl DelegationStore {
                 continue;
             }
             job.transition(DelegationStatus::Blocked)?;
+            job.finish_active_attempts();
             job.set_error("The app restarted while this job was running. Review the artifacts and start a fresh attempt.");
             self.save(&job)?;
             changed.push(job);
@@ -1086,12 +1173,15 @@ pub fn validate_diff_scope(root: &Path, diff: &str, scope: &[String]) -> Result<
 
 fn nearest_existing(path: &Path) -> PathBuf {
     let mut cursor = path.to_path_buf();
-    while !cursor.exists() {
+    while fs::symlink_metadata(&cursor).is_err() {
         if !cursor.pop() {
             break;
         }
     }
-    fs::canonicalize(&cursor).unwrap_or(cursor)
+    // A dangling symlink is itself an existing filesystem entry, but it has
+    // no canonical target. Return an empty path so callers fail closed rather
+    // than treating the symlink's lexical location as safely inside root.
+    fs::canonicalize(&cursor).unwrap_or_default()
 }
 
 /// Apply an accepted diff without ever asking Git to accept partial hunks.
@@ -1200,6 +1290,26 @@ mod tests {
         value.scope = vec!["src".into()];
         value.agent = "missing".into();
         assert!(value.validate(&root, &agent_config()).is_err());
+    }
+
+    #[test]
+    fn feature_card_rejects_protected_context_and_does_not_prompt_secret_content() {
+        let root = scratch("protected-context");
+        fs::write(root.join(".env"), "CUSTOM_AUTH=do-not-share\n").unwrap();
+        let mut value = card(&root);
+        value.context = vec![".env".into()];
+        assert!(value.validate(&root, &agent_config()).is_err());
+
+        let prompt = value.prompt(
+            &root,
+            &WorkspaceSnapshot {
+                head: None,
+                fingerprint: "test".into(),
+                captured_at: 0,
+            },
+            "",
+        );
+        assert!(!prompt.contains("do-not-share"));
     }
 
     #[test]
@@ -1405,6 +1515,40 @@ mod tests {
         assert!(store
             .create("thread-1", feature, capture_workspace_snapshot(&root))
             .is_err());
+    }
+
+    #[test]
+    fn dependency_blocker_reports_failed_and_cancelled_prerequisites() {
+        let root = scratch("dependency-blocker");
+        let store = DelegationStore::open(&root).unwrap();
+        let first = store
+            .create("thread-1", card(&root), capture_workspace_snapshot(&root))
+            .unwrap();
+        let mut failed = first.clone();
+        failed.transition(DelegationStatus::Failed).unwrap();
+        store.save(&failed).unwrap();
+
+        let mut dependent_card = card(&root);
+        dependent_card.depends_on = vec![first.job_id.clone()];
+        let dependent = store
+            .create(
+                "thread-1",
+                dependent_card,
+                capture_workspace_snapshot(&root),
+            )
+            .unwrap();
+        let jobs = store.list().unwrap();
+        let blocked = dependency_blocker(&dependent, &jobs).unwrap();
+        assert!(blocked.contains(&first.job_id));
+        assert!(blocked.contains("failed"));
+
+        let mut cancelled = failed;
+        cancelled.status = DelegationStatus::Cancelled;
+        store.save(&cancelled).unwrap();
+        let jobs = store.list().unwrap();
+        assert!(dependency_blocker(&dependent, &jobs)
+            .unwrap()
+            .contains("cancelled"));
     }
 
     #[test]

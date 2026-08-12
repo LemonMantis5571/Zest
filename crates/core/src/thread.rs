@@ -27,6 +27,9 @@ pub const THREAD_FORMAT_VERSION: u32 = 2;
 /// Anthropic Messages API content blocks (today's only wire format).
 pub const WIRE_FORMAT_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
 
+/// Maximum length for a user-supplied sidebar chat title.
+pub const MAX_THREAD_TITLE_CHARS: usize = 200;
+
 static ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Stable id for messages / turns / threads.
@@ -377,6 +380,27 @@ impl Thread {
         }
         self.pinned = pinned;
         true
+    }
+
+    /// Replace the user-visible sidebar title without changing activity order.
+    pub fn set_title(&mut self, title: &str) -> std::result::Result<bool, String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("chat title must not be empty".into());
+        }
+        if title.chars().count() > MAX_THREAD_TITLE_CHARS {
+            return Err(format!(
+                "chat title must be {MAX_THREAD_TITLE_CHARS} characters or fewer"
+            ));
+        }
+        if title.contains('\0') {
+            return Err("chat title must not contain NUL".into());
+        }
+        if self.title.as_deref() == Some(title) {
+            return Ok(false);
+        }
+        self.title = Some(title.to_string());
+        Ok(true)
     }
 
     /// Fill missing version / wire-format fields from older files.
@@ -1149,6 +1173,16 @@ impl ThreadStore {
         Ok(thread.summary())
     }
 
+    /// Rename a saved chat without changing its activity order.
+    pub fn rename(&self, id: &str, title: &str) -> Result<ThreadSummary> {
+        let mut thread = self.load(id)?;
+        let changed = thread.set_title(title).map_err(HarnessError::Other)?;
+        if changed {
+            self.save(&thread)?;
+        }
+        Ok(thread.summary())
+    }
+
     /// Permanently remove a thread file. Missing files are success (idempotent).
     pub fn delete(&self, id: &str) -> Result<()> {
         let tid = ThreadId::parse(id)
@@ -1663,6 +1697,26 @@ mod characterization {
 
         let unpinned = store.set_pinned(&thread.id, false).unwrap();
         assert!(!unpinned.pinned);
+    }
+
+    #[test]
+    fn store_rename_round_trips_without_changing_activity_order() {
+        let root = scratch("rename");
+        let store = ThreadStore::open(&root).unwrap();
+        let thread = store.create_for_provider("codex").unwrap();
+        let before = thread.updated_at;
+
+        let summary = store.rename(&thread.id, "  Release checklist  ").unwrap();
+        assert_eq!(summary.title.as_deref(), Some("Release checklist"));
+        assert_eq!(summary.updated_at, before);
+
+        let loaded = store.load(&thread.id).unwrap();
+        assert_eq!(loaded.title.as_deref(), Some("Release checklist"));
+        assert_eq!(loaded.updated_at, before);
+        assert!(store.rename(&thread.id, "").is_err());
+        assert!(store
+            .rename(&thread.id, &"x".repeat(MAX_THREAD_TITLE_CHARS + 1))
+            .is_err());
     }
 
     #[test]

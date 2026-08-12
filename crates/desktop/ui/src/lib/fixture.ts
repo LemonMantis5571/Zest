@@ -1,4 +1,4 @@
-import type { ChatEvent } from "./types";
+import type { ChatEvent } from "./types.ts";
 
 /** Offline UI streaming demo — no gateway required. */
 export async function runFixtureStream(
