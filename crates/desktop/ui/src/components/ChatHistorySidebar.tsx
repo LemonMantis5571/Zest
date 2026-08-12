@@ -89,6 +89,7 @@ function formatAge(epochSecs: number) {
 const STORAGE_KEY = "zest.sidebarOpen";
 const EXPANDED_KEY = "zest.sidebarProjectsExpanded";
 const GIT_METADATA_POLL_MS = 30_000;
+const MAX_CHAT_TITLE_CHARS = 200;
 
 export function readSidebarOpen(): boolean {
   try {
@@ -158,6 +159,13 @@ function activityDescription(activity: ThreadActivity, now: number) {
   if (elapsed) parts.push(`for ${elapsed}`);
   return parts.join(", ");
 }
+
+type EditingThread = {
+  key: string;
+  id: string;
+  projectPath: string;
+  value: string;
+};
 
 function ThreadActivityCard({
   activity,
@@ -254,6 +262,12 @@ export function ChatHistorySidebar({
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [pinning, setPinning] = useState<string | null>(null);
+  const [editingThread, setEditingThread] = useState<EditingThread | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const renameSavingRef = useRef(false);
+  const renameCancelledRef = useRef(false);
   const [now, setNow] = useState(() => Date.now());
   const [spacesSnapshot, setSpacesSnapshot] = useState<SpacesSnapshot | null>(null);
   const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
@@ -341,6 +355,16 @@ export function ChatHistorySidebar({
   useEffect(() => {
     if (open && searchOpen) searchInputRef.current?.focus();
   }, [open, searchOpen]);
+
+  const editingKey = editingThread?.key;
+  useEffect(() => {
+    if (!editingKey) return;
+    const frame = window.requestAnimationFrame(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editingKey]);
 
   const query = searchQuery.trim().toLowerCase();
   const recentThreads = useMemo(
@@ -514,6 +538,60 @@ export function ChatHistorySidebar({
     }
   }
 
+  function beginRename(project: ProjectChats, thread: ThreadSummary, key: string) {
+    if (sending || deleting || renameBusy || pinning === thread.id) return;
+    renameCancelledRef.current = false;
+    setRenameError(null);
+    setEditingThread({
+      key,
+      id: thread.id,
+      projectPath: project.path,
+      value: thread.title?.trim() ?? "",
+    });
+  }
+
+  function cancelRename() {
+    renameCancelledRef.current = true;
+    setEditingThread(null);
+    setRenameError(null);
+  }
+
+  async function commitRename() {
+    const edit = editingThread;
+    if (!edit || renameSavingRef.current) return;
+    const title = edit.value.trim();
+    if (!title) {
+      cancelRename();
+      return;
+    }
+
+    renameCancelledRef.current = true;
+    renameSavingRef.current = true;
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      await getBackend().renameThread(edit.id, edit.projectPath, title);
+      setEditingThread(null);
+      setTick((n) => n + 1);
+    } catch {
+      renameCancelledRef.current = false;
+      setRenameError("Could not rename chat. Try again.");
+      window.requestAnimationFrame(() => {
+        renameInputRef.current?.focus();
+        renameInputRef.current?.select();
+      });
+    } finally {
+      renameSavingRef.current = false;
+      setRenameBusy(false);
+    }
+  }
+
+  function handleRenameBlur() {
+    window.setTimeout(() => {
+      if (!renameCancelledRef.current) void commitRename();
+    }, 0);
+  }
+
   async function openThread(project: ProjectChats, thread: ThreadSummary) {
     // Route every thread open through the project-aware backend. This preserves
     // provider ownership and lets legacy or unavailable chats show recovery
@@ -552,25 +630,64 @@ export function ChatHistorySidebar({
     // spelled out next to every chat was noise — a glyph is not, and knowing
     // who owns a chat before you open it is worth a few pixels.
     const owner = thread.providerId;
+    const isEditing = editingThread?.key === key;
 
     return (
       <li key={key} className="group/thread relative">
+        {isEditing ? (
+          <div
+            role="group"
+            aria-label={`Renaming ${title}`}
+            className="flex w-full cursor-text items-center gap-2 rounded-md bg-[var(--sidebar-accent)] py-1.5 pr-24 pl-2 text-left outline-none"
+          >
+            <input
+              ref={renameInputRef}
+              value={editingThread?.value ?? ""}
+              maxLength={MAX_CHAT_TITLE_CHARS}
+              aria-label={`Rename chat ${title}`}
+              placeholder="Untitled chat"
+              disabled={renameBusy}
+              className="min-w-0 flex-1 rounded-sm border border-primary/60 bg-background/60 px-1.5 py-0.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
+              onChange={(event) =>
+                setEditingThread((current) =>
+                  current ? { ...current, value: event.target.value } : current
+                )
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void commitRename();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelRename();
+                }
+              }}
+              onBlur={handleRenameBlur}
+            />
+          </div>
+        ) : (
         <button
           type="button"
-          disabled={active}
           onClick={() => {
+            if (active) return;
             void openThread(project, thread).catch(() => {
               /* Parent handlers surface the actionable error. */
             });
           }}
-          aria-label={[activityText, gitText].filter(Boolean).join(". ") || undefined}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            beginRename(project, thread, key);
+          }}
+          title={`Double-click to rename “${title}”`}
+          aria-label={[title, activityText, gitText].filter(Boolean).join(". ")}
           className={cn(
             "flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-24 pl-2 text-left outline-none transition-colors",
             "hover:bg-[var(--sidebar-accent)] hover:text-[var(--sidebar-accent-foreground)]",
             "focus-visible:ring-2 focus-visible:ring-ring/50",
             active
               ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]"
-              : "disabled:pointer-events-none"
+              : ""
           )}
         >
           <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
@@ -612,6 +729,7 @@ export function ChatHistorySidebar({
             </span>
           ) : null}
         </button>
+        )}
         {activity && activity.state !== "idle" ? (
           <ThreadActivityCard activity={activity} now={now} />
         ) : null}
@@ -951,6 +1069,9 @@ export function ChatHistorySidebar({
                 </div>
                 {spaceError ? (
                   <p className="px-2 pb-1 text-[11px] text-destructive">{spaceError}</p>
+                ) : null}
+                {renameError ? (
+                  <p className="px-2 pb-1 text-[11px] text-destructive">{renameError}</p>
                 ) : null}
                 {projects.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">

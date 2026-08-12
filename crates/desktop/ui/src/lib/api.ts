@@ -268,6 +268,18 @@ export function setThreadPinned(
   });
 }
 
+export function renameThread(
+  id: string,
+  projectPath: string | null | undefined,
+  title: string
+) {
+  return invoke<ThreadSummary>("rename_thread", {
+    id,
+    projectPath: projectPath ?? null,
+    title,
+  });
+}
+
 export function sendMessage(text: string, attachments?: AttachmentInput[]) {
   return invoke<void>("send_message", {
     text,

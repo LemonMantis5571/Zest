@@ -469,6 +469,22 @@ impl Config {
         Self::parse(&raw)
     }
 
+    /// Return the names of provider environment variables that must not be
+    /// inherited by an external worker. This intentionally exposes names only;
+    /// credential values remain in the parent process or credential manager.
+    pub fn provider_key_env_names(&self) -> Vec<String> {
+        let mut names = self
+            .providers
+            .values()
+            .filter_map(ProviderConfig::key_env)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+        names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        names
+    }
+
     pub fn parse(raw: &str) -> Result<Self> {
         toml::from_str(raw)
             .map_err(|e| HarnessError::Other(format!("{CONFIG_FILE} is invalid: {e}")))
@@ -793,6 +809,35 @@ timeout_secs = 120
         );
         assert_eq!(config.agents["gemini"].mode, ExternalAgentMode::Acp);
         assert_eq!(config.agents["gemini"].timeout_secs, 120);
+    }
+
+    #[test]
+    fn collects_configured_provider_key_environment_names_without_values() {
+        let config = Config::parse(
+            r#"
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "CUSTOM_AUTH"
+
+[providers.gateway]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+api_key_env = "GATEWAY_AUTH"
+model = "model"
+
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+api_key_env = "custom_auth"
+model = "local"
+"#,
+        )
+        .expect("valid provider env config");
+
+        assert_eq!(
+            config.provider_key_env_names(),
+            vec!["CUSTOM_AUTH".to_string(), "GATEWAY_AUTH".to_string()]
+        );
     }
 
     #[test]

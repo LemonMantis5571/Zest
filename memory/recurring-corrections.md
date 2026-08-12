@@ -34,6 +34,9 @@ Track corrections that apply across the whole workspace.
   applies. Gateway down (`127.0.0.1:8317`) is a separate failure mode.
 - **WebView menus** — do not use Base UI Menu/Portal popovers; they have crashed the Tauri
   WebView. Use positioned panels (model picker, composer +, confirm dialogs).
+- **Approval overlays** — approval/question cards anchored above the composer must reserve their
+  measured height plus a visible gap in the transcript viewport; fixed padding alone lets the
+  card overlap the last message when its actions wrap or a diff preview expands.
 - **Smart App Control (Windows)** — can block unsigned `build-script-build.exe` under `target/`.
   Fix is OS policy (SAC Off + reboot), not an in-repo code change.
 - **Antigravity / Gemini fake 429s** — Upstream Antigravity can return

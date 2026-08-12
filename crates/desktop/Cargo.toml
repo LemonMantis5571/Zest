@@ -36,6 +36,9 @@ pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", branch = "
 rfd = "0.15"
 base64 = "0.22"
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = []
 # Enable with `cargo test -p zest-desktop --features export-bindings` to regenerate TS DTOs.

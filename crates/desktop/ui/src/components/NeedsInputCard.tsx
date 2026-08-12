@@ -1,4 +1,5 @@
 import { CircleHelpIcon, ShieldAlertIcon } from "lucide-react";
+import type { Ref } from "react";
 
 import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
 import { ToolCallRow } from "@/components/ToolCallRow";
@@ -6,6 +7,7 @@ import type { PlanningQuestion } from "@/lib/planningQuestion";
 import type { ApprovalChoice, ToolPart } from "@/lib/types";
 
 type Props = {
+  cardRef?: Ref<HTMLDivElement>;
   question?: PlanningQuestion;
   approval?: ToolPart;
   pendingApprovalCount?: number;
@@ -25,6 +27,7 @@ type Props = {
  * Keeping them in one card avoids competing sticky surfaces above the composer.
  */
 export function NeedsInputCard({
+  cardRef,
   question,
   approval,
   pendingApprovalCount = 1,
@@ -36,6 +39,7 @@ export function NeedsInputCard({
 
   return (
     <div
+      ref={cardRef}
       role="region"
       aria-label={isQuestion ? "Input needed" : "Approval needed"}
       className="pointer-events-auto mx-auto w-full max-w-[var(--chat-max)] rounded-xl border border-border/70 bg-[color-mix(in_srgb,var(--card)_94%,transparent)] p-2.5 shadow-lg backdrop-blur-xl"

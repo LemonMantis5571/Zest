@@ -16,6 +16,16 @@ fn headless() {
     send(r#"{"type":"result","response":"worker ok"}"#);
 }
 
+fn delegation(prompt: &str) {
+    if prompt.contains("independent Zest reviewer") {
+        send(r#"{"type":"result","response":"{\"decision\":\"accepted\",\"summary\":\"fixture review passed\",\"findings\":[],\"checks\":[]}"}"#);
+        return;
+    }
+
+    std::fs::write("delegated.txt", "fixture worker change\n").expect("write delegation fixture change");
+    send(r#"{"type":"result","response":"{\"summary\":\"fixture worker changed delegated.txt\",\"changedFiles\":[\"delegated.txt\"],\"checksAttempted\":[],\"blockers\":[]}"}"#);
+}
+
 fn stream() {
     send(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}}"#);
     send(r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool-1","name":"Read"}}}"#);
@@ -61,10 +71,12 @@ fn acp() {
 }
 
 fn main() {
-    match env::args().nth(1).as_deref() {
+    let mut args = env::args();
+    match args.nth(1).as_deref() {
         Some("headless") => headless(),
         Some("stream") => stream(),
         Some("acp") => acp(),
+        Some("delegation") => delegation(&args.next().unwrap_or_default()),
         other => panic!("unknown external-agent fixture mode: {other:?}"),
     }
 }
