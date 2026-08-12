@@ -947,7 +947,13 @@ impl Ledger {
         });
 
         let metered = totals.total_tokens();
-        let observed_input = totals.input_tokens.saturating_add(totals.cache_read_tokens);
+        // The full prompt is fresh input + cache reads + cache writes. Cache
+        // writes are not hits, but they are part of the prompt volume against
+        // which the hit rate is measured.
+        let observed_prompt = totals
+            .input_tokens
+            .saturating_add(totals.cache_read_tokens)
+            .saturating_add(totals.cache_write_tokens);
 
         UsageReport {
             days: days.max(1),
@@ -970,7 +976,7 @@ impl Ledger {
                 },
                 cache_hit_percent: percent_of(
                     totals.cache_read_tokens as f64,
-                    observed_input as f64,
+                    observed_prompt as f64,
                 ),
                 unattributed_tokens,
             },
@@ -1870,8 +1876,10 @@ mod daily_tests {
         assert_eq!(report.totals.uncached_input_tokens, 1_000);
         assert_eq!(report.totals.cached_input_tokens, 9_000);
         assert_eq!(report.totals.cache_write_tokens, 500);
-        // 9k of 10k observed input came from cache.
-        assert!((report.totals.cache_hit_percent - 90.0).abs() < 1e-9);
+        // Measure hits against the full 10.5k prompt: fresh input, cache reads,
+        // and the 500 tokens written to cache on this request.
+        let expected_hit_rate = 9_000.0 / 10_500.0 * 100.0;
+        assert!((report.totals.cache_hit_percent - expected_hit_rate).abs() < 1e-9);
         // Those reads cost 0.1x input, so they saved 0.9x of 9k at $3/M.
         assert!((report.totals.cache_savings_usd - 0.0243).abs() < 1e-9);
     }

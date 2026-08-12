@@ -491,7 +491,7 @@ function StatStrip({ report }: { report: UsageReport }) {
     {
       value: compact(totals.cachedInputTokens),
       label: "Cached input",
-      hint: `${totals.cacheHitPercent.toFixed(1)}% of observed input`,
+      hint: `${totals.cacheHitPercent.toFixed(1)}% of observed prompt`,
     },
     {
       value: compact(totals.uncachedInputTokens),

@@ -2,6 +2,7 @@ import { ArrowLeftIcon, ArrowRightIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { cacheMetrics, type CacheMetrics } from "@/lib/cacheMetrics";
 import { UserAvatarButton } from "@/components/UserAvatarButton";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
@@ -77,6 +78,7 @@ export function ProfileScreen({
 
   const cells = useMemo(() => buildGrid(stats?.days ?? []), [stats]);
   const hasTokenData = (stats?.peakDayTokens ?? 0) > 0;
+  const cache = useMemo(() => cacheMetrics(usage?.providers ?? []), [usage]);
 
   return (
     <div
@@ -125,7 +127,7 @@ export function ProfileScreen({
         </p>
       ) : null}
 
-      <StatStrip stats={stats} />
+      <StatStrip stats={stats} cache={cache} />
 
       <section className="flex flex-col gap-3">
         <div className="flex items-baseline justify-between gap-3">
@@ -219,9 +221,20 @@ export function ProfileScreen({
   );
 }
 
-function StatStrip({ stats }: { stats: ProfileStats | null }) {
+function StatStrip({
+  stats,
+  cache,
+}: {
+  stats: ProfileStats | null;
+  cache: CacheMetrics | null;
+}) {
   const items = [
     { value: stats ? compact(stats.totalTokens) : "—", label: "Zest tokens" },
+    {
+      value: cache ? `${cache.hitPercent.toFixed(1)}%` : "—",
+      label: "Cache hit",
+      hint: cache ? `${compact(cache.cachedInputTokens)} cached input` : "No cache data",
+    },
     {
       value: stats?.peakDayTokens ? compact(stats.peakDayTokens) : "—",
       label: "Busiest day",
@@ -232,13 +245,16 @@ function StatStrip({ stats }: { stats: ProfileStats | null }) {
   ];
 
   return (
-    <ul className="m-0 grid list-none grid-cols-2 gap-px overflow-hidden rounded-lg border border-border/70 bg-border/60 p-0 sm:grid-cols-5">
+    <ul className="m-0 grid list-none grid-cols-2 gap-px overflow-hidden rounded-lg border border-border/70 bg-border/60 p-0 sm:grid-cols-3 lg:grid-cols-6">
       {items.map((item) => (
         <li key={item.label} className="bg-card/60 px-3 py-3 text-center">
           <div className="text-[15px] font-semibold tabular-nums tracking-[-0.2px]">
             {item.value}
           </div>
           <div className="mt-0.5 text-[11px] text-muted-foreground">{item.label}</div>
+          {item.hint ? (
+            <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{item.hint}</div>
+          ) : null}
         </li>
       ))}
     </ul>
