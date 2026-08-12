@@ -37,6 +37,9 @@ Track corrections that apply across the whole workspace.
 - **Approval overlays** — approval/question cards anchored above the composer must reserve their
   measured height plus a visible gap in the transcript viewport; fixed padding alone lets the
   card overlap the last message when its actions wrap or a diff preview expands.
+- **Prompt-cache accounting** — use the provider-reported split: full prompt volume is
+  uncached input + cache reads + cache writes, and cache-hit rate is cache reads divided by that
+  full prompt. Show cache reads and writes separately; never infer a hit from repeated prompts.
 - **Smart App Control (Windows)** — can block unsigned `build-script-build.exe` under `target/`.
   Fix is OS policy (SAC Off + reboot), not an in-repo code change.
 - **Antigravity / Gemini fake 429s** — Upstream Antigravity can return

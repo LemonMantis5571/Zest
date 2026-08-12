@@ -777,7 +777,7 @@ fn print_recent_cost(ledger: &Ledger, catalog: &zest_core::RateCatalog) {
         },
     );
     println!(
-        "    cache      {} read · {:.0}% of input  \x1b[90m(saved ~${:.2} at list rates)\x1b[0m",
+        "    cache      {} read · {:.0}% of prompt  \x1b[90m(saved ~${:.2} at list rates)\x1b[0m",
         compact(report.totals.cached_input_tokens),
         report.totals.cache_hit_percent,
         report.totals.cache_savings_usd,
