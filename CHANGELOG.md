@@ -5,44 +5,17 @@ a replacement for the commit history.
 
 ## Unreleased
 
-### Added
+Changes after the current beta will be listed here.
 
-- Usage screen (`Ctrl+Shift+U`, or "Full report" on the profile) with a 7/30/90
-  day window, daily spend stacked by provider, and a per-model breakdown.
-- Per-model attribution in the usage ledger. Turns are billed to the model the
-  endpoint actually served, so a substitution is costed against what ran.
-- A local price book at `<data dir>/zest/prices.toml`, seeded once and never
-  rewritten by Zest. Models with no rate are reported as unpriced rather than
-  free, and the share of tokens that could be costed is shown alongside every
-  dollar figure.
-- `zest usage` now prints the last 30 days with its own coverage line.
-- Rates come from the published LiteLLM table, cached for a day next to the
-  ledger with an offline fallback, so thousands of models price without any
-  hand-maintenance. `prices.toml` is now purely an override layer and always
-  wins.
-- Usage read back from Claude Code's and Codex's own on-disk transcripts, so
-  turns run in those CLIs directly are counted even though Zest never sent them.
-  Parsing is cached per file, making a re-scan of a gigabyte of transcripts
-  effectively free.
-
-### Notes
-
-- Cost figures are an estimate at list API rates, not a bill. Zest has no
-  billing relationship with any provider, and a subscription does not charge at
-  these rates. Where a CLI records what it was actually charged, that figure is
-  used instead and labelled as reported.
-- Refreshing rates is an unauthenticated GET of one public file. Nothing about
-  your usage is sent anywhere, and transcripts are only ever read from disk.
-- Days recorded before this release have real token totals but no model to
-  attribute them to; they appear as uncosted rather than being backfilled.
-
-## 0.1.0 beta - 2026-08-05
+## 0.1.0 beta - 2026-08-13
 
 ### Added
 
 - Windows-first Tauri desktop app and terminal front-end sharing one Rust core.
-- Bundled, pinned CLIProxyAPI sidecar with gateway verification and MSI/NSIS
-  packaging helpers.
+- Linux x64 packages for the beta release.
+- Approval cards for file writes and shell commands, with diff previews.
+- Bundled, pinned CLIProxyAPI sidecar with gateway verification and installer
+  checksums.
 - OS credential-manager setup for OpenAI-compatible API endpoints, including
   DeepSeek, OpenAI, and local servers; native Anthropic keeps its environment
   variable configuration.
@@ -50,14 +23,34 @@ a replacement for the commit history.
   workers, with isolated Git worktrees and approval boundaries.
 - Workbench activity and outline views, forked conversations, checkpoints, and
   automatic context compaction.
+- Usage screen (`Ctrl+Shift+U`, or "Full report" on the profile) with a 7/30/90
+  day window, daily spend stacked by provider, and a per-model breakdown.
+- Local price book at `<data dir>/zest/prices.toml`, seeded once and never
+  rewritten by Zest. Models with no rate are reported as unpriced rather than
+  free.
+- Usage read back from Claude Code's and Codex's on-disk transcripts, so turns
+  run in those CLIs directly are counted even though Zest never sent them.
 - JSONL/headless protocol for editor and CI integrations.
-- Release checksums, security guidance, contributor documentation, and an
-  explicit MIT license.
+- Optional plugins, personal skills, free chats, workspace folders, and
+  project-scoped conversations.
+
+### Notes
+
+- Cost figures are estimates at list API rates, not a bill. Zest has no billing
+  relationship with any provider, and a subscription does not charge at these
+  rates.
+- Provider quota is shown only when the provider reports it. Local usage is not
+  a subscription balance, and Zest never invents a remaining number.
+- Refreshing rates is an unauthenticated GET of one public file. Nothing about
+  your usage is sent anywhere, and transcripts are only ever read from disk.
+- Official packages do not include optional plugins. Install add-ons separately
+  from a trusted source and review their permissions.
 
 ### Beta limitations
 
-- Windows is the primary supported desktop platform.
+- Windows and Linux x64 are the packaged targets. macOS and ARM packages are
+  not part of this beta release.
 - Approved shell commands are not OS-sandboxed.
 - Provider usage may be estimated or unavailable when an endpoint does not
-  report token counts.
+  report token counts or quota.
 - Configuration and headless protocol details may change before 1.0.

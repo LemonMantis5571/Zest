@@ -26,6 +26,22 @@ npm run ui:build
 npm run desktop:dev
 ```
 
+On Linux, install the desktop packages listed in the Linux verification
+workflow, then run the same commands from `pwsh` or Bash. The gateway fetch
+script is PowerShell on every platform so the pinned sidecar is checked the
+same way locally and in CI.
+
+For Ubuntu 24.04, the CI-equivalent prerequisites are:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev cmake \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+  libdbus-1-dev libxdo-dev curl wget file tar patchelf libfuse2t64
+```
+
+Install PowerShell 7 (`pwsh`) before running the gateway or release scripts.
+
 Run the terminal client with:
 
 ```powershell
@@ -68,6 +84,12 @@ The gate checks formatting, linting, Rust and UI tests, generated bindings,
 dependency advisories, and Git whitespace. Live provider checks are separate:
 they require credentials and may consume real quota.
 
+For a source-only check without dependency audits or generated-binding drift:
+
+```powershell
+npm run verify
+```
+
 Add a focused regression test for behavior changes. For UI changes, update the
 relevant characterization tests under `crates/desktop/ui/src`.
 
@@ -105,6 +127,11 @@ chore(deps): remove unused direct dependency
 
 Keep each pull request scoped. Describe user-visible behavior, verification
 performed, and any migration or release impact.
+
+The first beta is tag-driven. Maintainers should read
+[`docs/RELEASING.md`](docs/RELEASING.md) before pushing a `v*` tag; the release
+workflow verifies both platforms, builds their packages, and publishes the
+GitHub Release only after both package jobs pass.
 
 ## Security reports
 
