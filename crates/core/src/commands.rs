@@ -1,7 +1,7 @@
 //! Slash commands, backed by skills.
 //!
 //! A command is not a new concept — it is a skill invoked by name. `/plan`
-//! means "run `.zest/skills/plan/SKILL.md` against what I typed next", so a new
+//! means "run a personal skill against what I typed next", so a new
 //! command is a markdown file rather than a code change.
 //!
 //! Parsing is deliberately narrow. Only a token at the very start of the
@@ -142,19 +142,15 @@ fn compose(body: &str, rest: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{parse_skill_markdown, SkillSource};
+    use crate::skills::parse_skill_markdown;
     use std::path::Path;
 
     fn skills_with(name: &str, body: &str) -> SkillSet {
         let mut set = SkillSet::default();
         let markdown =
             format!("---\nname: {name}\ndescription: does {name} things\n---\n\n{body}\n");
-        let skill = parse_skill_markdown(
-            &markdown,
-            Path::new(&format!("/x/{name}/SKILL.md")),
-            SkillSource::Project,
-        )
-        .unwrap();
+        let skill =
+            parse_skill_markdown(&markdown, Path::new(&format!("/x/{name}/SKILL.md"))).unwrap();
         set.insert(skill);
         set
     }

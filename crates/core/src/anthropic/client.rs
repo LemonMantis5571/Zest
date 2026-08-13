@@ -254,10 +254,13 @@ fn rate_limits_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Rate
         requests_limit: number("anthropic-ratelimit-requests-limit"),
         requests_remaining: number("anthropic-ratelimit-requests-remaining"),
         requests_reset: text("anthropic-ratelimit-requests-reset"),
+        tokens_limit: None,
+        tokens_remaining: None,
         input_tokens_remaining: number("anthropic-ratelimit-input-tokens-remaining"),
         output_tokens_remaining: number("anthropic-ratelimit-output-tokens-remaining"),
         tokens_reset: text("anthropic-ratelimit-tokens-reset"),
         retry_after_secs: number("retry-after"),
+        ..Default::default()
     };
 
     (!snapshot.is_empty()).then_some(snapshot)

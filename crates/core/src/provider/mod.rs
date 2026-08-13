@@ -388,8 +388,10 @@ pub enum StreamEvent<'a> {
 ///
 /// This answers "can I send right now", **not** "how much of my plan is left".
 /// Those are different numbers and merging them produces a confident lie — see
-/// `memory/decisions.md`. Subscription quota has no equivalent endpoint on any of
-/// the CLI-login providers, so it is metered locally instead.
+/// `memory/decisions.md`. Account quota is provider-specific and must remain
+/// separate from these short-window counters. Some adapters may attach an
+/// independently reported account window, but a missing value must never be
+/// filled with local usage.
 ///
 /// `None` on a provider means it reports nothing, which is itself information the
 /// ledger has to represent rather than silently treat as zero.
@@ -398,11 +400,34 @@ pub struct RateLimitSnapshot {
     pub requests_limit: Option<u64>,
     pub requests_remaining: Option<u64>,
     pub requests_reset: Option<String>,
+    /// Generic token window fields used by OpenAI-compatible APIs. Anthropic
+    /// exposes separate input/output fields below instead.
+    #[serde(default)]
+    pub tokens_limit: Option<u64>,
+    #[serde(default)]
+    pub tokens_remaining: Option<u64>,
     pub input_tokens_remaining: Option<u64>,
     pub output_tokens_remaining: Option<u64>,
     /// RFC 3339, stored raw. Nothing parses dates yet, so no date dependency.
     pub tokens_reset: Option<String>,
     pub retry_after_secs: Option<u64>,
+    /// Optional account-window data emitted by a CLI provider, such as
+    /// Claude Code's `rate_limit_event`. These are separate from API
+    /// throughput counters above because they use a different wire shape.
+    #[serde(default)]
+    pub quota_window: Option<String>,
+    #[serde(default)]
+    pub quota_status: Option<String>,
+    #[serde(default)]
+    pub quota_used_percent: Option<f64>,
+    #[serde(default)]
+    pub quota_reset_at: Option<u64>,
+    #[serde(default)]
+    pub quota_overage_status: Option<String>,
+    #[serde(default)]
+    pub quota_overage_reset_at: Option<u64>,
+    #[serde(default)]
+    pub quota_is_using_overage: Option<bool>,
 }
 
 impl RateLimitSnapshot {
@@ -411,10 +436,19 @@ impl RateLimitSnapshot {
         self.requests_limit.is_none()
             && self.requests_remaining.is_none()
             && self.requests_reset.is_none()
+            && self.tokens_limit.is_none()
+            && self.tokens_remaining.is_none()
             && self.input_tokens_remaining.is_none()
             && self.output_tokens_remaining.is_none()
             && self.tokens_reset.is_none()
             && self.retry_after_secs.is_none()
+            && self.quota_window.is_none()
+            && self.quota_status.is_none()
+            && self.quota_used_percent.is_none()
+            && self.quota_reset_at.is_none()
+            && self.quota_overage_status.is_none()
+            && self.quota_overage_reset_at.is_none()
+            && self.quota_is_using_overage.is_none()
     }
 }
 

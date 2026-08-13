@@ -35,6 +35,7 @@ use super::Tool;
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
+use crate::provider::RateLimitSnapshot;
 use crate::usage::{ExternalCost, ExternalUsageReport};
 
 pub const EXTERNAL_AGENT_TOOL: &str = "delegate_external";
@@ -88,6 +89,7 @@ pub(crate) struct ExternalAgentRun {
     pub(crate) malformed_lines: usize,
     pub(crate) diff: String,
     pub(crate) usage: Option<ExternalUsageReport>,
+    pub(crate) limits: Option<RateLimitSnapshot>,
 }
 
 /// Result exposed to the desktop coordinator. The low-level stream remains
@@ -128,6 +130,13 @@ impl ExternalAgentRun {
         } else {
             self.usage = Some(report);
         }
+    }
+
+    fn merge_limits(&mut self, limits: RateLimitSnapshot) {
+        if limits.is_empty() {
+            return;
+        }
+        self.limits = Some(limits);
     }
 
     pub(crate) fn text(&self) -> String {
@@ -178,6 +187,10 @@ impl ExternalAgentRun {
 
     pub(crate) fn usage(&self) -> Option<ExternalUsageReport> {
         self.usage.clone()
+    }
+
+    pub(crate) fn limits(&self) -> Option<RateLimitSnapshot> {
+        self.limits.clone()
     }
 
     fn has_same_text(&self, candidate: &str) -> bool {
@@ -1320,6 +1333,9 @@ async fn run_headless(
 }
 
 fn absorb_headless_value(value: &Value, run: &mut ExternalAgentRun) {
+    if let Some(limits) = external_limits_from_value(value) {
+        run.merge_limits(limits);
+    }
     if let Some(report) = external_usage_from_value(value) {
         run.merge_usage(report);
     }
@@ -1415,6 +1431,9 @@ fn absorb_headless_value(value: &Value, run: &mut ExternalAgentRun) {
 
 fn absorb_claude_stream_event(value: &Value, run: &mut ExternalAgentRun) {
     let event = value.get("event").unwrap_or(value);
+    if let Some(limits) = external_limits_from_value(event) {
+        run.merge_limits(limits);
+    }
     if let Some(report) = external_usage_from_value(event) {
         run.merge_usage(report);
     }
@@ -1534,6 +1553,53 @@ fn external_usage_from_value(value: &Value) -> Option<ExternalUsageReport> {
     (!report.is_empty()).then_some(report)
 }
 
+/// Parse Claude Code's documented-in-its-stream rate-limit event without
+/// treating it as token usage. The CLI may omit utilization, so reset/status
+/// alone are still useful and remain explicitly optional.
+fn external_limits_from_value(value: &Value) -> Option<RateLimitSnapshot> {
+    let value = value
+        .get("event")
+        .filter(|_| value.get("type").and_then(Value::as_str) == Some("stream_event"))
+        .unwrap_or(value);
+    if value.get("type").and_then(Value::as_str) != Some("rate_limit_event") {
+        return None;
+    }
+    let info = value
+        .get("rate_limit_info")
+        .or_else(|| value.get("rateLimitInfo"))?;
+    let snapshot = RateLimitSnapshot {
+        quota_window: info
+            .get("rateLimitType")
+            .or_else(|| info.get("rate_limit_type"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        quota_status: info
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        quota_used_percent: ["utilization", "usagePercent", "usage_percent"]
+            .iter()
+            .find_map(|key| info.get(*key).and_then(value_as_f64)),
+        quota_reset_at: ["resetsAt", "resets_at"]
+            .iter()
+            .find_map(|key| info.get(*key).and_then(value_as_u64)),
+        quota_overage_status: info
+            .get("overageStatus")
+            .or_else(|| info.get("overage_status"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        quota_overage_reset_at: ["overageResetsAt", "overage_resets_at"]
+            .iter()
+            .find_map(|key| info.get(*key).and_then(value_as_u64)),
+        quota_is_using_overage: info
+            .get("isUsingOverage")
+            .or_else(|| info.get("is_using_overage"))
+            .and_then(Value::as_bool),
+        ..Default::default()
+    };
+    (!snapshot.is_empty()).then_some(snapshot)
+}
+
 fn is_usage_update(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some("usage_update")
         || value.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
@@ -1642,6 +1708,12 @@ fn number_from_keys(value: &Value, keys: &[&str]) -> Option<u64> {
 fn value_as_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
         .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }
 
@@ -3196,6 +3268,31 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(120));
         assert_eq!(usage.output_tokens, Some(30));
         assert_eq!(usage.cached_read_tokens, None);
+    }
+
+    #[test]
+    fn keeps_claude_rate_limit_events_as_provider_data() {
+        let mut run = ExternalAgentRun::default();
+        absorb_headless_value(
+            &json!({
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "status": "allowed",
+                    "rateLimitType": "five_hour",
+                    "resetsAt": 1_800_000_000,
+                    "overageStatus": "allowed",
+                    "isUsingOverage": false
+                }
+            }),
+            &mut run,
+        );
+
+        let limits = run.limits.expect("rate-limit event");
+        assert_eq!(limits.quota_status.as_deref(), Some("allowed"));
+        assert_eq!(limits.quota_window.as_deref(), Some("five_hour"));
+        assert_eq!(limits.quota_reset_at, Some(1_800_000_000));
+        assert_eq!(limits.quota_overage_status.as_deref(), Some("allowed"));
+        assert_eq!(limits.quota_is_using_overage, Some(false));
     }
 
     #[test]

@@ -217,7 +217,7 @@ impl Provider for ClaudeCodeProvider {
             stop_reason: Some("end_turn".into()),
             usage,
             usage_available,
-            limits: None,
+            limits: run.limits(),
             served_model: None,
         })
     }

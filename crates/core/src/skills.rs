@@ -1,4 +1,4 @@
-//! Cursor-style project / user skills (`SKILL.md` with YAML frontmatter).
+//! Cursor-style personal skills (`SKILL.md` with YAML frontmatter).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// Max skills kept after discovery (project overrides user on same name).
+/// Max skills kept after discovery.
 pub const MAX_SKILLS: usize = 32;
 /// Per-skill file size cap (checked before allocating the body).
 pub const MAX_SKILL_BYTES: usize = 64 * 1024;
@@ -15,19 +15,11 @@ pub const INLINE_MAX_BYTES: usize = 4096;
 /// Cumulative budget for all inlined skill bodies in the system prompt.
 pub const INLINE_BUDGET_BYTES: usize = 16 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SkillSource {
-    User,
-    Project,
-}
-
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
-    pub source: SkillSource,
     pub path: PathBuf,
 }
 
@@ -43,7 +35,6 @@ impl Skill {
 pub struct SkillSummary {
     pub name: String,
     pub description: String,
-    pub source: SkillSource,
     pub path: String,
     pub inlined: bool,
 }
@@ -70,8 +61,7 @@ impl SkillSet {
     /// Look a skill up as a slash command.
     ///
     /// Case-insensitive, because the user is typing this rather than the model
-    /// emitting it. Names are unique by construction (`by_name` is a map, and
-    /// project skills replace user ones on a clash).
+    /// emitting it. Names are unique by construction (`by_name` is a map).
     pub fn command(&self, typed: &str) -> Option<&Skill> {
         let typed = typed.trim();
         self.by_name.get(typed).or_else(|| {
@@ -104,39 +94,28 @@ impl SkillSet {
             .map(|s| SkillSummary {
                 name: s.name.clone(),
                 description: s.description.clone(),
-                source: s.source,
                 path: s.path.display().to_string(),
                 inlined: s.inlined(),
             })
             .collect()
     }
 
-    /// Discover skills: user home first, then project (project wins on name clash).
-    pub fn discover(project_root: &Path) -> Self {
-        // Two roots per scope, and the order matters because a later scan
-        // overwrites an earlier one by name.
+    /// Discover only the current user's skills.
+    ///
+    /// Skills are personal configuration and never come from the workspace.
+    pub fn discover() -> Self {
+        dirs::home_dir()
+            .map(|home| Self::discover_from_home(&home))
+            .unwrap_or_default()
+    }
+
+    fn discover_from_home(home: &Path) -> Self {
+        // Scan both personal roots. The second one wins on a name clash.
         //
-        // `.agents/skills` is where the wider ecosystem installs these — it is
-        // what `skills.sh` writes and what Claude Code reads. Zest looked only
-        // at its own directory, so a skill installed the ordinary way sat on
-        // disk, recorded in `skills-lock.json`, and was invisible here.
-        //
-        // It is scanned *before* `.zest/skills` in each scope, so a skill a user
-        // deliberately put in Zest's own directory still wins over one that
-        // arrived with a package.
+        // `.agents/skills` and `.zest/skills` are personal install locations.
         let mut set = SkillSet::default();
-        if let Some(home) = dirs::home_dir() {
-            set.scan_dir(&home.join(".agents").join("skills"), SkillSource::User);
-            set.scan_dir(&home.join(".zest").join("skills"), SkillSource::User);
-        }
-        set.scan_dir(
-            &project_root.join(".agents").join("skills"),
-            SkillSource::Project,
-        );
-        set.scan_dir(
-            &project_root.join(".zest").join("skills"),
-            SkillSource::Project,
-        );
+        set.scan_dir(&home.join(".agents").join("skills"));
+        set.scan_dir(&home.join(".zest").join("skills"));
         if set.by_name.len() > MAX_SKILLS {
             let excess: Vec<_> = set.by_name.keys().skip(MAX_SKILLS).cloned().collect();
             for name in excess {
@@ -149,7 +128,7 @@ impl SkillSet {
         set
     }
 
-    fn scan_dir(&mut self, dir: &Path, source: SkillSource) {
+    fn scan_dir(&mut self, dir: &Path) {
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -168,7 +147,7 @@ impl SkillSet {
             if !skill_md.is_file() {
                 continue;
             }
-            match parse_skill_file(&skill_md, source) {
+            match parse_skill_file(&skill_md) {
                 Ok(skill) => {
                     self.by_name.insert(skill.name.clone(), skill);
                 }
@@ -214,7 +193,7 @@ impl SkillSet {
 }
 
 /// Minimal YAML frontmatter: `---` … `---` with `name:` / `description:` lines.
-pub fn parse_skill_markdown(raw: &str, path: &Path, source: SkillSource) -> Result<Skill, String> {
+pub fn parse_skill_markdown(raw: &str, path: &Path) -> Result<Skill, String> {
     let raw = raw.trim_start_matches('\u{feff}');
     let Some(rest) = raw.strip_prefix("---") else {
         return Err(format!(
@@ -267,12 +246,11 @@ pub fn parse_skill_markdown(raw: &str, path: &Path, source: SkillSource) -> Resu
         name,
         description,
         body,
-        source,
         path: path.to_path_buf(),
     })
 }
 
-fn parse_skill_file(path: &Path, source: SkillSource) -> Result<Skill, String> {
+fn parse_skill_file(path: &Path) -> Result<Skill, String> {
     let meta =
         fs::metadata(path).map_err(|e| format!("skill {}: stat failed: {e}", path.display()))?;
     let len = meta.len() as usize;
@@ -284,7 +262,7 @@ fn parse_skill_file(path: &Path, source: SkillSource) -> Result<Skill, String> {
     }
     let raw = fs::read_to_string(path)
         .map_err(|e| format!("skill {}: read failed: {e}", path.display()))?;
-    parse_skill_markdown(&raw, path, source)
+    parse_skill_markdown(&raw, path)
 }
 
 fn unquote(s: &str) -> String {
@@ -315,7 +293,6 @@ mod tests {
         let skill = parse_skill_markdown(
             "---\nname: demo\ndescription: Does a thing\n---\n\n# Hello\n",
             Path::new("/tmp/demo/SKILL.md"),
-            SkillSource::Project,
         )
         .unwrap();
         assert_eq!(skill.name, "demo");
@@ -324,30 +301,25 @@ mod tests {
         assert!(skill.inlined());
     }
 
-    /// The reported bug:  and Claude Code install into
-    /// , and Zest read only its own directory — so an
-    /// installed skill existed on disk, was recorded in ,
-    /// and never appeared.
+    /// Skills installed by the supported user-level tools are visible to Zest.
     #[test]
-    fn skills_installed_the_ecosystem_way_are_discovered() {
+    fn scans_the_user_skill_roots() {
         let root = scratch("agents-dir");
         let agents = root
-            .join("proj")
+            .join("home")
             .join(".agents")
             .join("skills")
             .join("ai-seo");
         fs::create_dir_all(&agents).unwrap();
         write_skill(&agents.join("SKILL.md"), "ai-seo", "from skills.sh", "body");
 
-        let set = SkillSet::discover(&root.join("proj"));
+        let set = SkillSet::discover_from_home(&root.join("home"));
         let skill = set.get("ai-seo").expect("installed skill must be visible");
         assert_eq!(skill.description, "from skills.sh");
     }
 
-    /// Both roots are read, and a skill deliberately placed in Zest's own
-    /// directory outranks one that merely arrived with a package.
     #[test]
-    fn a_zest_skill_wins_over_a_packaged_one_of_the_same_name() {
+    fn project_skill_roots_are_not_scanned() {
         let root = scratch("agents-precedence");
         let proj = root.join("proj");
         let agents = proj.join(".agents").join("skills").join("shared");
@@ -362,25 +334,25 @@ mod tests {
         );
         write_skill(&zest.join("SKILL.md"), "shared", "hand placed", "zest body");
 
-        let set = SkillSet::discover(&proj);
-        assert_eq!(set.get("shared").unwrap().description, "hand placed");
+        let set = SkillSet::discover_from_home(&root.join("home"));
+        assert!(set.get("shared").is_none());
     }
 
     #[test]
-    fn project_overrides_user_on_same_name() {
+    fn zest_user_root_overrides_agents_user_root_on_same_name() {
         let root = scratch("override");
         let user_skills = root
             .join("home")
             .join(".zest")
             .join("skills")
             .join("shared");
-        let proj_skills = root
-            .join("proj")
-            .join(".zest")
+        let second_user_skills = root
+            .join("home")
+            .join(".agents")
             .join("skills")
             .join("shared");
         fs::create_dir_all(&user_skills).unwrap();
-        fs::create_dir_all(&proj_skills).unwrap();
+        fs::create_dir_all(&second_user_skills).unwrap();
         write_skill(
             &user_skills.join("SKILL.md"),
             "shared",
@@ -388,25 +360,15 @@ mod tests {
             "user body",
         );
         write_skill(
-            &proj_skills.join("SKILL.md"),
+            &second_user_skills.join("SKILL.md"),
             "shared",
-            "from project",
-            "project body",
+            "from second user root",
+            "second user body",
         );
 
-        // Discover with a fake home by scanning manually.
-        let mut set = SkillSet::default();
-        set.scan_dir(
-            &root.join("home").join(".zest").join("skills"),
-            SkillSource::User,
-        );
-        set.scan_dir(
-            &root.join("proj").join(".zest").join("skills"),
-            SkillSource::Project,
-        );
+        let set = SkillSet::discover_from_home(&root.join("home"));
         let skill = set.get("shared").unwrap();
-        assert_eq!(skill.description, "from project");
-        assert_eq!(skill.source, SkillSource::Project);
+        assert_eq!(skill.description, "from user");
     }
 
     fn write_skill(path: &Path, name: &str, desc: &str, body: &str) {
