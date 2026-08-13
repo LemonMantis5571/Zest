@@ -54,7 +54,11 @@ fn main() {
     let dist = Path::new("ui/dist/index.html");
     if !dist.exists() {
         println!("cargo:warning=ui/dist missing - running npm run build --prefix ui");
-        let status = Command::new("npm")
+        // `Command` does not apply Windows' PATHEXT lookup, so invoking the
+        // extension-less `npm` binary fails even when npm is on PATH. Keep the
+        // command portable for both native Windows builds and Unix CI.
+        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+        let status = Command::new(npm)
             .args(["run", "build", "--prefix", "ui"])
             .status()
             .expect(

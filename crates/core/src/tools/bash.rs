@@ -188,6 +188,26 @@ struct ParsedCommand {
     ready_url: Option<String>,
 }
 
+/// Keep Windows' internal verbatim prefix out of user-facing command cards and
+/// output. `canonicalize` may return `\\?\\C:\\...`, while the path supplied
+/// by the caller is usually `C:\\...`; exposing both forms makes the output
+/// noisy and breaks simple path matching in clients.
+fn display_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        if let Some(rest) = value.strip_prefix("\\\\?\\UNC\\") {
+            return format!("\\\\{rest}");
+        }
+        if let Some(rest) = value.strip_prefix("\\\\?\\") {
+            return rest.to_string();
+        }
+    }
+
+    value.into_owned()
+}
+
 struct BackgroundProcess {
     id: u64,
     child: tokio::process::Child,
@@ -256,7 +276,7 @@ impl Bash {
             format!("cannot resolve `cwd` `{raw_cwd}` from the active project: {error}")
         })?;
         if !cwd.is_dir() {
-            return Err(format!("`cwd` is not a directory: {}", cwd.display()));
+            return Err(format!("`cwd` is not a directory: {}", display_path(&cwd)));
         }
         if !raw_cwd_path.is_absolute() && !cwd.starts_with(&self.root) {
             return Err(format!(
@@ -397,17 +417,21 @@ impl Tool for Bash {
                 Some(url) => format!(
                     "Start `{}` in `{}` in the background and wait for {}",
                     parsed.command,
-                    parsed.cwd.display(),
+                    display_path(&parsed.cwd),
                     url
                 ),
                 None => format!(
                     "Start `{}` in `{}` in the background",
                     parsed.command,
-                    parsed.cwd.display()
+                    display_path(&parsed.cwd)
                 ),
             }
         } else {
-            format!("Run `{}` in `{}`", parsed.command, parsed.cwd.display())
+            format!(
+                "Run `{}` in `{}`",
+                parsed.command,
+                display_path(&parsed.cwd)
+            )
         };
 
         // Risk stays Exec whatever the allowlist says. Clearing the allowlist
@@ -521,7 +545,7 @@ impl Tool for Bash {
         let status = status.map_err(|e| format!("`{command}` failed to complete: {e}"))?;
         let body = format!(
             "cwd: `{}`\n{}",
-            parsed.cwd.display(),
+            display_path(&parsed.cwd),
             render_output(&command, status.code(), &out, &err)
         );
 
@@ -619,7 +643,7 @@ impl Bash {
                 return Ok(super::ToolOutcome::text(format!(
                     "$ {}\ncwd: `{}`\nbackground process started\nserver_id: {process_id}{pid}{ready}",
                     parsed.command,
-                    parsed.cwd.display()
+                    display_path(&parsed.cwd)
                 )));
             }
 
@@ -928,6 +952,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_path_hides_windows_verbatim_prefix() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\work")), r"C:\work");
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share")),
+            r"\\server\share"
+        );
     }
 
     #[tokio::test]
