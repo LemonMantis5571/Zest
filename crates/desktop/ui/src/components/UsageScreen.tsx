@@ -5,7 +5,12 @@ import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { modelLabel } from "@/lib/models";
 import { cn } from "@/lib/utils";
-import type { DayCostPoint, ModelCostRow, RatesStatus, UsageReport } from "@/lib/types";
+import type {
+  DayCostPoint,
+  ModelCostRow,
+  RatesStatus,
+  UsageReport,
+} from "@/lib/types";
 
 type Props = {
   onBack: () => void;

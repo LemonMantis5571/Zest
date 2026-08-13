@@ -1,7 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDownIcon, ArrowUpIcon, CommandIcon, SearchIcon } from "lucide-react";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  CommandIcon,
+  SearchIcon,
+  XIcon,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
 import { getBackend } from "@/lib/backend";
 import type { CommandView } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -76,13 +90,14 @@ export function CommandPalette({ open, actions, onClose, onCommand }: Props) {
       if (event.target === event.currentTarget) onClose();
     }}>
       <div role="dialog" aria-label="Command palette" className="w-full max-w-[520px] overflow-hidden rounded-xl border border-border/80 bg-popover text-popover-foreground shadow-2xl">
-        <div className="flex items-center gap-2 border-b border-border/70 px-3">
+        <div className="flex h-10 items-center gap-2 border-b border-border/70 px-3 transition-colors focus-within:border-ring/70 focus-within:ring-2 focus-within:ring-ring/30">
           <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
-          <input
+          <Input
             ref={inputRef}
             value={query}
             placeholder="Search commands, skills, and actions"
-            className="min-w-0 flex-1 bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground"
+            aria-label="Search commands, skills, and actions"
+            className="h-8 min-w-0 flex-1 rounded-none border-0 bg-transparent px-0 text-sm shadow-none focus-visible:border-0 focus-visible:ring-0"
             onChange={(event) => {
               setQuery(event.target.value);
               setIndex(0);
@@ -103,11 +118,39 @@ export function CommandPalette({ open, actions, onClose, onCommand }: Props) {
               }
             }}
           />
-          <kbd className="rounded border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">Esc</kbd>
+          {query ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              title="Clear search"
+              aria-label="Clear search"
+              className="shrink-0 text-muted-foreground"
+              onClick={() => {
+                setQuery("");
+                setIndex(0);
+                inputRef.current?.focus();
+              }}
+            >
+              <XIcon />
+            </Button>
+          ) : (
+            <kbd className="shrink-0 rounded border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              Esc
+            </kbd>
+          )}
         </div>
         <div className="max-h-[min(480px,60vh)] overflow-y-auto p-1.5">
           {items.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-muted-foreground">No matching actions.</div>
+            <Empty className="min-h-36 rounded-lg border border-dashed border-border/60 bg-card/40 px-4 py-8">
+              <EmptyHeader className="gap-1.5">
+                <EmptyMedia variant="icon">
+                  <SearchIcon className="text-muted-foreground" />
+                </EmptyMedia>
+                <EmptyTitle>No matching actions</EmptyTitle>
+                <EmptyDescription>Try a different search.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : (
             items.map((entry, itemIndex) => {
               const label = entry.kind === "command" ? `/${entry.item.name}` : entry.item.label;
@@ -118,17 +161,19 @@ export function CommandPalette({ open, actions, onClose, onCommand }: Props) {
                   key={`${entry.kind}-${entry.kind === "command" ? entry.item.name : entry.item.id}`}
                   type="button"
                   className={cn(
-                    "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
-                    itemIndex === index ? "bg-secondary text-foreground" : "text-foreground/85 hover:bg-secondary/60"
+                    "flex h-9 w-full items-center gap-2 rounded-md px-2 text-left transition-colors",
+                    itemIndex === index
+                      ? "bg-secondary text-foreground"
+                      : "text-foreground/85 hover:bg-accent/70"
                   )}
                   onMouseEnter={() => setIndex(itemIndex)}
                   onClick={() => run(entry)}
                 >
-                  <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background/60 text-muted-foreground">
+                  <span className="grid size-6 shrink-0 place-items-center rounded-md bg-background/60 text-muted-foreground">
                     {entry.kind === "command" ? <CommandIcon className="size-3.5" /> : <SearchIcon className="size-3.5" />}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm">{label}</span>
+                    <span className="block truncate text-xs font-medium">{label}</span>
                     <span className="block truncate text-[11px] text-muted-foreground">{description}</span>
                   </span>
                   {shortcut ? <kbd className="text-[10px] text-muted-foreground">{shortcut}</kbd> : null}

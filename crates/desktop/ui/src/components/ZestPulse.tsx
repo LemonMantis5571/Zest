@@ -1,8 +1,7 @@
+import { BrandMark } from "@/components/BrandMark";
 import { cn } from "@/lib/utils";
 
-const DOT_COUNT = 16;
-
-/** Compact dotted activity mark while the agent is thinking, typing, or working. */
+/** Compact Zest activity mark while the agent is thinking, typing, or working. */
 export function ZestPulse({
   size = 14,
   className,
@@ -14,20 +13,9 @@ export function ZestPulse({
     <span
       role="status"
       aria-label="Working"
-      className={cn(
-        "zest-pulse-dots relative inline-grid shrink-0 grid-cols-4 grid-rows-4 gap-px",
-        className
-      )}
-      style={{ width: size, height: size }}
+      className={cn("inline-flex shrink-0 animate-pulse", className)}
     >
-      {Array.from({ length: DOT_COUNT }, (_, index) => (
-        <span
-          key={index}
-          className="zest-pulse-dot aspect-square rounded-full"
-          style={{ animationDelay: `${index * 45}ms` }}
-          aria-hidden
-        />
-      ))}
+      <BrandMark size={size} />
     </span>
   );
 }

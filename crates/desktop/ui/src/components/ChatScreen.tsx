@@ -9,7 +9,6 @@ import {
 } from "react";
 import {
   CheckCircle2Icon,
-  ChevronRightIcon,
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
@@ -31,6 +30,7 @@ import {
 } from "@/components/ChatHistorySidebar";
 import { CommandOutputCard } from "@/components/CommandOutputCard";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
+import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { Composer } from "@/components/Composer";
 import { DiffViewer, type DiffViewerTarget } from "@/components/DiffViewer";
 import { MarkdownActions } from "@/components/MarkdownActions";
@@ -39,12 +39,13 @@ import { PlanningQuestionnaire } from "@/components/PlanningQuestionnaire";
 import { looksLikeDocument } from "@/lib/documentShape";
 import { buildablePlanId } from "@/lib/planActions";
 import { planningQuestionFor } from "@/lib/planningQuestion";
-import { lastThinkingLine, thinkingSummaryLabel } from "@/lib/thinkingSummary";
 import { Markdown } from "@/components/Markdown";
+import { NowPlayingButton } from "@/components/NowPlayingButton";
 import { ProviderSwitchSheet } from "@/components/ProviderSwitchSheet";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { ToolCallRow } from "@/components/ToolCallRow";
 import { ToolRunGroup } from "@/components/ToolRunGroup";
+import { ThinkingTrace } from "@/components/ThinkingTrace";
 import { UserAvatarButton } from "@/components/UserAvatarButton";
 import { WorkbenchPanel } from "@/components/WorkbenchPanel";
 import {
@@ -56,7 +57,6 @@ import {
 } from "@/components/ui/attachment";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
-import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
 import { Message, MessageContent } from "@/components/ui/message";
 import {
   MessageScroller,
@@ -121,9 +121,13 @@ type Props = {
   workspaceReview: WorkspaceReview | null;
   onVerifyWorkspace: () => Promise<void>;
   compacting?: boolean;
-  onDeleteThread: (id: string, projectPath: string) => Promise<void>;
+  onDeleteThread: (
+    id: string,
+    projectPath: string | null,
+    freeChat: boolean
+  ) => Promise<void>;
   onOpenProjectChat: (options: {
-    root: string;
+    root: string | null;
     threadId?: string;
     newThread?: boolean;
     providerId?: string;
@@ -270,82 +274,6 @@ function MessageEditForm({
           Send
         </Button>
       </div>
-    </div>
-  );
-}
-
-/**
- * The reasoning stream, as one line instead of a column.
- *
- * Summarized thinking arrives as a run of `**Title**` blocks. Rendering all of
- * them stacked a screen-tall wall of headings above the answer and pushed the
- * reply itself out of view — so only the newest line shows while the turn runs,
- * and everything stays reachable behind the disclosure.
- *
- * Collapsed by default after the turn settles too: by then the answer is what
- * the reader wants, and the reasoning is reference material.
- */
-function ThinkingTrace({
-  thinking,
-  streaming,
-  hasText,
-}: {
-  thinking: string;
-  streaming: boolean;
-  hasText: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const headline = useMemo(
-    () => (streaming ? lastThinkingLine(thinking) : thinkingSummaryLabel(thinking)),
-    [streaming, thinking]
-  );
-  const working = streaming && !hasText;
-
-  return (
-    <div className="min-w-0 text-xs text-[#8a8f98]">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-      >
-        {working ? (
-          <span className="shrink-0">
-            <ZestPulse size={14} />
-          </span>
-        ) : (
-          <ChevronRightIcon
-            className={cn(
-              "size-3 shrink-0 text-[#6f747c] transition-transform duration-200",
-              expanded && "rotate-90"
-            )}
-            aria-hidden
-          />
-        )}
-        {/*
-          The line swaps content in place as steps arrive. Keyed on the text so
-          each new step fades in rather than snapping, and truncated to one line
-          so a long title cannot reintroduce the wall of text this replaced.
-        */}
-        <span
-          key={headline}
-          className={cn(
-            "min-w-0 flex-1 truncate animate-in fade-in duration-300",
-            working && "shimmer-text"
-          )}
-        >
-          {headline}
-        </span>
-      </button>
-
-      {expanded ? (
-        <Markdown
-          streaming={streaming}
-          className="mt-1 border-l border-border/60 pl-3 text-xs text-[#8a8f98] [&_a]:text-[#6b86d4] [&_p]:mb-1.5 [&_p]:leading-relaxed [&_p]:text-[#8a8f98] [&_strong]:font-medium [&_strong]:text-[#9aa0a8]"
-        >
-          {thinking}
-        </Markdown>
-      ) : null}
     </div>
   );
 }
@@ -527,7 +455,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
           ) : null}
 
           {msg.thinking ? (
-            <ThinkingTrace thinking={msg.thinking} streaming={msg.streaming} hasText={Boolean(msg.text)} />
+            <ThinkingTrace thinking={msg.thinking} streaming={msg.streaming} />
           ) : null}
 
           {planningQuestion ? (
@@ -610,12 +538,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
           !msg.text &&
           !msg.thinking &&
           msg.tools.length === 0 ? (
-            <Marker role="status">
-              <MarkerIcon>
-                <ZestPulse size={14} />
-              </MarkerIcon>
-              <MarkerContent className="shimmer-text">Thinking...</MarkerContent>
-            </Marker>
+            <ThinkingTrace thinking="" streaming emptyLabel="Thinking..." />
           ) : null}
 
           {msg.streaming &&
@@ -625,12 +548,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
             (tool) =>
               tool.status === "running" || tool.status === "awaiting_approval"
           ) ? (
-            <Marker role="status">
-              <MarkerIcon>
-                <ZestPulse size={14} />
-              </MarkerIcon>
-              <MarkerContent className="shimmer-text">Working...</MarkerContent>
-            </Marker>
+            <ThinkingTrace thinking="" streaming emptyLabel="Working..." />
           ) : null}
         </MessageContent>
       </Message>
@@ -718,13 +636,16 @@ export function ChatScreen({
   const [editingMessageText, setEditingMessageText] = useState("");
   const [editingMessageBusy, setEditingMessageBusy] = useState(false);
   const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
-  const toggleWorkbench = useCallback(() => setWorkbenchOpen((value) => !value), []);
+  const toggleWorkbench = useCallback(() => {
+    if (session.isFreeChat) return;
+    setWorkbenchOpen((value) => !value);
+  }, [session.isFreeChat]);
   const openDiff = useCallback(
     (path: string, diff: string) => setDiffTarget({ path, diff }),
     []
   );
   const showPicker = sessionSupportsModelPicker(session.models);
-  const folderLabel = shortRoot(session.root);
+  const folderLabel = session.isFreeChat ? "No workspace" : shortRoot(session.root);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
   /**
    * Every tool still waiting on a decision, oldest first.
@@ -834,6 +755,9 @@ export function ChatScreen({
    */
   const workbenchWasOpen = useRef(false);
   useEffect(() => {
+    if (session.isFreeChat) setWorkbenchOpen(false);
+  }, [session.isFreeChat]);
+  useEffect(() => {
     if (workbenchWasOpen.current && !workbenchOpen) {
       document.getElementById("workbench-toggle")?.focus();
     }
@@ -852,16 +776,20 @@ export function ChatScreen({
       {
         id: "new-chat",
         label: "New chat",
-        description: "Start a fresh conversation in this project",
+        description: "Start a fresh conversation without a workspace",
         shortcut: "Ctrl+N",
         run: onNewChat,
       },
-      {
-        id: "toggle-workbench",
-        label: workbenchOpen ? "Close workbench" : "Open workbench",
-        description: "Inspect activity, outline, and recovery checkpoints",
-        run: toggleWorkbench,
-      },
+      ...(session.isFreeChat
+        ? []
+        : [
+            {
+              id: "toggle-workbench",
+              label: workbenchOpen ? "Close workbench" : "Open workbench",
+              description: "Inspect activity, outline, and recovery checkpoints",
+              run: toggleWorkbench,
+            },
+          ]),
       {
         id: "open-provider",
         label: "Switch provider",
@@ -880,7 +808,7 @@ export function ChatScreen({
         },
       },
     ],
-    [onNewChat, toggleWorkbench, workbenchOpen]
+    [onNewChat, session.isFreeChat, toggleWorkbench, workbenchOpen]
   );
 
   // A bump means "open the User section". Zero is the initial value, so the
@@ -969,7 +897,7 @@ export function ChatScreen({
       <ChatHistorySidebar
         open={sidebarOpen}
         activeThreadId={session.threadId}
-        activeProjectPath={session.root}
+        activeProjectPath={session.isFreeChat ? null : session.root}
         activeProviderId={session.provider}
         sending={sending}
         threadActivity={threadActivity}
@@ -982,12 +910,13 @@ export function ChatScreen({
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="flex shrink-0 items-center justify-between border-b border-border/60 bg-[var(--chat-header)] px-4 py-2.5">
-          <div className="flex items-center gap-2.5">
+        <header className="flex min-w-0 shrink-0 items-center gap-2 border-b border-border/60 bg-[var(--chat-header)] px-4 py-2.5">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
             <UserAvatarButton
               avatarDataUrl={profile.avatarDataUrl}
               displayName={profile.displayName}
               title="Your profile"
+              className="shrink-0"
               onClick={() => {
                 if (onOpenProfile) {
                   onOpenProfile();
@@ -997,20 +926,25 @@ export function ChatScreen({
                 setSettingsOpen(true);
               }}
             />
-            <div className="leading-tight">
-              <div className="text-sm font-semibold tracking-[-0.2px]">
+            <div className="min-w-0 flex-1 leading-tight">
+              <div
+                className="truncate text-sm font-semibold tracking-[-0.2px]"
+                title={profile.displayName.trim() || "Zest"}
+              >
                 {profile.displayName.trim() || "Zest"}
               </div>
               <div
-                className="max-w-[48ch] truncate text-[11px] text-muted-foreground"
-                title={`${session.root}${branch ? ` · ${branch}` : ""}`}
+                className="min-w-0 max-w-[48ch] truncate text-[11px] text-muted-foreground"
+                title={`${session.isFreeChat ? "No workspace" : session.root}${branch ? ` · ${branch}` : ""}`}
               >
                 {session.label} · {folderLabel}
                 {branch ? ` · ${branch}` : ""}
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-0.5">
+          <div className="flex shrink-0 items-center gap-0.5">
+            <AgentQuotaButton providers={providers} refreshKey={`${session.threadId}:${messages.length}`} />
+            <NowPlayingButton />
             <Button
               type="button"
               variant="ghost"
@@ -1022,24 +956,27 @@ export function ChatScreen({
             >
               <CommandIcon />
             </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title={workbenchOpen ? "Close Workbench" : "Open Workbench"}
-              aria-label={workbenchOpen ? "Close Workbench" : "Open Workbench"}
-              aria-controls="workbench-panel"
-              aria-expanded={workbenchOpen}
-              id="workbench-toggle"
-              onClick={toggleWorkbench}
-            >
-              <PanelRightOpenIcon aria-hidden="true" />
-            </Button>
+            {!session.isFreeChat ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title={workbenchOpen ? "Close Workbench" : "Open Workbench"}
+                aria-label={workbenchOpen ? "Close Workbench" : "Open Workbench"}
+                aria-controls="workbench-panel"
+                aria-expanded={workbenchOpen}
+                id="workbench-toggle"
+                onClick={toggleWorkbench}
+              >
+                <PanelRightOpenIcon aria-hidden="true" />
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
               title="Settings (Ctrl+,)"
+              aria-label="Open settings"
               aria-expanded={settingsOpen}
               onClick={() => {
                 setFocusUser(false);
@@ -1333,7 +1270,12 @@ export function ChatScreen({
         }}
       />
 
-      <DiffViewer target={diffTarget} onClose={() => setDiffTarget(null)} />
+      <DiffViewer
+        target={diffTarget}
+        branch={gitContext?.branch ?? branch}
+        baseBranch={gitContext?.baseBranch}
+        onClose={() => setDiffTarget(null)}
+      />
     </section>
   );
 }

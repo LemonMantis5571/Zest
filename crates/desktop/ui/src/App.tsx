@@ -328,7 +328,7 @@ export default function App() {
   const [continuing, setContinuing] = useState(false);
   const [pendingConversationRecovery, setPendingConversationRecovery] = useState<{
     recovery: ConversationRecovery;
-    root: string;
+    root: string | null;
   } | null>(null);
   const [conversationRecoveryBusy, setConversationRecoveryBusy] = useState(false);
 
@@ -956,7 +956,7 @@ export default function App() {
     }
 
     setSession(info);
-    setWorkspacePath(info.root);
+    setWorkspacePath(info.isFreeChat ? null : info.root);
     setWorkspaceReview(null);
     setGitContext(null);
     void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
@@ -1344,10 +1344,10 @@ export default function App() {
       if (session?.threadId) {
         saveDraft(session.threadId, draftRef.current);
       }
-      const root = session?.root ?? workspacePath;
-      if (!root) return;
       const info = await backend.openProjectChat({
-        root,
+        // The main New chat action creates a free chat. A project's + button
+        // remains the explicit way to start one inside that project.
+        root: null,
         newThread: true,
         providerId: session?.provider ?? selectedId ?? undefined,
       });
@@ -1450,17 +1450,21 @@ export default function App() {
     }
   }
 
-  async function onDeleteThread(id: string, projectPath: string) {
+  async function onDeleteThread(
+    id: string,
+    projectPath: string | null,
+    freeChat: boolean
+  ) {
     try {
       const deletedActive = session?.threadId === id;
-      const info = await backend.deleteThread(id, projectPath);
+      const info = await backend.deleteThread(id, projectPath, freeChat);
       saveDraft(id, "");
       // Always refresh when the open thread was deleted (path strings from the
       // sidebar may not match session.root byte-for-byte on Windows).
       if (deletedActive || info.threadId !== session?.threadId) {
         applySession(info, { clearDraft: true });
       }
-      setWorkspacePath(info.root);
+      setWorkspacePath(info.isFreeChat ? null : info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
       toast.add({
         type: "success",
@@ -1480,7 +1484,7 @@ export default function App() {
   }
 
   async function onOpenProjectChat(options: {
-    root: string;
+    root: string | null;
     threadId?: string;
     newThread?: boolean;
     providerId?: string;
@@ -1496,7 +1500,7 @@ export default function App() {
       // Refresh the picker catalogue so the model list and key status match the
       // project we actually opened instead of the project we just left.
       void loadProviders(info.provider).catch(() => {});
-      setWorkspacePath(info.root);
+      setWorkspacePath(info.isFreeChat ? null : info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
       return true;
     } catch (err) {
@@ -1530,7 +1534,7 @@ export default function App() {
       setPendingConversationRecovery(null);
       applySession(info);
       void loadProviders(info.provider).catch(() => {});
-      setWorkspacePath(info.root);
+      setWorkspacePath(info.isFreeChat ? null : info.root);
       void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
       toast.add({
         type: "success",
@@ -1559,6 +1563,14 @@ export default function App() {
   async function configureConversationProvider() {
     const pending = pendingConversationRecovery;
     if (!pending) return;
+    if (pending.root === null) {
+      toast.add({
+        type: "warning",
+        title: "Provider unavailable",
+        description: "Choose another provider to open this free chat.",
+      });
+      return;
+    }
 
     try {
       await backend.openProjectConfig(pending.root);
@@ -2121,6 +2133,7 @@ export default function App() {
   }
 
   const authMode = screen !== "chat";
+  const scrollableScreen = screen === "profile" || screen === "usage";
 
   return (
     <Toaster>
@@ -2128,7 +2141,10 @@ export default function App() {
         className={cn(
           "h-full min-h-0 w-full min-w-0",
           authMode &&
-            "relative flex items-center justify-center overflow-auto px-6 py-8 before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[radial-gradient(ellipse_at_50%_0%,color-mix(in_srgb,var(--primary)_10%,transparent),transparent_55%)] [&>*]:relative [&>*]:z-10",
+            cn(
+              "relative flex overflow-auto px-6 py-8 before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[radial-gradient(ellipse_at_50%_0%,color-mix(in_srgb,var(--primary)_10%,transparent),transparent_55%)] [&>*]:relative [&>*]:z-10",
+              scrollableScreen ? "items-start justify-center" : "items-center justify-center"
+            ),
           !authMode && "flex flex-1 flex-col overflow-hidden"
         )}
       >
