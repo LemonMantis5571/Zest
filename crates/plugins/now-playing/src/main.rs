@@ -29,6 +29,7 @@ fn read_request() -> Result<PluginRequest, String> {
     serde_json::from_str(raw.trim()).map_err(|error| format!("invalid request: {error}"))
 }
 
+#[cfg(windows)]
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
