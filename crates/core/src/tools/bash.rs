@@ -1012,6 +1012,7 @@ mod tests {
         let external = scratch("cwd-external");
         let tool = Bash::new(&root).unwrap();
         let cwd = external.display().to_string();
+        let visible_cwd = display_path(&external);
         let prepared = tool
             .prepare(json!({
                 "command": "npm run dev",
@@ -1020,7 +1021,7 @@ mod tests {
             .unwrap();
 
         assert!(!prepared.auto_eligible);
-        assert!(prepared.preview.summary.contains(&cwd));
+        assert!(prepared.preview.summary.contains(&visible_cwd));
     }
 
     #[tokio::test]
@@ -1034,13 +1035,14 @@ mod tests {
             "printf external > marker.txt"
         };
         let cwd = external.display().to_string();
+        let visible_cwd = display_path(&external);
         let output = tool
             .run(json!({ "command": command, "cwd": cwd }))
             .await
             .unwrap()
             .body;
 
-        assert!(output.contains(&cwd), "{output}");
+        assert!(output.contains(&visible_cwd), "{output}");
         assert!(external.join("marker.txt").is_file());
         assert!(!root.join("marker.txt").exists());
     }
