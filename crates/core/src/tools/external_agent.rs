@@ -1230,6 +1230,13 @@ pub fn prepare_external_command(command: &mut Command) {
             command.env("PATH", path);
         }
     }
+
+    #[cfg(not(windows))]
+    {
+        // Unix inherits the already-current environment; keep the shared
+        // function's argument explicit so strict clippy stays clean there.
+        let _ = command;
+    }
 }
 
 #[cfg(windows)]
