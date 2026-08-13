@@ -2416,14 +2416,16 @@ fn remember_workspace(root: &Path) {
     let _ = write_known_workspaces(&list);
 }
 
-fn clear_persisted_workspace(root_key: &str) -> Result<(), String> {
+fn clear_persisted_workspace(root_key: &str) -> Result<Option<String>, String> {
     let path = zest_config_dir()?.join("last-workspace");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Ok(());
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
     };
     let candidate = PathBuf::from(raw.trim());
     if candidate.as_os_str().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let matches = display_path(&candidate) == root_key
         || canonicalize_dir(candidate)
@@ -2431,8 +2433,17 @@ fn clear_persisted_workspace(root_key: &str) -> Result<(), String> {
             .is_some_and(|path| display_path(&path) == root_key);
     if matches {
         std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        return Ok(Some(raw));
     }
-    Ok(())
+    Ok(None)
+}
+
+fn restore_persisted_workspace(previous: Option<&str>) -> Result<(), String> {
+    let path = zest_config_dir()?.join("last-workspace");
+    match previous {
+        Some(raw) => std::fs::write(path, raw).map_err(|error| error.to_string()),
+        None => Ok(()),
+    }
 }
 
 fn remove_known_workspace_metadata(
@@ -2451,8 +2462,11 @@ fn remove_known_workspace_metadata(
 
     let mut remaining = known_roots.to_vec();
     remaining.retain(|root| display_path(root) != root_key);
-    clear_persisted_workspace(root_key)?;
-    write_known_workspaces(&remaining)?;
+    let previous_persisted_workspace = clear_persisted_workspace(root_key)?;
+    if let Err(error) = write_known_workspaces(&remaining) {
+        let _ = restore_persisted_workspace(previous_persisted_workspace.as_deref());
+        return Err(error);
+    }
 
     let mut spaces = state
         .space_state
@@ -2463,6 +2477,7 @@ fn remove_known_workspace_metadata(
     if let Err(error) = save_space_state(&spaces) {
         *spaces = previous;
         let _ = write_known_workspaces(known_roots);
+        let _ = restore_persisted_workspace(previous_persisted_workspace.as_deref());
         return Err(error);
     }
     drop(spaces);
@@ -2501,12 +2516,14 @@ fn workspace_removal_target(
 }
 
 fn space_snapshot(state: &AppState) -> Result<SpacesSnapshot, String> {
-    let active_root = state
-        .sessions
-        .active_root()
-        .map_err(map_session_err)?
-        .filter(|root| !is_free_chat_root(root))
-        .or_else(|| resolve_workspace_root(state).ok());
+    let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
+    let active_root = project_root_for_session(
+        active_session_root.as_deref(),
+        active_session_root
+            .is_none()
+            .then(|| resolve_workspace_root(state).ok())
+            .flatten(),
+    );
 
     let mut roots = load_known_workspaces();
     if let Some(active) = active_root {
@@ -2625,6 +2642,20 @@ fn is_free_chat_root(root: &Path) -> bool {
     free_chats_root()
         .ok()
         .is_some_and(|free| display_path(&free) == display_path(root))
+}
+
+/// Keep a free chat detached from the remembered project list. The workspace
+/// root remains available for the next project chat, but it must not be treated
+/// as active while the user is in the project-less chat bucket.
+fn project_root_for_session(
+    active_session_root: Option<&Path>,
+    fallback_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match active_session_root {
+        Some(root) if is_free_chat_root(root) => None,
+        Some(root) => Some(root.to_path_buf()),
+        None => fallback_root,
+    }
 }
 
 fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String> {
@@ -3550,13 +3581,16 @@ fn list_cached_threads(
 #[tauri::command]
 fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, String> {
     let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
-    let active_root = active_session_root
-        .as_ref()
-        .filter(|root| !is_free_chat_root(root))
-        .cloned()
-        .or_else(|| resolve_workspace_root(&state).ok())
-        .ok_or_else(no_writable_workspace_error)?;
-    remember_workspace(&active_root);
+    let active_root = project_root_for_session(
+        active_session_root.as_deref(),
+        active_session_root
+            .is_none()
+            .then(|| resolve_workspace_root(&state).ok())
+            .flatten(),
+    );
+    if let Some(active_root) = active_root.as_ref() {
+        remember_workspace(active_root);
+    }
 
     let spaces = state
         .space_state
@@ -3567,8 +3601,10 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
     let active_space_id = spaces.active_space_id.clone();
 
     let mut roots = load_known_workspaces();
-    if !roots.iter().any(|p| p == &active_root) {
-        roots.insert(0, active_root.clone());
+    if let Some(active_root) = active_root.as_ref() {
+        if !roots.iter().any(|p| p == active_root) {
+            roots.insert(0, active_root.clone());
+        }
     }
 
     let free_root = free_chats_root()?;
@@ -3595,7 +3631,7 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
             ),
             Err(_) => Vec::new(),
         };
-        let active = root == active_root;
+        let active = active_root.as_ref().is_some_and(|active| root == *active);
         out.push(ProjectChats {
             name: project_display_name(&root),
             path: Some(display_path(&root)),
@@ -6205,6 +6241,14 @@ mod workspace_root_tests {
             choose_initial_workspace(None, Some(remembered.clone()), Some(fallback)),
             Some(remembered)
         );
+    }
+
+    #[test]
+    fn free_chat_does_not_reactivate_a_fallback_workspace() {
+        let free = free_chats_root().unwrap();
+        let stale = PathBuf::from(r"D:\Code\removed-project");
+
+        assert_eq!(project_root_for_session(Some(&free), Some(stale)), None);
     }
 
     /// The UI keys the "choose another folder" guidance off this token, so the
