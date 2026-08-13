@@ -29,6 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-notification = "2"
+zest-plugin-api = { path = "../plugin-api" }
 dirs = { workspace = true }
 tokio = { workspace = true }
 ts-rs = { version = "11", default-features = true, optional = true }
