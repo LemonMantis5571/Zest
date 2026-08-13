@@ -133,7 +133,9 @@ pub struct DelegationJobView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub error: Option<String>,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub created_at: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
     pub updated_at: u64,
 }
 
