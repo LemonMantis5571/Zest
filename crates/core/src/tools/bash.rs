@@ -1012,7 +1012,7 @@ mod tests {
         let external = scratch("cwd-external");
         let tool = Bash::new(&root).unwrap();
         let cwd = external.display().to_string();
-        let visible_cwd = display_path(&external);
+        let visible_cwd = display_path(&std::fs::canonicalize(&external).unwrap());
         let prepared = tool
             .prepare(json!({
                 "command": "npm run dev",
@@ -1035,7 +1035,7 @@ mod tests {
             "printf external > marker.txt"
         };
         let cwd = external.display().to_string();
-        let visible_cwd = display_path(&external);
+        let visible_cwd = display_path(&std::fs::canonicalize(&external).unwrap());
         let output = tool
             .run(json!({ "command": command, "cwd": cwd }))
             .await
