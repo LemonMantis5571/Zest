@@ -12,7 +12,10 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::{catalogue_without_efforts, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
+use super::{
+    catalogue_without_efforts, Completion, ModelSpec, Provider, RateLimitSnapshot, StreamEvent,
+    TurnRequest,
+};
 use crate::anthropic::sse::SseParser;
 use crate::anthropic::types::{Message, ToolDef, Usage};
 use crate::auth::AuthStatus;
@@ -192,6 +195,7 @@ impl OpenAiCompatibleClient {
             }
         };
 
+        let limits = rate_limits_from_headers(response.headers());
         let mut parser = SseParser::default();
         let mut body = response.bytes_stream();
         let mut accumulator = OpenAiAccumulator::default();
@@ -224,7 +228,7 @@ impl OpenAiCompatibleClient {
         if !accumulator.done {
             return Err(HarnessError::PrematureEof);
         }
-        Ok(accumulator.finish())
+        Ok(accumulator.finish(limits))
     }
 
     async fn send_once(
@@ -365,7 +369,7 @@ impl OpenAiAccumulator {
         Ok(())
     }
 
-    fn finish(self) -> Completion {
+    fn finish(self, limits: Option<RateLimitSnapshot>) -> Completion {
         let mut content = Vec::new();
         if !self.text.is_empty() {
             content.push(json!({"type":"text", "text": self.text}));
@@ -379,10 +383,41 @@ impl OpenAiAccumulator {
             stop_reason: self.stop_reason,
             usage: self.usage,
             usage_available: self.usage_available,
-            limits: None,
+            limits,
             served_model: self.served_model,
         }
     }
+}
+
+/// Read the standard OpenAI-compatible short-window headers when an endpoint
+/// sends them. These are real server values, not a projection of Zest's local
+/// token ledger. Header names are kept vendor-neutral because gateways often
+/// forward the same contract.
+fn rate_limits_from_headers(headers: &reqwest::header::HeaderMap) -> Option<RateLimitSnapshot> {
+    let text = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            headers
+                .get(*key)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        })
+    };
+    let number = |keys: &[&str]| text(keys).and_then(|value| value.parse::<u64>().ok());
+
+    let snapshot = RateLimitSnapshot {
+        requests_limit: number(&["x-ratelimit-limit-requests"]),
+        requests_remaining: number(&["x-ratelimit-remaining-requests"]),
+        requests_reset: text(&["x-ratelimit-reset-requests"]),
+        tokens_limit: number(&["x-ratelimit-limit-tokens"]),
+        tokens_remaining: number(&["x-ratelimit-remaining-tokens"]),
+        input_tokens_remaining: None,
+        output_tokens_remaining: None,
+        tokens_reset: text(&["x-ratelimit-reset-tokens"]),
+        retry_after_secs: number(&["retry-after"]),
+        ..Default::default()
+    };
+
+    (!snapshot.is_empty()).then_some(snapshot)
 }
 
 fn convert_tool(tool: &ToolDef) -> Value {
@@ -445,6 +480,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reads_standard_rate_limit_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-limit-requests",
+            reqwest::header::HeaderValue::from_static("500"),
+        );
+        headers.insert(
+            "x-ratelimit-remaining-requests",
+            reqwest::header::HeaderValue::from_static("499"),
+        );
+        headers.insert(
+            "x-ratelimit-limit-tokens",
+            reqwest::header::HeaderValue::from_static("100000"),
+        );
+        headers.insert(
+            "x-ratelimit-remaining-tokens",
+            reqwest::header::HeaderValue::from_static("99000"),
+        );
+
+        let limits = rate_limits_from_headers(&headers).expect("limits");
+        assert_eq!(limits.requests_limit, Some(500));
+        assert_eq!(limits.requests_remaining, Some(499));
+        assert_eq!(limits.tokens_limit, Some(100_000));
+        assert_eq!(limits.tokens_remaining, Some(99_000));
+    }
+
+    #[test]
     fn converts_parallel_tools_and_results() {
         let messages = vec![
             Message::assistant(vec![
@@ -474,7 +536,7 @@ mod tests {
         };
         accumulator.push(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","function":{"name":"read","arguments":"{\"path\":\""}}]}}]}), &mut sink).unwrap();
         accumulator.push(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"README.md\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}), &mut sink).unwrap();
-        let completion = accumulator.finish();
+        let completion = accumulator.finish(None);
         assert_eq!(events, vec!["read"]);
         assert_eq!(completion.stop_reason.as_deref(), Some("tool_use"));
         assert!(completion.usage_available);
@@ -504,7 +566,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            accumulator.finish().served_model.as_deref(),
+            accumulator.finish(None).served_model.as_deref(),
             Some("deepseek-v4-flash")
         );
     }
@@ -517,13 +579,13 @@ mod tests {
         accumulator
             .push(&json!({"choices":[{"delta":{"content":"hi"}}]}), &mut sink)
             .unwrap();
-        assert_eq!(accumulator.finish().served_model, None);
+        assert_eq!(accumulator.finish(None).served_model, None);
 
         // An empty string is silence too, not a model named "".
         let mut blank = OpenAiAccumulator::default();
         blank
             .push(&json!({"model":"  ","choices":[{"delta":{}}]}), &mut sink)
             .unwrap();
-        assert_eq!(blank.finish().served_model, None);
+        assert_eq!(blank.finish(None).served_model, None);
     }
 }

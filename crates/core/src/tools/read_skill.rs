@@ -26,7 +26,7 @@ impl Tool for ReadSkill {
     }
 
     fn description(&self) -> &str {
-        "Load the full instructions for a named project/user skill \
+        "Load the full instructions for a named personal skill \
 (SKILL.md). Pass the skill `name` from the Available skills list."
     }
 
@@ -81,7 +81,7 @@ impl Tool for ReadSkill {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{parse_skill_markdown, SkillSet, SkillSource};
+    use crate::skills::{parse_skill_markdown, SkillSet};
     use std::path::Path;
 
     #[tokio::test]
@@ -91,7 +91,6 @@ mod tests {
             parse_skill_markdown(
                 "---\nname: demo\ndescription: D\n---\n\nBody here.\n",
                 Path::new("/demo/SKILL.md"),
-                SkillSource::Project,
             )
             .unwrap(),
         );

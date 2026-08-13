@@ -8,10 +8,10 @@
 //! | **Spend** | Zest's own metering | Exact for Zest's traffic, blind to every other client on the same account |
 //! | **Headroom** | The provider's response headers | Authoritative, but short-window throughput — not subscription quota |
 //!
-//! Subscription quota (a Claude plan, a ChatGPT plan) has no documented endpoint
-//! on any of the CLI-login providers, so it is not represented here at all
-//! rather than being guessed at. A figure labelled "remaining" that silently
-//! excludes what another client spent an hour ago is worse than no figure.
+//! Account quota is provider-specific and is not represented by the local
+//! ledger. The desktop may show a separate live provider check when an official
+//! adapter exists; a figure labelled "remaining" that silently excludes what
+//! another client spent is worse than no figure.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1238,15 +1238,28 @@ pub struct MeasuredUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum HeadroomView {
     /// Provider reported throughput headroom; `age_secs` is how stale the reading is.
     ProviderReported {
         label: String,
         age_secs: Option<u64>,
+        requests_limit: Option<u64>,
         requests_remaining: Option<u64>,
+        requests_reset: Option<String>,
+        tokens_limit: Option<u64>,
+        tokens_remaining: Option<u64>,
         input_tokens_remaining: Option<u64>,
         output_tokens_remaining: Option<u64>,
+        tokens_reset: Option<String>,
         retry_after_secs: Option<u64>,
+        quota_window: Option<String>,
+        quota_status: Option<String>,
+        quota_used_percent: Option<f64>,
+        quota_reset_at: Option<u64>,
+        quota_overage_status: Option<String>,
+        quota_overage_reset_at: Option<u64>,
+        quota_is_using_overage: Option<bool>,
     },
     NotReported {
         label: String,
@@ -1270,10 +1283,22 @@ impl ProviderUsageView {
                 HeadroomView::ProviderReported {
                     label: "Provider reported".into(),
                     age_secs,
+                    requests_limit: h.requests_limit,
                     requests_remaining: h.requests_remaining,
+                    requests_reset: h.requests_reset.clone(),
+                    tokens_limit: h.tokens_limit,
+                    tokens_remaining: h.tokens_remaining,
                     input_tokens_remaining: h.input_tokens_remaining,
                     output_tokens_remaining: h.output_tokens_remaining,
+                    tokens_reset: h.tokens_reset.clone(),
                     retry_after_secs: h.retry_after_secs,
+                    quota_window: h.quota_window.clone(),
+                    quota_status: h.quota_status.clone(),
+                    quota_used_percent: h.quota_used_percent,
+                    quota_reset_at: h.quota_reset_at,
+                    quota_overage_status: h.quota_overage_status.clone(),
+                    quota_overage_reset_at: h.quota_overage_reset_at,
+                    quota_is_using_overage: h.quota_is_using_overage,
                 }
             }
             _ => HeadroomView::NotReported {

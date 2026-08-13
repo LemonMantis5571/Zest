@@ -1,4 +1,4 @@
-//! System prompt composition: base + project custom + skills.
+//! System prompt composition: base + project docs + personal skills.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -356,11 +356,11 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     format!("{truncated}…\n\n(truncated — {count} chars total)")
 }
 
-/// Load custom + project docs + discover skills and compose against `base`.
+/// Load custom + project docs + user skills and compose against `base`.
 pub fn compose_for_project(base: &str, root: &Path) -> Result<(String, SkillSet), String> {
     let custom = load_custom_system(root)?;
     let docs = load_project_docs(root);
-    let skills = SkillSet::discover(root);
+    let skills = SkillSet::discover();
     let system = compose_system_with_docs(base, &custom, &docs, &skills);
     Ok((system, skills))
 }
@@ -368,7 +368,7 @@ pub fn compose_for_project(base: &str, root: &Path) -> Result<(String, SkillSet)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{parse_skill_markdown, SkillSource};
+    use crate::skills::parse_skill_markdown;
     use std::path::Path;
 
     #[test]
@@ -377,7 +377,6 @@ mod tests {
         let skill = parse_skill_markdown(
             "---\nname: fmt\ndescription: Format code\n---\n\nDo it right.\n",
             Path::new("/x/fmt/SKILL.md"),
-            SkillSource::Project,
         )
         .unwrap();
         skills.insert(skill);

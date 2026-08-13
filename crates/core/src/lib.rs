@@ -25,6 +25,7 @@ pub mod pricing;
 pub mod profile;
 pub mod prompt;
 pub mod provider;
+pub mod quota;
 pub mod rates;
 pub mod reading_diff;
 pub mod runtime;
@@ -97,13 +98,17 @@ pub use provider::{
     probe, Completion, ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, ResumeHandle,
     ResumeSupport, StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
+pub use quota::{
+    fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,
+    ProviderQuotaView, ProviderQuotaWindowView, ProviderSpendLimitView,
+};
 pub use rates::{RateCatalog, DEFAULT_RATES_URL};
 pub use reading_diff::{
     abridge as abridge_reading_diff, LineRange, ReadingDiffPlan, ReadingDiffResult,
 };
 pub use runtime::{RuntimeBuilder, RuntimeSession};
 pub use skills::{
-    Skill, SkillSet, SkillSource, SkillSummary, INLINE_BUDGET_BYTES, INLINE_MAX_BYTES, MAX_SKILLS,
+    Skill, SkillSet, SkillSummary, INLINE_BUDGET_BYTES, INLINE_MAX_BYTES, MAX_SKILLS,
     MAX_SKILL_BYTES,
 };
 pub use thread::{

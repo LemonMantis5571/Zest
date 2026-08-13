@@ -334,7 +334,7 @@ impl RuntimeBuilder {
         }
         let custom = load_custom_system(&root).map_err(HarnessError::Other)?;
         let project_docs = load_project_docs(&root);
-        let skills = Arc::new(RwLock::new(SkillSet::discover(&root)));
+        let skills = Arc::new(RwLock::new(SkillSet::discover()));
         let system = {
             let guard = skills
                 .read()
