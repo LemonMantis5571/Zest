@@ -15,9 +15,12 @@ import type {
   ExternalAgentRow,
   LoginStarted,
   LoginStatus,
+  NowPlayingView,
   PreparedAttachment,
+  PluginView,
   ProfileStats,
   ProviderRow,
+  ProviderQuotaSnapshot,
   RatesStatus,
   SessionInfo,
   SessionMeta,
@@ -27,6 +30,8 @@ import type {
   UsageReport,
   UsageSnapshot,
   UserProfile,
+  WorkspaceFileContent,
+  WorkspaceFileView,
   WorkspacePickResult,
   WorkspaceReview,
 } from "./types";
@@ -97,6 +102,34 @@ export function openProjectConfig(root: string) {
 
 export function usageSnapshot() {
   return invoke<UsageSnapshot>("usage_snapshot");
+}
+
+export function providerQuota() {
+  return invoke<ProviderQuotaSnapshot>("provider_quota");
+}
+
+export function listPlugins() {
+  return invoke<PluginView[]>("list_plugins");
+}
+
+export function openPluginsFolder() {
+  return invoke<void>("open_plugins_folder");
+}
+
+export function setPluginEnabled(id: string, enabled: boolean) {
+  return invoke<PluginView[]>("set_plugin_enabled", { id, enabled });
+}
+
+export function nowPlaying() {
+  return invoke<NowPlayingView>("now_playing");
+}
+
+export function controlNowPlaying(action: "previous" | "toggle" | "next") {
+  return invoke<NowPlayingView>("control_now_playing", { action });
+}
+
+export function setNowPlayingVolume(volumePercent: number) {
+  return invoke<NowPlayingView>("set_now_playing_volume", { volumePercent });
 }
 
 export function usageReport(days: number) {
@@ -201,12 +234,16 @@ export function moveProjectToSpace(projectPath: string, spaceId: string) {
   return invoke<SpacesSnapshot>("move_project_to_space", { projectPath, spaceId });
 }
 
+export function forgetWorkspace(projectPath: string) {
+  return invoke<SpacesSnapshot>("forget_workspace", { projectPath });
+}
+
 export function listChatProjects() {
   return invoke<ProjectChats[]>("list_chat_projects");
 }
 
 export function openProjectChat(options: {
-  root: string;
+  root: string | null;
   threadId?: string | null;
   newThread?: boolean;
   providerId?: string | null;
@@ -249,21 +286,28 @@ export function compactContext() {
   return invoke<ContextUsage>("compact_context");
 }
 
-export function deleteThread(id: string, projectPath?: string | null) {
+export function deleteThread(
+  id: string,
+  projectPath?: string | null,
+  freeChat = false
+) {
   return invoke<SessionInfo>("delete_thread", {
     id,
     projectPath: projectPath ?? null,
+    freeChat,
   });
 }
 
 export function setThreadPinned(
   id: string,
   projectPath: string | null | undefined,
-  pinned: boolean
+  pinned: boolean,
+  freeChat = false
 ) {
   return invoke<void>("set_thread_pinned", {
     id,
     projectPath: projectPath ?? null,
+    freeChat,
     pinned,
   });
 }
@@ -271,11 +315,13 @@ export function setThreadPinned(
 export function renameThread(
   id: string,
   projectPath: string | null | undefined,
-  title: string
+  title: string,
+  freeChat = false
 ) {
   return invoke<ThreadSummary>("rename_thread", {
     id,
     projectPath: projectPath ?? null,
+    freeChat,
     title,
   });
 }
@@ -296,6 +342,16 @@ export function saveMarkdown(suggestedName: string, markdown: string) {
 
 export function getWorkspaceFolder() {
   return invoke<string>("get_workspace_folder");
+}
+
+export function listWorkspaceFiles(relativePath?: string | null) {
+  return invoke<WorkspaceFileView[]>("list_workspace_files", {
+    relativePath: relativePath ?? null,
+  });
+}
+
+export function readWorkspaceFile(relativePath: string) {
+  return invoke<WorkspaceFileContent>("read_workspace_file", { relativePath });
 }
 
 export function pickWorkspaceFolder() {
@@ -441,7 +497,6 @@ export type SystemPromptInfo = {
 export type SkillSummary = {
   name: string;
   description: string;
-  source: "user" | "project";
   path: string;
   inlined: boolean;
 };

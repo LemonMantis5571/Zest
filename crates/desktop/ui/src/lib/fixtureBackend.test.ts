@@ -29,6 +29,25 @@ describe("fixture chat rename", () => {
   });
 });
 
+describe("fixture free chats", () => {
+  it("keeps free chats in Recent and out of the project tree", async () => {
+    const backend = createFixtureBackend();
+
+    const initial = await backend.listChatProjects();
+    assert.equal(initial.filter((project) => project.path !== null).length, 1);
+    assert.equal(initial.filter((project) => project.path === null).length, 1);
+
+    const free = await backend.openProjectChat({ root: null, newThread: true });
+    assert.equal(free.isFreeChat, true);
+
+    const afterFree = await backend.listChatProjects();
+    const project = afterFree.find((item) => item.path !== null);
+    const recent = afterFree.find((item) => item.path === null);
+    assert.equal(project?.threads.length, 0);
+    assert.equal(recent?.threads.some((thread) => thread.id === free.threadId), true);
+  });
+});
+
 describe("fixture delegation lifecycle", () => {
   it("drives a card through worker, reviewer, ready, and apply states", async () => {
     const backend = createFixtureBackend();
@@ -71,5 +90,32 @@ describe("fixture delegation lifecycle", () => {
     const cancelled = await backend.cancelDelegationJob(job.jobId);
     assert.equal(cancelled.status, "cancelled");
     assert.equal(events.at(-1)?.kind, "cancelled");
+  });
+});
+
+describe("fixture plugins and workspace files", () => {
+  it("keeps now playing opt-in and exposes a shallow file tree", async () => {
+    const backend = createFixtureBackend();
+
+    assert.equal((await backend.nowPlaying()).status, "disabled");
+    await backend.setPluginEnabled("now-playing", true);
+    const playing = await backend.nowPlaying();
+    assert.equal(playing.title, "Midnight City");
+    assert.equal(playing.artist, "M83");
+    assert.equal(playing.artworkDataUrl?.startsWith("data:image/"), true);
+    assert.equal(playing.volumePercent, 83);
+
+    const paused = await backend.controlNowPlaying("toggle");
+    assert.equal(paused.status, "paused");
+    assert.equal((await backend.setNowPlayingVolume(42)).volumePercent, 42);
+
+    const root = await backend.listWorkspaceFiles();
+    assert.deepEqual(root.map((entry) => entry.name), ["src", "README.md", "Cargo.toml"]);
+
+    const source = await backend.listWorkspaceFiles("src");
+    assert.deepEqual(source.map((entry) => entry.name), ["main.ts", "lib.ts"]);
+    const preview = await backend.readWorkspaceFile("src/main.ts");
+    assert.equal(preview.content, "[fixture preview]");
+    assert.equal(preview.byteCount, preview.content.length);
   });
 });

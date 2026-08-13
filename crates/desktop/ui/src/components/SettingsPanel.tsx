@@ -4,8 +4,11 @@ import {
   BookOpenIcon,
   ChartColumnIcon,
   ChevronRightIcon,
+  FolderOpenIcon,
   KeyboardIcon,
   type LucideIcon,
+  PuzzleIcon,
+  RefreshCwIcon,
   ScrollTextIcon,
   ServerIcon,
   UserIcon,
@@ -16,6 +19,7 @@ import {
   KeyboardShortcuts,
   useScrollIntoViewOnBump,
 } from "@/components/KeyboardShortcuts";
+import { NowPlayingCard } from "@/components/NowPlayingCard";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -30,6 +34,8 @@ import { useDialogFocusTrap } from "@/lib/useDialogFocusTrap";
 import type {
   ExternalAgentCheck,
   ExternalAgentRow,
+  NowPlayingView,
+  PluginView,
   ProviderRow,
   SessionInfo,
   UsageSnapshot,
@@ -196,6 +202,10 @@ export function SettingsPanel({
 
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
+  const [plugins, setPlugins] = useState<PluginView[]>([]);
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingView | null>(null);
+  const [pluginBusy, setPluginBusy] = useState<string | null>(null);
+  const [pluginFolderBusy, setPluginFolderBusy] = useState(false);
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [avatarDataUrl, setAvatarDataUrl] = useState(profile.avatarDataUrl);
   const [profileSaving, setProfileSaving] = useState(false);
@@ -231,8 +241,10 @@ export function SettingsPanel({
       backend.getSystemPrompt(),
       backend.listSkills(),
       backend.usageSnapshot(),
+      backend.listPlugins(),
+      backend.nowPlaying(),
     ])
-      .then(([rowsR, externalR, promptR, skillsR, snapR]) => {
+      .then(([rowsR, externalR, promptR, skillsR, snapR, pluginsR, nowPlayingR]) => {
         if (cancelled) return;
 
         if (rowsR.status === "fulfilled") {
@@ -268,6 +280,8 @@ export function SettingsPanel({
         }
 
         setUsage(snapR.status === "fulfilled" ? snapR.value : null);
+        setPlugins(pluginsR.status === "fulfilled" ? pluginsR.value : []);
+        setNowPlaying(nowPlayingR.status === "fulfilled" ? nowPlayingR.value : null);
       })
       .finally(() => {
         if (!cancelled) {
@@ -297,6 +311,21 @@ export function SettingsPanel({
       cancelled = true;
     };
   }, [open, sending]);
+
+  // Media metadata is intentionally polled only while Settings is visible and
+  // the user has opted into the plugin. No background listener is kept alive.
+  useEffect(() => {
+    if (!open || !plugins.some((plugin) => plugin.id === "now-playing" && plugin.enabled)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void getBackend()
+        .nowPlaying()
+        .then(setNowPlaying)
+        .catch(() => undefined);
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [open, plugins]);
 
   useEffect(() => {
     if (!open) return;
@@ -425,6 +454,41 @@ export function SettingsPanel({
       );
     } finally {
       setExternalBusy(null);
+    }
+  }
+
+  async function togglePlugin(plugin: PluginView) {
+    setPluginBusy(plugin.id);
+    try {
+      const next = await getBackend().setPluginEnabled(plugin.id, !plugin.enabled);
+      setPlugins(next);
+      setNowPlaying(await getBackend().nowPlaying());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change this extra.");
+    } finally {
+      setPluginBusy(null);
+    }
+  }
+
+  async function refreshPlugins() {
+    try {
+      const backend = getBackend();
+      const [next, music] = await Promise.all([backend.listPlugins(), backend.nowPlaying()]);
+      setPlugins(next);
+      setNowPlaying(music);
+    } catch {
+      setError("Could not refresh extras.");
+    }
+  }
+
+  async function openPluginFolder() {
+    setPluginFolderBusy(true);
+    try {
+      await getBackend().openPluginsFolder();
+    } catch {
+      setError("Could not open the extras folder.");
+    } finally {
+      setPluginFolderBusy(false);
     }
   }
 
@@ -922,6 +986,85 @@ export function SettingsPanel({
             )}
           </SettingsSection>
 
+          <SettingsSection
+            title="Extras"
+            icon={PuzzleIcon}
+            hint={
+              plugins.length
+                ? `${plugins.filter((plugin) => plugin.enabled).length} on`
+                : "None yet"
+            }
+          >
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap gap-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={pluginFolderBusy}
+                  onClick={() => void openPluginFolder()}
+                >
+                  <FolderOpenIcon data-icon="inline-start" aria-hidden="true" />
+                  Open folder
+                </Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => void refreshPlugins()}>
+                  <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
+                  Refresh
+                </Button>
+              </div>
+
+              {plugins.length ? (
+                <div className="flex flex-col gap-2">
+                  {plugins.map((plugin) => (
+                    <div
+                      key={plugin.id}
+                      className="rounded-lg border border-border/80 bg-card/80 px-3 py-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium">{plugin.name}</div>
+                          <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                            {plugin.description}
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={plugin.enabled ? "outline" : "default"}
+                          disabled={!plugin.available || pluginBusy === plugin.id}
+                          onClick={() => void togglePlugin(plugin)}
+                        >
+                          {pluginBusy === plugin.id
+                            ? "Wait…"
+                            : plugin.enabled
+                              ? "Turn off"
+                              : plugin.available
+                                ? "Turn on"
+                                : "Not ready"}
+                        </Button>
+                      </div>
+                      {plugin.detail !== "Ready" ? (
+                        <div className="mt-2 text-[10px] text-muted-foreground">
+                          {plugin.detail}
+                        </div>
+                      ) : null}
+                      {plugin.id === "now-playing" && plugin.enabled ? (
+                        <NowPlayingCard value={nowPlaying} />
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
+                  Open the folder to add extras.
+                </p>
+              )}
+              <p className="m-0 text-[11px] leading-relaxed text-muted-foreground">
+                Extras stay on this PC.
+              </p>
+            </div>
+          </SettingsSection>
+
           <SettingsSection title="System prompt" icon={ScrollTextIcon} hint={promptHint}>
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
               Optional project instructions. Saved to{" "}
@@ -995,8 +1138,8 @@ export function SettingsPanel({
             }
           >
             <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-              Skill folders with <span className="font-mono text-[11px]">SKILL.md</span> files in{" "}
-              <span className="font-mono text-[11px]">.zest/skills/</span> and{" "}
+              Your skills are kept on this computer. Zest loads <span className="font-mono text-[11px]">SKILL.md</span> files from{" "}
+              <span className="font-mono text-[11px]">~/.agents/skills/</span> and{" "}
               <span className="font-mono text-[11px]">~/.zest/skills/</span>.
             </p>
             {skills.length === 0 ? (
@@ -1005,14 +1148,13 @@ export function SettingsPanel({
               <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
                 {skills.map((skill) => (
                   <li
-                    key={`${skill.source}:${skill.name}`}
+                    key={skill.name}
                     className="rounded-md border border-border/70 bg-card/60 px-2.5 py-2"
                   >
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="truncate text-sm font-medium">{skill.name}</span>
                       <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-                        {skill.source}
-                        {skill.inlined ? " · inlined" : ""}
+                        Personal
                       </span>
                     </div>
                     <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">

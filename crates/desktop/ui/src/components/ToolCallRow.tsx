@@ -1,16 +1,19 @@
 import { useState } from "react";
 import {
-  CheckIcon,
   ChevronRightIcon,
   FilePenLineIcon,
+  FileTextIcon,
+  GlobeIcon,
+  ListIcon,
   Maximize2Icon,
+  SearchIcon,
+  SparklesIcon,
   TerminalIcon,
   XIcon,
 } from "lucide-react";
 
 import { DiffPreview } from "@/components/CodeBlock";
 import { Button } from "@/components/ui/button";
-import { ZestPulse } from "@/components/ZestPulse";
 import type { ApprovalChoice, ToolPart } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -193,24 +196,15 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
 
   const delegation =
     tool.metadata?.kind === "delegation" ? tool.metadata : null;
-  const title = delegation
-    ? `Delegated to ${delegation.provider_id} · ${delegation.model}`
-    : tool.name;
+  const label = delegation ? "Delegate" : toolLabel(tool.name);
+  const target = toolTarget(tool, delegation);
   const hasBody = Boolean(tool.summary?.trim()) || hasDiff;
-
-  const statusIcon =
-    tool.status === "running" ? (
-      <ZestPulse size={12} />
-    ) : tool.status === "error" ? (
-      <XIcon className="size-3 text-destructive" />
-    ) : (
-      <CheckIcon className="size-3 text-primary/90" />
-    );
+  const canOpenDiff = hasDiff && Boolean(onOpenDiff);
 
   return (
     <div
       className={cn(
-        "group/tool w-full max-w-full rounded-lg",
+        "group/tool-row w-full max-w-full rounded-md",
         tool.status === "error" && "bg-destructive/5"
       )}
     >
@@ -218,40 +212,50 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
         type="button"
         disabled={!hasBody}
         onClick={() => {
-          if (hasDiff && onOpenDiff) {
+          if (canOpenDiff) {
             openDiff();
             return;
           }
           if (hasBody) setOpen((v) => !v);
         }}
         className={cn(
-          "flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left outline-none transition-colors",
-          "hover:bg-white/[0.035] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
+          "flex min-h-7 w-full items-center gap-2 rounded-md px-1 py-1 text-left outline-none transition-colors",
+          "hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
           hasBody ? "cursor-pointer" : "cursor-default"
         )}
       >
-        <span className="grid size-5 shrink-0 place-items-center rounded-md bg-muted/50">
-          {statusIcon}
+        <span className="relative flex size-4 shrink-0 items-center justify-center text-muted-foreground/80">
+          <span
+            className={cn(
+              "transition-opacity duration-100",
+              hasBody && "group-hover/tool-row:opacity-0",
+              open && "opacity-0"
+            )}
+          >
+            <ToolActionIcon tool={tool} />
+          </span>
+          {hasBody ? (
+            <ChevronRightIcon
+              className={cn(
+                "absolute size-3 transition-[opacity,transform] duration-150 group-hover/tool-row:opacity-100",
+                open ? "rotate-90 opacity-100" : "opacity-0"
+              )}
+            />
+          ) : null}
         </span>
         <span
           className={cn(
-            "shrink-0 font-mono text-[12.5px] font-medium text-foreground/85",
+            "shrink-0 text-xs font-medium text-foreground/90",
             tool.status === "running" && "shimmer-text text-foreground/80"
           )}
         >
-          {title}
+          {label}
         </span>
-        {!delegation && (tool.path || tool.summary) ? (
-          <TruncateWithHover
-            text={tool.path || tool.summary || ""}
-            className="min-w-0 flex-1 font-mono text-[11.5px] text-muted-foreground/75"
-          />
-        ) : (
-          <span className="min-w-0 flex-1 text-[11.5px] text-muted-foreground/75">
-            {hasDiff ? "View diff" : null}
-          </span>
-        )}
-        {hasDiff ? (
+        <TruncateWithHover
+          text={target}
+          className="min-w-0 flex-1 rounded-sm bg-muted/70 px-1.5 py-0.5 font-mono text-[11.5px] text-muted-foreground transition-colors group-hover/tool-row:bg-accent group-hover/tool-row:text-foreground"
+        />
+        {canOpenDiff ? (
           <Maximize2Icon className="size-3 shrink-0 text-muted-foreground/50" />
         ) : hasBody ? (
           <ChevronRightIcon
@@ -262,10 +266,10 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
           />
         ) : null}
       </button>
-      {open && !hasDiff ? (
-        <div className="mt-0.5 mb-1 space-y-1.5 px-2 pl-9">
+      {open && !canOpenDiff ? (
+        <div className="mt-0.5 mb-1 ml-2 flex flex-col gap-1 border-l border-border/60 py-0.5 pl-3.5 pr-2">
           {tool.summary ? (
-            <pre className="max-h-48 overflow-auto font-mono text-[11px] leading-relaxed text-muted-foreground/90 whitespace-pre-wrap">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/90">
               {tool.summary}
             </pre>
           ) : null}
@@ -275,7 +279,85 @@ export function ToolCallRow({ tool, onResolveApproval, onOpenDiff, asCard }: Pro
   );
 }
 
-/** Single-line truncate with in-tree hover card (no portal — WebView-safe). */
+function toolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    bash: "Run",
+    delegate_external: "Delegate",
+    edit_file: "Edit",
+    glob: "Find",
+    grep: "Search",
+    list_dir: "List",
+    read_file: "Read",
+    web_search: "Search web",
+    write_file: "Write",
+  };
+  return labels[name] ?? name.replaceAll("_", " ");
+}
+
+function toolTarget(
+  tool: ToolPart,
+  delegation: Extract<
+    NonNullable<ToolPart["metadata"]>,
+    { kind: "delegation" }
+  > | null
+): string {
+  if (delegation) return `${delegation.provider_id} · ${delegation.model}`;
+  if (tool.path?.trim()) return tool.path;
+  if (tool.summary?.trim()) return tool.summary;
+
+  if (tool.status === "running") {
+    const runningTargets: Record<string, string> = {
+      bash: "Running command",
+      delegate_external: "Working",
+      edit_file: "Preparing edit",
+      glob: "Searching files",
+      grep: "Searching text",
+      list_dir: "Listing files",
+      read_file: "Reading file",
+      web_search: "Searching web",
+      write_file: "Preparing file",
+    };
+    return runningTargets[tool.name] ?? "Working";
+  }
+
+  return tool.status === "error" ? "Failed" : "Completed";
+}
+
+function ToolActionIcon({ tool }: { tool: ToolPart }) {
+  if (tool.status === "error") {
+    return <XIcon className="size-3 text-destructive" aria-hidden />;
+  }
+
+  const icon = (() => {
+    switch (tool.name) {
+      case "bash":
+        return <TerminalIcon className="size-3.5" aria-hidden />;
+      case "delegate_external":
+        return <SparklesIcon className="size-3.5" aria-hidden />;
+      case "edit_file":
+      case "write_file":
+        return <FilePenLineIcon className="size-3.5" aria-hidden />;
+      case "glob":
+      case "grep":
+        return <SearchIcon className="size-3.5" aria-hidden />;
+      case "list_dir":
+        return <ListIcon className="size-3.5" aria-hidden />;
+      case "web_search":
+        return <GlobeIcon className="size-3.5" aria-hidden />;
+      case "read_file":
+      default:
+        return <FileTextIcon className="size-3.5" aria-hidden />;
+    }
+  })();
+
+  return (
+    <span className={cn(tool.status === "running" && "animate-pulse")}>
+      {icon}
+    </span>
+  );
+}
+
+/** Single-line truncate with in-tree hover card (no portal - WebView-safe). */
 function TruncateWithHover({
   text,
   className,

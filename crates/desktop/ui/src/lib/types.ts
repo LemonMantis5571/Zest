@@ -184,10 +184,11 @@ export type ThreadSummary = {
   gitContext?: ThreadGitContext;
 };
 
-/** Sidebar grouping: one project folder + its chats. */
+/** Sidebar grouping: one project folder + its chats, or the free-chat bucket. */
 export type ProjectChats = {
   name: string;
-  path: string;
+  /** `null` marks the user-local free-chat bucket shown under RECENT. */
+  path: string | null;
   active: boolean;
   spaceId: string;
   threads: ThreadSummary[];
@@ -217,6 +218,47 @@ export type PreparedAttachment = {
   content?: string | null;
   mediaType?: string | null;
   dataBase64?: string | null;
+};
+
+export type PluginView = {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  available: boolean;
+  detail: string;
+};
+
+export type NowPlayingView = {
+  status: "disabled" | "unavailable" | "idle" | "playing" | "paused" | "stopped";
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  artworkDataUrl?: string | null;
+  sourceApp?: string | null;
+  positionSecs?: number | null;
+  durationSecs?: number | null;
+  volumePercent?: number | null;
+  canPrevious?: boolean | null;
+  canToggle?: boolean | null;
+  canNext?: boolean | null;
+  detail: string;
+  observedAt: number;
+};
+
+export type WorkspaceFileView = {
+  path: string;
+  name: string;
+  kind: "file" | "directory";
+  size?: number | null;
+  modifiedAt?: number | null;
+};
+
+export type WorkspaceFileContent = {
+  path: string;
+  content: string;
+  truncated: boolean;
+  byteCount: number;
 };
 
 export type AttachmentInput = {
@@ -276,10 +318,22 @@ export type HeadroomView =
       kind: "provider_reported";
       label: string;
       ageSecs?: number | null;
+      requestsLimit?: number | null;
       requestsRemaining?: number | null;
+      requestsReset?: string | null;
+      tokensLimit?: number | null;
+      tokensRemaining?: number | null;
       inputTokensRemaining?: number | null;
       outputTokensRemaining?: number | null;
+      tokensReset?: string | null;
       retryAfterSecs?: number | null;
+      quotaWindow?: string | null;
+      quotaStatus?: string | null;
+      quotaUsedPercent?: number | null;
+      quotaResetAt?: number | null;
+      quotaOverageStatus?: string | null;
+      quotaOverageResetAt?: number | null;
+      quotaIsUsingOverage?: boolean | null;
     }
   | { kind: "not_reported"; label: string };
 
@@ -287,6 +341,37 @@ export type ProviderUsageView = {
   providerId: string;
   measured: MeasuredUsage;
   headroom: HeadroomView;
+};
+
+export type ProviderQuotaView = {
+  providerId: string;
+  kind: "balance" | "rate_limit" | "unavailable" | "error";
+  detail: string;
+  available?: boolean | null;
+  balances: Array<{
+    currency: string;
+    totalBalance: string;
+    grantedBalance: string;
+    toppedUpBalance: string;
+  }>;
+  windows: Array<{
+    label: string;
+    usedPercent: number;
+    windowMinutes?: number | null;
+    resetsAt?: number | null;
+  }>;
+  plan?: string | null;
+  spendLimit?: {
+    used: string;
+    limit: string;
+    remainingPercent: number;
+    resetsAt?: number | null;
+  } | null;
+};
+
+export type ProviderQuotaSnapshot = {
+  checkedAt: number;
+  providers: ProviderQuotaView[];
 };
 
 export type UsageSnapshot = {

@@ -15,6 +15,7 @@ const base: SessionInfo = {
   model: "gpt-5.4",
   effort: "high",
   root: ".",
+  isFreeChat: false,
   threadId: "t1",
   defaultModel: "gpt-5.6-sol",
   models: [

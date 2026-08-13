@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   countThinkingSteps,
   lastThinkingLine,
+  thinkingTraceRows,
   thinkingSummaryLabel,
 } from "./thinkingSummary.ts";
 
@@ -55,4 +56,30 @@ test("step counting drives the settled summary label", () => {
   assert.equal(thinkingSummaryLabel(STREAM), "Thought through 3 steps");
   assert.equal(thinkingSummaryLabel("**Only one**"), "Thought through 1 step");
   assert.equal(thinkingSummaryLabel("plain prose"), "Thought about this");
+});
+
+test("thinking rows pair each title with the prose that explains it", () => {
+  assert.deepEqual(thinkingTraceRows(STREAM), [
+    {
+      primary: "Planning delegation with context gathering",
+      secondary: "Looking at what the worker needs to know.",
+      kind: "step",
+    },
+    {
+      primary: "Drafting self-contained delegation task",
+      secondary: "Writing it so it stands alone.",
+      kind: "step",
+    },
+    {
+      primary: "Analyzing migration and test update requirements",
+      secondary: "Checking which tests move.",
+      kind: "step",
+    },
+  ]);
+});
+
+test("untitled thinking still produces a useful detail row", () => {
+  assert.deepEqual(thinkingTraceRows("Checking the **gateway** now."), [
+    { primary: "Checking the gateway now.", kind: "detail" },
+  ]);
 });

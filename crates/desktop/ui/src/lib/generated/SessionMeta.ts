@@ -11,4 +11,4 @@ import type { TurnRecoveryView } from "./TurnRecovery";
  * the wire shape is what the generated bindings gate protects. The duplicated
  * field list is the cost of both staying legible.
  */
-export type SessionMeta = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, threadId: string, defaultModel: string, models: Array<ModelCapability>, checkpoints: Array<ThreadCheckpointView>, warning?: string, recovery?: TurnRecoveryView, };
+export type SessionMeta = { sessionId: string, provider: string, label: string, model: string, effort: string, root: string, isFreeChat: boolean, threadId: string, defaultModel: string, models: Array<ModelCapability>, checkpoints: Array<ThreadCheckpointView>, warning?: string, recovery?: TurnRecoveryView, };

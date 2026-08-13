@@ -11,8 +11,68 @@
 /** A `**Bold title**` occupying a whole line — how each step announces itself. */
 const TITLE_LINE = /^\s*\*\*(.+?)\*\*\s*$/;
 
+export type ThinkingTraceRow = {
+  primary: string;
+  secondary?: string;
+  kind: "step" | "detail";
+};
+
 function lines(thinking: string): string[] {
   return thinking.split("\n").map((line) => line.trim());
+}
+
+function normalizeTraceText(value: string): string {
+  return value.replace(/\s+/g, " ").replace(/\*\*/g, "").trim();
+}
+
+/**
+ * Turn the provider's summarized thinking into the small rows used by the
+ * disclosure. A title is paired with the paragraph that follows it so the
+ * expanded trace feels like a sequence of steps instead of a raw Markdown
+ * dump.
+ */
+export function thinkingTraceRows(thinking: string): ThinkingTraceRow[] {
+  const blocks = thinking
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const rows: ThinkingTraceRow[] = [];
+
+  for (let index = 0; index < blocks.length; index += 1) {
+    const blockLines = blocks[index]
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const firstLine = blockLines[0] ?? "";
+    const title = TITLE_LINE.exec(firstLine);
+
+    if (title) {
+      let secondary = normalizeTraceText(blockLines.slice(1).join(" "));
+      const nextBlock = blocks[index + 1];
+      const nextFirstLine =
+        nextBlock
+          ?.split("\n")
+          .map((line) => line.trim())
+          .find(Boolean) ?? "";
+
+      if (!secondary && nextBlock && !TITLE_LINE.test(nextFirstLine)) {
+        secondary = normalizeTraceText(nextBlock);
+        index += 1;
+      }
+
+      rows.push({
+        primary: normalizeTraceText(title[1]),
+        secondary: secondary || undefined,
+        kind: "step",
+      });
+      continue;
+    }
+
+    const primary = normalizeTraceText(blocks[index]);
+    if (primary) rows.push({ primary, kind: "detail" });
+  }
+
+  return rows;
 }
 
 /**

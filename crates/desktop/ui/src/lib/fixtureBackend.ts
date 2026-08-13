@@ -34,6 +34,8 @@ const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
   supportsTools: true,
   supportsVision: false,
 }));
+const FIXTURE_ARTWORK_DATA_URL =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%235e6ad2'/%3E%3Cstop offset='1' stop-color='%23c084fc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='96' height='96' rx='16' fill='url(%23g)'/%3E%3Ccircle cx='48' cy='48' r='22' fill='%23010102' opacity='.8'/%3E%3Ccircle cx='48' cy='48' r='7' fill='%23f4f4f5'/%3E%3C/svg%3E";
 const FIXTURE_SESSION: SessionInfo = {
   sessionId: "session-fixture",
   provider: "fixture",
@@ -41,6 +43,7 @@ const FIXTURE_SESSION: SessionInfo = {
   model: DEFAULT_CODEX_MODEL,
   effort: DEFAULT_EFFORT,
   root: ".",
+  isFreeChat: false,
   threadId: "fixture",
   defaultModel: DEFAULT_CODEX_MODEL,
   models: FIXTURE_MODELS,
@@ -95,6 +98,7 @@ export function createFixtureBackend(): DesktopBackend {
   const fixtureThreadTitles = new Map<string, string>([
     ["fixture", "Fixture"],
     ["fixture-local", "Local model chat"],
+    ["fixture-free", "Free chat"],
   ]);
   const fixtureSpaces: SpacesSnapshot = {
     activeSpaceId: "space:default",
@@ -123,6 +127,9 @@ export function createFixtureBackend(): DesktopBackend {
   const enabledExternalAgents = new Set<string>();
   const fixtureMcpAgents = new Set<string>();
   const fixtureExternalModels = new Map<string, string>();
+  let fixtureNowPlayingEnabled = false;
+  let fixtureNowPlayingStatus: "playing" | "paused" = "playing";
+  let fixtureNowPlayingVolume = 83;
 
   const fixtureExternalModelOptions: Record<string, string[]> = {
     claude: ["sonnet", "opus"],
@@ -323,6 +330,78 @@ export function createFixtureBackend(): DesktopBackend {
         ],
         externalWorkers: [],
       };
+    },
+    async providerQuota() {
+      return {
+        checkedAt: Math.floor(Date.now() / 1000),
+        providers: [
+          {
+            providerId: "fixture",
+            kind: "unavailable" as const,
+            detail: "Live provider checks are unavailable in the fixture.",
+            available: null,
+            balances: [],
+            windows: [],
+            plan: null,
+            spendLimit: null,
+          },
+        ],
+      };
+    },
+    async listPlugins() {
+      return [
+        {
+          id: "now-playing",
+          name: "Now Playing",
+          description: "See and control your music.",
+          enabled: fixtureNowPlayingEnabled,
+          available: true,
+          detail: "Ready",
+        },
+      ];
+    },
+    async openPluginsFolder() {},
+    async setPluginEnabled(id: string, enabled: boolean) {
+      if (id !== "now-playing") throw new Error(`fixture: unknown plugin ${id}`);
+      fixtureNowPlayingEnabled = enabled;
+      return this.listPlugins();
+    },
+    async nowPlaying() {
+      return fixtureNowPlayingEnabled
+        ? {
+            status: fixtureNowPlayingStatus,
+            title: "Midnight City",
+            artist: "M83",
+            album: "Hurry Up, We're Dreaming",
+            artworkDataUrl: FIXTURE_ARTWORK_DATA_URL,
+            sourceApp: "fixture-player",
+            positionSecs: 86,
+            durationSecs: 243,
+            volumePercent: fixtureNowPlayingVolume,
+            canPrevious: true,
+            canToggle: true,
+            canNext: true,
+            detail: "Ready",
+            observedAt: Math.floor(Date.now() / 1000),
+          }
+        : {
+            status: "disabled" as const,
+            detail: "Turn it on in Settings.",
+            observedAt: Math.floor(Date.now() / 1000),
+          };
+    },
+    async controlNowPlaying(action) {
+      if (!fixtureNowPlayingEnabled) throw new Error("fixture: Now Playing is disabled");
+      if (action === "toggle") {
+        fixtureNowPlayingStatus =
+          fixtureNowPlayingStatus === "playing" ? "paused" : "playing";
+      }
+      return this.nowPlaying();
+    },
+    async setNowPlayingVolume(volumePercent) {
+      if (!fixtureNowPlayingEnabled) throw new Error("fixture: Now Playing is disabled");
+      fixtureNowPlayingVolume = Math.max(0, Math.min(100, volumePercent));
+      return this.nowPlaying();
     },
     async usageReport(days: number) {
       // Shaped to exercise the parts of the screen that only appear when
@@ -713,6 +792,10 @@ export function createFixtureBackend(): DesktopBackend {
       syncFixtureSpaceMetadata();
       return structuredClone(fixtureSpaces);
     },
+    async forgetWorkspace(projectPath) {
+      if (projectPath !== workspace) throw new Error("fixture: unknown workspace");
+      throw new Error("Switch to another project before removing the active workspace.");
+    },
     async listChatProjects() {
       const threads = await this.listThreads();
       if (fixtureProjectSpaceId !== fixtureSpaces.activeSpaceId) return [];
@@ -720,22 +803,46 @@ export function createFixtureBackend(): DesktopBackend {
         {
           name: workspace.split(/[/\\]/).filter(Boolean).pop() || "fixture",
           path: workspace,
-          active: true,
+          active: !session.isFreeChat,
           spaceId: fixtureSpaces.activeSpaceId,
-          threads,
+          threads: session.isFreeChat ? [] : threads,
+        },
+        {
+          name: "Free chats",
+          path: null,
+          active: session.isFreeChat,
+          spaceId: fixtureSpaces.activeSpaceId,
+          threads: session.isFreeChat
+            ? threads
+            : [
+                {
+                  id: "fixture-free",
+                  createdAt: Math.floor(Date.now() / 1000) - 1800,
+                  updatedAt: Math.floor(Date.now() / 1000) - 1800,
+                  title: fixtureThreadTitles.get("fixture-free") || "Free chat",
+                  pinned: false,
+                  providerId: "codex",
+                  messageCount: 0,
+                },
+              ],
         },
       ];
     },
     async openProjectChat(options) {
-      workspace = options.root;
-      if (fixtureProjectSpaceId === fixtureSpaces.activeSpaceId) {
+      const targetRoot = options.root;
+      const openingFreeChat = targetRoot === null;
+      if (targetRoot !== null) {
+        workspace = targetRoot;
+      }
+      if (!openingFreeChat && fixtureProjectSpaceId === fixtureSpaces.activeSpaceId) {
         fixtureLastWorkspaceBySpaceId[fixtureSpaces.activeSpaceId] = workspace;
       }
       syncFixtureSpaceMetadata();
       if (options.newThread) fixturePinned = false;
       session = {
         ...session,
-        root: workspace,
+        root: openingFreeChat ? "." : workspace,
+        isFreeChat: openingFreeChat,
         messages: options.newThread ? [] : session.messages,
         threadId: options.newThread
           ? `fixture-${crypto.randomUUID()}`
@@ -754,6 +861,7 @@ export function createFixtureBackend(): DesktopBackend {
       session = {
         ...FIXTURE_SESSION,
         root: workspace,
+        isFreeChat: false,
         threadId: `fixture-${crypto.randomUUID()}`,
         messages: [],
       };
@@ -925,6 +1033,62 @@ export function createFixtureBackend(): DesktopBackend {
     },
     async getWorkspaceFolder() {
       return workspace;
+    },
+    async listWorkspaceFiles(relativePath?: string | null) {
+      const normalized = relativePath?.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "") ?? "";
+      if (normalized === "src") {
+        return [
+          {
+            path: "src/main.ts",
+            name: "main.ts",
+            kind: "file" as const,
+            size: 520,
+            modifiedAt: 1_700_000_000,
+          },
+          {
+            path: "src/lib.ts",
+            name: "lib.ts",
+            kind: "file" as const,
+            size: 340,
+            modifiedAt: 1_700_000_000,
+          },
+        ];
+      }
+      if (normalized) return [];
+      return [
+        {
+          path: "src",
+          name: "src",
+          kind: "directory" as const,
+          size: null,
+          modifiedAt: null,
+        },
+        {
+          path: "README.md",
+          name: "README.md",
+          kind: "file" as const,
+          size: 1240,
+          modifiedAt: 1_700_000_000,
+        },
+        {
+          path: "Cargo.toml",
+          name: "Cargo.toml",
+          kind: "file" as const,
+          size: 860,
+          modifiedAt: 1_700_000_000,
+        },
+      ];
+    },
+    async readWorkspaceFile(relativePath: string) {
+      const content = relativePath.endsWith("README.md")
+        ? "# Fixture project\n\nThis is a safe file preview from the offline backend."
+        : "[fixture preview]";
+      return {
+        path: relativePath,
+        content,
+        truncated: false,
+        byteCount: new TextEncoder().encode(content).length,
+      };
     },
     async pickWorkspaceFolder() {
       workspace = `fixture/project-${crypto.randomUUID().slice(0, 8)}`;

@@ -17,7 +17,9 @@ import type {
   GitContext,
   LoginStarted,
   LoginStatus,
+  NowPlayingView,
   PreparedAttachment,
+  PluginView,
   ProfileStats,
   ProjectChats,
   ProviderRow,
@@ -28,7 +30,10 @@ import type {
   ThreadSummary,
   UsageReport,
   UsageSnapshot,
+  ProviderQuotaSnapshot,
   UserProfile,
+  WorkspaceFileContent,
+  WorkspaceFileView,
   WorkspacePickResult,
   WorkspaceReview,
 } from "./types";
@@ -64,6 +69,13 @@ export type DesktopBackend = {
   configureClaudeCodeProvider(input: { id: string; model: string }): Promise<void>;
   openProjectConfig(root: string): Promise<void>;
   usageSnapshot(): Promise<UsageSnapshot>;
+  providerQuota(): Promise<ProviderQuotaSnapshot>;
+  listPlugins(): Promise<PluginView[]>;
+  openPluginsFolder(): Promise<void>;
+  setPluginEnabled(id: string, enabled: boolean): Promise<PluginView[]>;
+  nowPlaying(): Promise<NowPlayingView>;
+  controlNowPlaying(action: "previous" | "toggle" | "next"): Promise<NowPlayingView>;
+  setNowPlayingVolume(volumePercent: number): Promise<NowPlayingView>;
   usageReport(days: number): Promise<UsageReport>;
   /** Open the price book in the OS editor so rates can be corrected. */
   openPricesFile(): Promise<void>;
@@ -97,9 +109,11 @@ export type DesktopBackend = {
   updateSpace(spaceId: string, name: string, emoji?: string | null): Promise<SpacesSnapshot>;
   deleteSpace(spaceId: string): Promise<SpacesSnapshot>;
   moveProjectToSpace(projectPath: string, spaceId: string): Promise<SpacesSnapshot>;
+  forgetWorkspace(projectPath: string): Promise<SpacesSnapshot>;
   listChatProjects(): Promise<ProjectChats[]>;
   openProjectChat(options: {
-    root: string;
+    /** `null` opens a chat without a workspace. */
+    root: string | null;
     threadId?: string | null;
     newThread?: boolean;
     providerId?: string | null;
@@ -112,16 +126,22 @@ export type DesktopBackend = {
   rewindThread(checkpointId: string): Promise<SessionInfo>;
   editMessage(messageId: string): Promise<SessionInfo>;
   compactContext(): Promise<ContextUsage>;
-  deleteThread(id: string, projectPath?: string | null): Promise<SessionInfo>;
+  deleteThread(
+    id: string,
+    projectPath?: string | null,
+    freeChat?: boolean
+  ): Promise<SessionInfo>;
   setThreadPinned(
     id: string,
     projectPath: string | null | undefined,
-    pinned: boolean
+    pinned: boolean,
+    freeChat?: boolean
   ): Promise<void>;
   renameThread(
     id: string,
     projectPath: string | null | undefined,
-    title: string
+    title: string,
+    freeChat?: boolean
   ): Promise<ThreadSummary>;
   sendMessage(text: string, attachments?: AttachmentInput[]): Promise<void>;
   saveMarkdown(suggestedName: string, markdown: string): Promise<string | null>;
@@ -145,6 +165,8 @@ export type DesktopBackend = {
   setSystemPrompt(custom: string): Promise<SystemPromptInfo>;
   listSkills(): Promise<SkillSummary[]>;
   getWorkspaceFolder(): Promise<string>;
+  listWorkspaceFiles(relativePath?: string | null): Promise<WorkspaceFileView[]>;
+  readWorkspaceFile(relativePath: string): Promise<WorkspaceFileContent>;
   pickWorkspaceFolder(): Promise<WorkspacePickResult | null>;
   pickFiles(): Promise<PreparedAttachment[]>;
   preparePastedImage(options: {
@@ -186,6 +208,13 @@ export function createTauriBackend(): DesktopBackend {
     configureClaudeCodeProvider: (input) => tauriApi.configureClaudeCodeProvider(input),
     openProjectConfig: (root) => tauriApi.openProjectConfig(root),
     usageSnapshot: () => tauriApi.usageSnapshot(),
+    providerQuota: () => tauriApi.providerQuota(),
+    listPlugins: () => tauriApi.listPlugins(),
+    openPluginsFolder: () => tauriApi.openPluginsFolder(),
+    setPluginEnabled: (id, enabled) => tauriApi.setPluginEnabled(id, enabled),
+    nowPlaying: () => tauriApi.nowPlaying(),
+    controlNowPlaying: (action) => tauriApi.controlNowPlaying(action),
+    setNowPlayingVolume: (volumePercent) => tauriApi.setNowPlayingVolume(volumePercent),
     usageReport: (days) => tauriApi.usageReport(days),
     openPricesFile: () => tauriApi.openPricesFile(),
     refreshRates: (force) => tauriApi.refreshRates(force),
@@ -206,6 +235,7 @@ export function createTauriBackend(): DesktopBackend {
     deleteSpace: (spaceId) => tauriApi.deleteSpace(spaceId),
     moveProjectToSpace: (projectPath, spaceId) =>
       tauriApi.moveProjectToSpace(projectPath, spaceId),
+    forgetWorkspace: (projectPath) => tauriApi.forgetWorkspace(projectPath),
     listChatProjects: () => tauriApi.listChatProjects(),
     openProjectChat: (options) => tauriApi.openProjectChat(options),
     loadThread: (id) => tauriApi.loadThread(id),
@@ -215,11 +245,12 @@ export function createTauriBackend(): DesktopBackend {
     rewindThread: (checkpointId) => tauriApi.rewindThread(checkpointId),
     editMessage: (messageId) => tauriApi.editMessage(messageId),
     compactContext: () => tauriApi.compactContext(),
-    deleteThread: (id, projectPath) => tauriApi.deleteThread(id, projectPath),
-    setThreadPinned: (id, projectPath, pinned) =>
-      tauriApi.setThreadPinned(id, projectPath, pinned),
-    renameThread: (id, projectPath, title) =>
-      tauriApi.renameThread(id, projectPath, title),
+    deleteThread: (id, projectPath, freeChat) =>
+      tauriApi.deleteThread(id, projectPath, freeChat),
+    setThreadPinned: (id, projectPath, pinned, freeChat) =>
+      tauriApi.setThreadPinned(id, projectPath, pinned, freeChat ?? projectPath == null),
+    renameThread: (id, projectPath, title, freeChat) =>
+      tauriApi.renameThread(id, projectPath, title, freeChat ?? projectPath == null),
     sendMessage: (text, attachments) => tauriApi.sendMessage(text, attachments),
     saveMarkdown: (suggestedName, markdown) =>
       tauriApi.saveMarkdown(suggestedName, markdown),
@@ -237,6 +268,8 @@ export function createTauriBackend(): DesktopBackend {
     setSystemPrompt: (custom) => tauriApi.setSystemPrompt(custom),
     listSkills: () => tauriApi.listSkills(),
     getWorkspaceFolder: () => tauriApi.getWorkspaceFolder(),
+    listWorkspaceFiles: (relativePath) => tauriApi.listWorkspaceFiles(relativePath),
+    readWorkspaceFile: (relativePath) => tauriApi.readWorkspaceFile(relativePath),
     pickWorkspaceFolder: () => tauriApi.pickWorkspaceFolder(),
     pickFiles: () => tauriApi.pickFiles(),
     preparePastedImage: (options) => tauriApi.preparePastedImage(options),

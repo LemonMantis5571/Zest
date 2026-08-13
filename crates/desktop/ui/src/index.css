@@ -191,33 +191,6 @@
   animation: zest-shimmer 1.4s ease-in-out infinite;
 }
 
-@keyframes zest-pulse-dot {
-  0%,
-  100% {
-    opacity: 0.28;
-    transform: scale(0.68);
-  }
-  32% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  62% {
-    opacity: 0.56;
-    transform: scale(0.84);
-  }
-}
-
-.zest-pulse-dots {
-  align-items: center;
-  justify-items: center;
-}
-
-.zest-pulse-dot {
-  width: 100%;
-  background: color-mix(in srgb, var(--foreground) 68%, var(--primary) 32%);
-  animation: zest-pulse-dot 1.4s ease-in-out infinite;
-}
-
 @media (prefers-reduced-motion: reduce) {
   /*
    * Everything, not a hand-maintained list. The previous block named only the
@@ -237,8 +210,4 @@
     scroll-behavior: auto !important;
   }
 
-  .zest-pulse-dot {
-    opacity: 0.7;
-    transform: none;
-  }
 }

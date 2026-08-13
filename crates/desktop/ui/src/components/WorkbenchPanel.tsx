@@ -1,8 +1,11 @@
 import {
+  ArrowLeftIcon,
   CheckCircle2Icon,
   BotIcon,
   ChevronRightIcon,
   Clock3Icon,
+  FileTextIcon,
+  FolderIcon,
   GitForkIcon,
   GitMergeIcon,
   HistoryIcon,
@@ -15,14 +18,17 @@ import {
   XIcon,
   XCircleIcon,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import type {
   ChatMessage,
   DelegationJob,
   SessionInfo,
+  WorkspaceFileContent,
+  WorkspaceFileView,
   WorkspaceReview,
 } from "@/lib/types";
 
@@ -46,7 +52,7 @@ type PanelProps = {
   onApplyDelegation: (jobId: string) => Promise<void>;
 };
 
-type Tab = "activity" | "outline" | "delegation";
+type Tab = "activity" | "outline" | "delegation" | "files";
 
 function formatAge(epochSecs: number) {
   const delta = Math.max(0, Math.floor(Date.now() / 1000) - epochSecs);
@@ -102,6 +108,186 @@ function messagePreview(message: ChatMessage) {
 export function WorkbenchPanel({ open, ...props }: Props) {
   if (!open) return null;
   return <WorkbenchBody {...props} />;
+}
+
+function FileBrowser() {
+  const [directory, setDirectory] = useState("");
+  const [entries, setEntries] = useState<WorkspaceFileView[]>([]);
+  const [preview, setPreview] = useState<WorkspaceFileContent | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const directoryRequest = useRef(0);
+  const previewRequest = useRef(0);
+
+  const loadDirectory = useCallback(async (relativePath: string) => {
+    const request = ++directoryRequest.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const nextEntries = await getBackend().listWorkspaceFiles(relativePath || null);
+      if (request !== directoryRequest.current) return;
+      setEntries(nextEntries);
+    } catch (cause) {
+      if (request !== directoryRequest.current) return;
+      setEntries([]);
+      setError(cause instanceof Error ? cause.message : "Could not list workspace files.");
+    } finally {
+      if (request === directoryRequest.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadDirectory("");
+  }, [loadDirectory]);
+
+  async function openEntry(entry: WorkspaceFileView) {
+    if (entry.kind === "directory") {
+      previewRequest.current += 1;
+      setDirectory(entry.path);
+      setPreview(null);
+      await loadDirectory(entry.path);
+      return;
+    }
+
+    setError(null);
+    const request = ++previewRequest.current;
+    try {
+      const nextPreview = await getBackend().readWorkspaceFile(entry.path);
+      if (request === previewRequest.current) setPreview(nextPreview);
+    } catch (cause) {
+      if (request !== previewRequest.current) return;
+      setPreview(null);
+      setError(cause instanceof Error ? cause.message : "Could not preview this file.");
+    }
+  }
+
+  async function goUp() {
+    const parts = directory.split("/").filter(Boolean);
+    parts.pop();
+    const next = parts.join("/");
+    previewRequest.current += 1;
+    setDirectory(next);
+    setPreview(null);
+    await loadDirectory(next);
+  }
+
+  return (
+    <section className="flex flex-col gap-2.5">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <FolderIcon className="size-3.5" aria-hidden="true" />
+            Workspace files
+          </div>
+          <div className="mt-1 truncate font-mono text-[10px] text-foreground/80" title={directory || "."}>
+            {directory || "."}
+          </div>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          title="Refresh files"
+          aria-label="Refresh files"
+          disabled={loading}
+          onClick={() => void loadDirectory(directory)}
+        >
+          <RefreshCwIcon className={cn(loading && "animate-spin")} aria-hidden="true" />
+        </Button>
+      </div>
+
+      {directory ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="justify-start"
+          disabled={loading}
+          onClick={() => void goUp()}
+        >
+          <ArrowLeftIcon data-icon="inline-start" />
+          Parent folder
+        </Button>
+      ) : null}
+
+      {error ? (
+        <p className="m-0 rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-[11px] text-destructive">
+          {error}
+        </p>
+      ) : null}
+
+      {loading && entries.length === 0 ? (
+        <p className="m-0 px-1 py-3 text-[11px] text-muted-foreground">Reading workspace…</p>
+      ) : entries.length ? (
+        <div className="flex flex-col gap-0.5">
+          {entries.map((entry) => (
+            <button
+              type="button"
+              key={entry.path}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors hover:bg-secondary/60"
+              onClick={() => void openEntry(entry)}
+            >
+              {entry.kind === "directory" ? (
+                <FolderIcon className="size-3.5 shrink-0 text-primary" aria-hidden="true" />
+              ) : (
+                <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              )}
+              <span className="min-w-0 flex-1 truncate font-mono" title={entry.name}>
+                {entry.name}
+              </span>
+              {entry.kind === "file" && entry.size != null ? (
+                <span
+                  className="shrink-0 text-[10px] text-muted-foreground"
+                  title={entry.modifiedAt != null ? `Modified ${formatFileDate(entry.modifiedAt)}` : undefined}
+                >
+                  {formatFileSize(entry.size)}
+                  {entry.modifiedAt != null ? ` · ${formatFileDate(entry.modifiedAt)}` : null}
+                </span>
+              ) : null}
+              {entry.kind === "directory" ? <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="m-0 rounded-md border border-dashed border-border/70 px-2.5 py-3 text-center text-[11px] text-muted-foreground">
+          This folder is empty.
+        </p>
+      )}
+
+      {preview ? (
+        <article className="min-h-0 border-t border-border/60 pt-2.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <h3 className="m-0 min-w-0 truncate text-[11px] font-medium" title={preview.path}>
+              {preview.path}
+            </h3>
+            <span className="shrink-0 text-[10px] text-muted-foreground">
+              {formatFileSize(preview.byteCount)}
+            </span>
+          </div>
+          <pre className="mt-2 max-h-[260px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-background/70 p-2 font-mono text-[10px] leading-relaxed text-foreground/85">
+            {preview.content}
+          </pre>
+          {preview.truncated ? (
+            <p className="m-0 mt-1 text-[10px] text-amber-300">
+              Preview capped at 200 KB.
+            </p>
+          ) : null}
+        </article>
+      ) : null}
+    </section>
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatFileDate(epochSecs: number): string {
+  const date = new Date(epochSecs * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function WorkbenchBody({
@@ -294,12 +480,13 @@ function WorkbenchBody({
       <div
         role="tablist"
         aria-label="Workbench views"
-        className="grid grid-cols-3 gap-1 border-b border-border/60 p-1.5"
+        className="grid grid-cols-4 gap-1 border-b border-border/60 p-1.5"
       >
         {([
           ["activity", "Activity", Clock3Icon],
           ["outline", "Outline", ListTreeIcon],
           ["delegation", "Delegation", GitMergeIcon],
+          ["files", "Files", FileTextIcon],
         ] as const).map(([id, label, Icon]) => (
           <button
             key={id}
@@ -325,18 +512,22 @@ function WorkbenchBody({
                 event.key === "Home"
                   ? "activity"
                   : event.key === "End"
-                    ? "delegation"
+                    ? "files"
                     : event.key === "ArrowRight" || event.key === "ArrowDown"
                       ? id === "activity"
                         ? "outline"
                         : id === "outline"
                           ? "delegation"
-                          : "activity"
+                          : id === "delegation"
+                            ? "files"
+                            : "activity"
                       : id === "activity"
-                        ? "delegation"
+                        ? "files"
                         : id === "outline"
                           ? "activity"
-                          : "outline";
+                          : id === "delegation"
+                            ? "outline"
+                            : "delegation";
               setTab(next);
               requestAnimationFrame(() => {
                 document.getElementById(`workbench-tab-${next}`)?.focus();
@@ -616,6 +807,8 @@ function WorkbenchBody({
               </div>
             )}
           </section>
+        ) : tab === "files" ? (
+          <FileBrowser />
         ) : (
           <section className="flex flex-col gap-2">
             <div className="flex items-center justify-between px-1">
