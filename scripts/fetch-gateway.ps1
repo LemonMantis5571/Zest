@@ -35,10 +35,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$outDir = Join-Path $root "crates\desktop\binaries"
-$licenseDir = Join-Path $root "crates\desktop\licenses"
+$outDir = Join-Path (Join-Path (Join-Path $root "crates") "desktop") "binaries"
+$licenseDir = Join-Path (Join-Path (Join-Path $root "crates") "desktop") "licenses"
 $licensePath = Join-Path $licenseDir "CLIProxyAPI-LICENSE.txt"
-$pinPath = Join-Path $root "crates\desktop\gateway-release.json"
+$pinPath = Join-Path (Join-Path (Join-Path $root "crates") "desktop") "gateway-release.json"
 $requiredTargets = @(
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
