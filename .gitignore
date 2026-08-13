@@ -19,10 +19,13 @@ crates/desktop/tauri.signing.conf.json
 .zest/system.md
 .zest/doctor*
 .zest/*.json
-# Keep .zest/skills/ shareable when present (not ignored).
+# Skills are personal and installed outside the repository.
+.zest/skills/
 
 # Local/project configuration. Use zest.toml.example for a shareable starter.
 zest.toml
+# Desktop runtime state is machine-local and must never enter the repository.
+crates/desktop/.zest/
 
 # --- Gateway binaries (fetch with scripts/fetch-gateway.ps1; see README) ---
 /tools/*

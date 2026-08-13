@@ -23,6 +23,7 @@ commands, credentials, and model accounts.
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Build from source](#build-from-source)
+- [Plugins](#plugins)
 - [Configuration](#configuration)
 - [Supported platforms](#supported-platforms)
 - [Documentation](#documentation)
@@ -45,14 +46,16 @@ configured specialist CLI when that suits the work.
 
 ## Features
 
+- **Optional plugins** - add local integrations without rebuilding the Zest
+  desktop app.
 - **Approvals with diff previews** — review file changes and shell commands
   before accepting them.
 - **Desktop and terminal clients** — use a focused desktop workspace or the
   `zest` terminal client.
 - **Bring your own provider** — connect supported sign-ins, native APIs, or
   OpenAI-compatible endpoints.
-- **Honest usage tracking** — keep local usage and cost records, with estimates
-  clearly separated from provider-reported values.
+- **Usage and quota** — keep local usage separate from live provider limits and
+  official balances.
 - **Resumable sessions** — keep project chats, checkpoints, and context
   handling available across restarts.
 - **Optional task delegation** — send bounded work to a configured external
@@ -99,6 +102,35 @@ cargo run -p zest
 
 On Linux or macOS, run the PowerShell scripts with `pwsh`.
 
+## Plugins
+
+Plugins are optional add-ons. They are not bundled with official releases and
+there is no automatic plugin download yet. Install them separately by copying
+their folder into the Zest plugin folder, then use **Settings > Extras >
+Refresh > Turn on**.
+
+On Windows, the folder is:
+
+```text
+%LOCALAPPDATA%\Zest\plugins
+```
+
+For the included Windows music add-on, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-now-playing-plugin.ps1
+```
+
+To build it without installing:
+
+```powershell
+cargo build -p zest-now-playing-plugin --release
+```
+
+`npm run dev` starts Zest. Cargo builds Rust plugins. The full install guide,
+plugin standard, protocol, security rules, and review checklist are in
+[`docs/PLUGINS.md`](docs/PLUGINS.md).
+
 ## Configuration
 
 Zest creates a user-level configuration at `~/.zest/zest.toml`. You can add a
@@ -119,6 +151,9 @@ remain with that provider.
 
 ## Documentation
 
+- [Plugins](docs/PLUGINS.md) - install, build, and develop optional add-ons
+- [Skills](docs/SKILLS.md) - personal skills and install locations
+- [Provider quota](docs/QUOTA.md) - live limits, balances, and provider limits
 - [Contributing](CONTRIBUTING.md) — development, verification, and pull requests
 - [Design notes](DESIGN.md) — product and architecture context
 - [Releasing](docs/RELEASING.md) — maintainer release checklist

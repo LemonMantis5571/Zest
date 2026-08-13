@@ -14,6 +14,84 @@ Impact:
 
 ---
 
+### 2026-08-12 - Removing a project never deletes its folder
+
+Decision: removing a project or workspace from the Zest selector only removes
+Zest's local registry and grouping metadata. It must never delete the project
+folder, `.zest/` data, or chat history from disk.
+
+Reason: the selector is a view over user-owned folders, not an ownership or
+destruction boundary. Users need a reversible way to declutter Zest without
+risking source files or local history.
+
+Impact: the project menu exposes "Remove from Zest" only. Any future destructive
+filesystem operation needs a separate product decision and explicit scope.
+
+---
+
+### 2026-08-12 — Local integrations are optional source plugins (superseded)
+
+Decision: desktop plugins live behind the opt-in `source-plugins` feature and are
+not included in official builds. The first source plugin is Now Playing on
+Windows; it reads media metadata only when enabled and exposes it to the current
+agent turn as untrusted context. Explicit user-triggered playback and system
+volume controls are allowed, but the plugin does not receive credentials,
+execute arbitrary code, or write project files. The Workbench file browser
+follows the same read-only, workspace-scoped rule with bounded previews.
+
+Reason: local context is useful, but a plugin system that can silently run code
+or retain device metadata would expand the trust boundary before Zest has a
+permission model. Keeping the integration out of the official binary avoids
+shipping an unrequested device capability; source builds can opt in explicitly.
+Metadata is not saved into chat history, and media controls affect only the
+active Windows media session and default output volume.
+Explicit enablement and per-turn context keep the first integration
+understandable and reversible.
+
+Impact: official builds expose no plugin capability or topbar icon. Source builds
+must use `cargo ... --features source-plugins`; plugin settings persist locally,
+Now Playing is unavailable off Windows, and metadata is not saved into chat
+history. The desktop must still explain source-only plugins in official builds,
+and source builds must expose an explicit Enable control before adding the
+topbar affordance. Future integrations should fit the same boundary or
+introduce a separately reviewed permission model.
+
+### 2026-08-13 — Add-ons are installed outside the desktop binary
+
+Decision: the first local integration is now a separate process add-on, not a
+desktop Cargo feature. Zest discovers manifests under the local Zest add-ons
+folder, validates that each executable stays inside its own folder, and sends
+bounded JSON requests over stdin/stdout. The official desktop can load an
+installed add-on, while no add-on code ships in the desktop binary.
+
+Impact: building Zest no longer needs `--features source-plugins`. The Now
+Playing add-on is built as `zest-now-playing-plugin` and copied separately;
+users explicitly turn it on in Settings. The process boundary keeps add-ons
+out of the desktop process; Zest sends no project files or credentials through
+the protocol, and a bad add-on can be stopped without taking down the desktop.
+
+### 2026-08-13 — Plugin standard v1 is the acceptance boundary
+
+Decision: Treat external-process protocol version 1 as the public compatibility
+standard for community add-ons. A compatible plugin must have a safe manifest,
+an executable contained in its own folder, bounded one-request/one-response
+JSON behavior, and clear user-facing documentation. Official distribution also
+requires source, license, tests, permission disclosure, and security review.
+
+Reason: A loader check answers only whether Zest can start a process. It does
+not answer whether the code is maintainable, safe to install, or honest about
+what it reads and sends. Separating compatibility from official acceptance
+lets people experiment locally without treating every copied executable as a
+Zest endorsement.
+
+Impact: `docs/PLUGINS.md` is the canonical install and protocol document. New
+plugin kinds require host commands, UI, tests, and a reviewed protocol change;
+the current host only implements `now-playing`. In-process code, hidden
+downloads, telemetry, credential collection, and automatic updates are outside
+the v1 boundary.
+
+---
+
 ### 2026-08-10 — Claude Code can own the parent session
 
 Decision: add a first-class `claude_code` provider that runs the authenticated `claude` CLI in
@@ -808,9 +886,9 @@ manual allow-list.
 
 Decision: Project custom instructions live in `.zest/system.md` (Settings editor). When
 present they are **authoritative** (composed first; hardcoded “You are Zest…” is softened)
-so persona overrides work. Skills use Cursor-compatible `SKILL.md` under `.zest/skills/*/`
-and `~/.zest/skills/*/`; catalogue (+ small bodies) enter the system prompt; larger skills
-load via `read_skill`. Threads/`system.md` stay gitignored; `.zest/skills/` may be committed.
+so persona overrides work. Skills use Cursor-compatible `SKILL.md` from the user's
+`~/.agents/skills/*/` and `~/.zest/skills/*/` folders only; project-local skill folders
+are ignored and must not be committed. Larger skills load via `read_skill`.
 
 Reason: Authors need project tone/rules without forking the harness prompt, and reusable
 skill packs without inventing a new format.
@@ -951,3 +1029,50 @@ Impact: `RunRecord` now carries optional message ids for backward-compatible on-
 `ReconstructedChat` exposes a recoverable run, and `SessionInfo.recovery` drives the desktop
 composer prefill. Sending a new message clears the one-time retry affordance; it does not claim the
 old provider run was resumed.
+### 2026-08-12 — Skills are per-user; quota is provider evidence
+
+Decision: Zest discovers skills only from the user's `~/.agents/skills/` and `~/.zest/skills/`
+folders. Project-local skill folders are ignored and must not be committed. The quota panel may
+show server rate-limit headers and official account balance endpoints, but it must never turn
+local usage into a subscription remainder or scrape private vendor dashboards.
+
+Reason: A repository must not be able to inject instructions into another user's Zest session.
+Provider plan limits are account-specific and several CLI-login providers do not expose a public
+quota API; guessing or reverse-engineering those values would be misleading and fragile.
+
+Impact: Standard OpenAI-compatible rate-limit headers are retained after a turn, and DeepSeek's
+documented balance endpoint is queried on demand. Claude Code and Codex login rows explain when
+their official CLI does not expose a live plan balance; local usage remains a separate measure.
+
+### 2026-08-13 — Claude Desktop is a shared quota source
+
+Decision: Treat Claude Desktop's local `plan-usage-history.json` as a read-only,
+best-effort source for the shared Claude.ai 5-hour and 7-day usage percentages.
+The adapter reads only the timestamp and percentage fields, never credentials,
+and marks the cache stale after 24 hours. Claude Code `rate_limit_event` data
+remains the preferred fresh source after a turn.
+
+Reason: Anthropic documents that Claude Desktop and Claude Code draw from the
+same account usage limit, while the Desktop app keeps a local usage snapshot.
+That gives Zest useful real data before its first Claude turn without scraping
+the Desktop UI or calling a private OAuth endpoint.
+
+Impact: A Claude provider can show shared percentages from Desktop even when
+Zest has not yet run Claude Code. The Desktop cache has no reset timestamps, so
+the UI must show the sample age and never infer a reset time.
+
+### 2026-08-13 — Free chats stay outside workspaces
+
+Decision: A chat created from the main New chat action can have no workspace.
+Persist those transcripts in Zest's user-local free-chat store, keep them out of
+the known workspace registry, and show them only in RECENT. A project row never
+gets an active-selection treatment; only the current chat row is highlighted.
+
+Reason: Recent is a separate inbox for conversations that do not belong to a
+folder. Repeating project chats there makes the sidebar ambiguous, and marking
+the containing folder makes it look selected when only the conversation is
+active.
+
+Impact: The desktop session reports `isFreeChat`, the project-chat route accepts
+`null` for free chats, and workspace-only tools such as Workbench stay hidden
+while a free chat is open.

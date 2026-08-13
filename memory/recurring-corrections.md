@@ -62,3 +62,9 @@ Track corrections that apply across the whole workspace.
   reject near-empty stubs (< ~200 bytes), but do **not** treat Claude’s ~400-byte
   OAuth files as incomplete (Codex files are multi-KB). Surface Connect again.
   Optional gateway `disable-cooling: true` reduces black-hole after transient 503s.
+- **Quota is not local usage** — never display Zest's token ledger as a provider plan balance.
+  Use provider-returned rate headers or an official balance endpoint; when a CLI-login provider
+  has no public quota API, say so and keep the local meter separate.
+- **Claude Desktop and Claude Code share quota** — on supported installations, read only the
+  Desktop usage snapshot for its 5-hour/7-day percentages; never copy OAuth credentials or scrape
+  the app UI, and show the snapshot age because the cache has no reset timestamp.
