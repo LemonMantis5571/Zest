@@ -456,7 +456,18 @@ fn valid_manifest_text(value: &str, max_chars: usize) -> bool {
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
+    // Reject Windows separators and drive prefixes even on Unix. Plugin
+    // manifests can move between machines, and treating `C:\\...` or
+    // `..\\...` as an ordinary filename on Linux makes the same manifest
+    // behave differently on Windows.
+    let raw = path.as_os_str().to_string_lossy();
+    let bytes = raw.as_bytes();
+    let windows_drive_prefix =
+        bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+
     !path.as_os_str().is_empty()
+        && !raw.contains('\\')
+        && !windows_drive_prefix
         && !path.is_absolute()
         && path.components().all(|component| {
             !matches!(
@@ -577,7 +588,9 @@ mod tests {
         assert!(valid_id("now-playing"));
         assert!(!valid_id("../now-playing"));
         assert!(is_safe_relative_path(Path::new("zest-now-playing.exe")));
-        assert!(!is_safe_relative_path(Path::new("..\\outside.exe")));
+        let parent = PathBuf::from("..").join("outside.exe");
+        assert!(!is_safe_relative_path(&parent));
+        assert!(!is_safe_relative_path(Path::new(r"..\outside.exe")));
         assert!(!is_safe_relative_path(Path::new("C:\\outside.exe")));
     }
 
