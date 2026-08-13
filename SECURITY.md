@@ -33,3 +33,8 @@ keys are supplied through the environment variable named by `api_key_env`.
 The approval system is a user confirmation boundary, not an OS sandbox: an
 approved shell command can perform any action available to the current user.
 Use isolated or disposable workspaces for untrusted code.
+
+The Linux beta uses the GTK3 stack required by the current Tauri runtime.
+RustSec may report transitive unmaintained GTK crates and the known `glib`
+unsoundness advisory. These are tracked beta dependency risks, not evidence
+that the runtime is safe for hostile content; do not use the beta as a sandbox.

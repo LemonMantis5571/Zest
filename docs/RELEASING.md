@@ -1,92 +1,85 @@
 # Releasing Zest
 
-This checklist is for maintainers preparing a Windows beta. It separates
-reproducible build evidence, installer integrity, signing, and live-provider
-verification so a missing credential never becomes a fake release pass.
+Zest releases are tag-driven. A `v*` tag starts one workflow that verifies the
+source on Windows and Linux, builds the native packages, uploads checksums,
+and creates a GitHub prerelease only after both platforms pass.
 
-## Before the build
+## Before tagging
 
-1. Start from a clean worktree, except for an intentional local `zest.toml`.
-   Never stage provider keys, `.env` files, gateway credentials, signing
-   overlays, or generated binaries.
-2. Update the version in both `Cargo.toml` (`workspace.package.version`) and
+1. Start with a clean worktree. Never commit provider keys, `.env` files,
+   gateway credentials, signing overlays, downloaded sidecars, or local
+   `zest.toml` files.
+2. Set the same version in `Cargo.toml` (`workspace.package.version`) and
    `crates/desktop/tauri.conf.json`.
-3. Update the release notes and call out beta limitations or migrations.
-4. Review the pinned CLIProxyAPI release and its license notice. If the pin
-   changes, run the gateway verification before packaging.
+3. Add release notes at `docs/releases/<version>.md`.
+4. Review `CHANGELOG.md`, beta limitations, and the pinned CLIProxyAPI release.
+5. Run the full gate locally:
 
-## Verification gate
+   ```powershell
+   ./scripts/release-verify.ps1
+   ```
 
-Run from the repository root on the pinned Windows toolchain:
+   On Linux or macOS, run it with `pwsh` and install the desktop libraries
+   listed in `.github/workflows/linux-verify.yml`.
 
-```powershell
-./scripts/fetch-gateway.ps1 -CheckPin
-./scripts/release-verify.ps1
-```
+The gate includes the UI, Rust, generated TypeScript bindings, dependency
+audits, gateway provenance, and Git whitespace. Live provider checks are not a
+release gate: `cargo run -p zest -- doctor --live` consumes real quota and must
+only be run with a test account, with the result recorded separately.
 
-The verification script covers the UI, Rust, generated bindings, dependency
-advisories, and Git whitespace. Keep its output with the release record.
+The Linux Tauri stack currently brings in GTK3 bindings. `cargo audit` reports
+their unmaintained status and the known `glib` unsoundness advisory as
+informational transitive warnings; the beta gate still fails on vulnerabilities
+but does not treat those warnings as a clean bill of health. Track the Tauri
+GTK migration before calling the Linux runtime hardened for hostile content.
 
-The live doctor is separate and consumes real provider quota:
+## Create the beta
 
-```powershell
-cargo run -p zest -- doctor --live
-```
-
-Only run it with a test account and report it separately from compilation and
-automated tests. Do not put live keys in CI or release notes.
-
-## Build and sign
-
-Fetch the exact sidecar, build both Windows installer formats, and emit hashes:
+For the first beta, the version is `0.1.0`:
 
 ```powershell
-./scripts/fetch-gateway.ps1 -Check
-npm run desktop:build
-./scripts/release-checksums.ps1 -OutFile SHA256SUMS.txt
+git status --short
+git tag -a v0.1.0 -m "release: Zest 0.1.0 beta"
+git push origin v0.1.0
 ```
 
-For Authenticode signing, keep the private key in the certificate store or
-signing service. Use the public certificate thumbprint only:
+The release workflow checks that the tag, Cargo version, and Tauri version
+match. It then builds:
 
-```powershell
-./scripts/build-signed.ps1 -Thumbprint A1B2C3D4E5F6...
-./scripts/release-checksums.ps1 -OutFile SHA256SUMS.txt
-```
+- Windows `.msi` and `.exe` installers;
+- Linux `.deb`, `.rpm`, and AppImage packages;
+- one SHA256 manifest per platform;
+- `LICENSE.txt` and `THIRD_PARTY_NOTICES.md`.
 
-The signing overlay is ignored by Git. Do not commit it unless the repository
-policy explicitly changes.
+The workflow marks the GitHub Release as a prerelease. Do not manually upload
+files from a local build as a substitute for the tagged workflow.
 
-## Clean-machine acceptance
+## Signing and clean-machine checks
 
-Test the exact MSI and NSIS artifacts on a Windows profile or VM that has no
-Rust, Node.js, `tools/CLIProxyAPI`, old Zest state, or manually started gateway.
+Unsigned installers are valid beta artifacts but do not prove publisher
+identity. If signing is enabled later, keep the private certificate in the
+certificate store or signing service and publish only the public certificate
+fingerprint. The signing overlay is ignored by Git.
 
-Confirm:
+Test the exact uploaded files on a clean Windows profile or Linux machine that
+has no Rust, Node.js, source checkout, old Zest state, or manually started
+gateway. Confirm:
 
-- install and uninstall complete without a console window;
-- the bundled gateway provisions on first run and listens only on loopback;
-- Codex sign-in through the gateway works after a restart;
-- API-key setup stores presence in the OS credential manager without rendering
-  the key again;
-- a minimal chat can read a file, asks before a write, and recovers when the
-  request is denied;
-- provider status and model selection remain correct after reopening the app;
-- an external worker reports a useful missing-CLI or authentication error;
-- fork, automatic compaction, and JSONL/headless behavior match the beta notes;
-- the installer runs on a machine with no source checkout or developer tools.
+- installation and uninstall work;
+- the bundled gateway starts on loopback after a restart;
+- provider setup stores credentials without showing them again;
+- a minimal chat can read a file, asks before a write, and handles denial;
+- provider status, quota wording, and model selection remain correct;
+- free chats and workspace chats appear in the right sidebar sections;
+- optional plugins remain opt-in and are not required by the official build;
+- the uploaded checksum matches the downloaded installer.
 
-Do not claim live-provider verification from a compile, unit test, or mock
-server result. Record provider name, model, date, and whether real quota was
-used without recording credentials or response contents.
+Do not claim live-provider verification from compilation, unit tests, or a mock
+server. Never put credentials or response contents in release notes.
 
-## Publish
+## After publication
 
-Publish the MSI, NSIS installer, `SHA256SUMS.txt`, release notes,
-`THIRD_PARTY_NOTICES.md`, the CLIProxyAPI license notice, and any additional
-license files required by the resolved dependency graph. Mark the release as a
-pre-release while the beta contract is still changing. Link the source commit
-and the verification result.
-
-After publication, install the uploaded artifacts once rather than only the
-local copies, then record the final URLs and hashes.
+Install one artifact from the GitHub Release page, not only the local build,
+then record the final download URL and checksum in the release record. If an
+asset is rebuilt, rerun the workflow from a new tag or update the existing
+release with `gh release upload --clobber`; never silently replace a file.

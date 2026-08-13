@@ -6,12 +6,16 @@
 
 [![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
 [![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
+[![Latest release](https://img.shields.io/github/v/release/LemonMantis5571/Zest?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **🧭 A local-first coding workspace with approvals, diffs, and optional model delegation. 🛠️**
 
 Zest helps you use AI in real projects while keeping control of your files,
 commands, credentials, and model accounts.
+
+> **Beta:** Zest is ready for early adopters. Keep backups and review every
+> approval before accepting it.
 
 [Quick start](#quick-start) · [Build from source](#build-from-source) · [Contributing](CONTRIBUTING.md)
 
@@ -65,11 +69,14 @@ configured specialist CLI when that suits the work.
 
 ### Install a release
 
-Download the latest installer or package from
+Download the latest beta installer or package from
 [GitHub Releases](https://github.com/LemonMantis5571/Zest/releases).
 
 - **Windows** — install the `.msi` or `.exe` package.
 - **Linux** — install the `.deb` or `.rpm` package, or run the AppImage.
+
+Each release includes a platform checksum file. Verify the download before
+installing it.
 
 Launch Zest, choose a provider in Settings, open a project folder, and start a
 chat. The first time Zest is about to write a file or run a command, it shows
@@ -145,8 +152,9 @@ remain with that provider.
 
 | Platform | Status |
 | --- | --- |
-| Windows 10/11 (x64, ARM64) | Primary target and verified in CI |
-| Linux (x64, ARM64) | Supported and verified in CI |
+| Windows 10/11 (x64) | Primary target and verified in CI |
+| Linux (x64) | Supported and verified in CI |
+| Windows/Linux ARM64 | Source paths exist; beta installers are not published yet |
 | macOS | Supported code paths; not yet CI-verified |
 
 ## Documentation
@@ -157,6 +165,7 @@ remain with that provider.
 - [Contributing](CONTRIBUTING.md) — development, verification, and pull requests
 - [Design notes](DESIGN.md) — product and architecture context
 - [Releasing](docs/RELEASING.md) — maintainer release checklist
+- [Beta release notes](docs/releases/0.1.0.md) — scope and known limits
 - [Changelog](CHANGELOG.md) — user-facing changes
 - [Security policy](SECURITY.md) — vulnerability reporting
 - [Third-party notices](THIRD_PARTY_NOTICES.md) — dependency attribution
