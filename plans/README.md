@@ -15,6 +15,11 @@ without dropping features. Implemented on the working tree 2026-08-02.
 | 004 | Optimize custom PFP (128px JPEG file, not fat JSON) | P2 | S | — | DONE (revised + implemented) |
 | 005 | Make gateway bootstrap provider-scoped | P1 | M | - | DONE |
 | 006 | Remove non-release PowerShell noise | P1 | M | 005 | DONE |
+| 007 | Drain plugin output without blocking the host | P1 | M | — | DONE |
+| 008 | Serialize and de-stale Now Playing controls | P1 | M | — | DONE |
+| 009 | Make provider quota checks lazy, cached, and parallel | P1 | M | — | DONE |
+| 010 | Keep the optional music plugin discoverable | P1 | S | 008 | DONE |
+| 011 | Make the chat topbar responsive | P2 | M | 010 | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
@@ -25,6 +30,10 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
   in-process.
 
 - 001–003 independent; 004 revised to optimize-on-pick + `~/.zest/avatar.jpg`.
+- 007 and 009 are independent backend/runtime work.
+- 008 should land before 010 because both touch `NowPlayingButton.tsx`.
+- 011 follows 010 so the responsive header is designed around the stable plugin
+  entry point and its narrow-window trigger states.
 
 ## Findings considered and rejected
 

@@ -36,6 +36,23 @@ The shared Rust library is in `crates/core`, the terminal client is in
 `crates/cli`, and the desktop application is in `crates/desktop`. The desktop
 web UI lives in `crates/desktop/ui`.
 
+Optional desktop add-ons are separate processes and are not part of the normal
+desktop build. Read [docs/PLUGINS.md](docs/PLUGINS.md) for the plugin standard,
+folder layout, protocol, security model, and review checklist. Build and
+install the sample Windows add-on with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-now-playing-plugin.ps1
+```
+
+Open Settings > Extras, press Refresh, and turn it on. The desktop itself does
+not need a Cargo feature for installed add-ons. A Rust plugin is built
+separately with `cargo build -p <package> --release`, then installed with its
+executable and `plugin.json` in one plugin folder.
+Use [`docs/plugin.schema.json`](docs/plugin.schema.json) when validating a
+manifest; the desktop loader remains the final authority for safe paths and
+supported plugin kinds.
+
 When changing desktop data types, regenerate TypeScript bindings using the
 existing ts-rs test workflow rather than editing generated files by hand.
 
