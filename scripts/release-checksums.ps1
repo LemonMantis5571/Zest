@@ -19,7 +19,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$bundleDir = Join-Path $root "target\release\bundle"
+$bundleDir = Join-Path (Join-Path (Join-Path $root "target") "release") "bundle"
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { throw "Node.js is required to create release checksums." }

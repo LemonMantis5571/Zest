@@ -81,7 +81,7 @@ Step "cargo clippy (strict)" {
 }
 
 Step "cargo test" {
-  cargo test --workspace --lib
+  cargo test --workspace --all-targets
 }
 
 Step "npm audit" {
