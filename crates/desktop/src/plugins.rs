@@ -23,6 +23,7 @@ pub(crate) use zest_plugin_api::NowPlayingView;
 const PLUGIN_SETTINGS_FILE: &str = "plugins.json";
 const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024;
+const MAX_PLUGIN_REQUEST_BYTES: u64 = 32 * 1024;
 const MAX_PLUGIN_OUTPUT_BYTES: u64 = 512 * 1024;
 const PLUGIN_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -330,8 +331,9 @@ fn invoke(plugin: &InstalledPlugin, request: PluginRequest) -> Result<NowPlaying
         .executable
         .as_ref()
         .ok_or_else(|| "This add-on is not ready.".to_string())?;
-    let payload =
-        serde_json::to_vec(&request).map_err(|_| "Could not start the add-on.".to_string())?;
+    let payload = serde_json::to_vec(&request)
+        .map_err(|_| "Could not start the add-on.".to_string())
+        .and_then(bounded_plugin_request)?;
 
     let mut command = Command::new(executable);
     command
@@ -420,6 +422,13 @@ fn invoke(plugin: &InstalledPlugin, request: PluginRequest) -> Result<NowPlaying
         .ok_or_else(|| "The add-on returned no music data.".into())
 }
 
+fn bounded_plugin_request(payload: Vec<u8>) -> Result<Vec<u8>, String> {
+    if payload.len() as u64 > MAX_PLUGIN_REQUEST_BYTES {
+        return Err("The add-on request is too large.".into());
+    }
+    Ok(payload)
+}
+
 fn read_bounded(path: &Path, max_bytes: u64) -> Result<String, String> {
     let file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
@@ -496,6 +505,16 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    #[test]
+    fn rejects_oversized_plugin_requests_before_starting_process() {
+        let payload = vec![b'x'; MAX_PLUGIN_REQUEST_BYTES as usize + 1];
+
+        assert_eq!(
+            bounded_plugin_request(payload).unwrap_err(),
+            "The add-on request is too large."
+        );
+    }
 
     #[test]
     fn metadata_is_single_line_and_bounded() {
