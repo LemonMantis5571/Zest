@@ -112,7 +112,7 @@ jobs:
           Copy-Item THIRD_PARTY_NOTICES.md $stage
 
       - name: Upload Windows assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-installers
           path: release-artifacts/*
@@ -177,7 +177,7 @@ jobs:
           node scripts/release-checksums.mjs --root target/release/bundle --out "$stage/SHA256SUMS-linux.txt"
 
       - name: Upload Linux assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-installers
           path: release-artifacts/*
