@@ -206,6 +206,12 @@ impl SpaceState {
         }
     }
 
+    pub fn forget_project(&mut self, project_key: &str) {
+        self.memberships.remove(project_key);
+        self.last_workspace_by_space_id
+            .retain(|_, path| path != project_key);
+    }
+
     pub fn delete_space(&mut self, id: &str) -> Result<(), String> {
         if id == DEFAULT_SPACE_ID {
             return Err("The Default Space cannot be deleted.".to_string());
@@ -282,6 +288,22 @@ mod tests {
             .unwrap();
         assert_eq!(state.space_for_project("C:/repo"), DEFAULT_SPACE_ID);
         assert!(!state.memberships.contains_key("C:/repo"));
+    }
+
+    #[test]
+    fn forgetting_a_project_removes_membership_and_last_workspace() {
+        let mut state = SpaceState::default();
+        state
+            .create_space("space:work".to_string(), "Work", None)
+            .unwrap();
+        state.set_project_space("C:/repo", "space:work").unwrap();
+        state.active_space_id = "space:work".to_string();
+        state.remember_active_workspace("C:/repo");
+
+        state.forget_project("C:/repo");
+
+        assert_eq!(state.space_for_project("C:/repo"), DEFAULT_SPACE_ID);
+        assert!(state.last_workspace_by_space_id.is_empty());
     }
 
     #[test]

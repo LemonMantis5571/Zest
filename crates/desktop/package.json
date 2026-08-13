@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "tauri dev --config tauri.dev.conf.json",
+    "dev:official": "tauri dev --config tauri.dev.conf.json",
     "build": "tauri build",
     "postbuild": "node ../../scripts/verify-bundle.mjs",
     "ui:build": "npm run build -w ui",

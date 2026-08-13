@@ -6441,6 +6441,25 @@ dependencies = [
  "tokio",
  "ts-rs",
  "zest-core",
+ "zest-plugin-api",
+]
+
+[[package]]
+name = "zest-now-playing-plugin"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "windows",
+ "zest-plugin-api",
+]
+
+[[package]]
+name = "zest-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

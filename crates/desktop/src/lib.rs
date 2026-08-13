@@ -8,9 +8,11 @@ mod attachments;
 mod browser;
 mod context_meter;
 mod delegation;
+mod plugins;
 mod session;
 mod spaces;
 mod turn;
+mod workspace_files;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,11 +38,11 @@ use zest_core::{
     AuthStatus, ChatFacts, ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace,
     GatewayLease, GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority,
     PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderConfig,
-    ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest, Questioner, RatesStatus,
-    RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread,
-    ThreadCheckpoint, ThreadGitContext, ThreadLoadError, ThreadStore, ThreadSummary, ToolMetadata,
-    ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
-    THREAD_FORMAT_VERSION,
+    ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
+    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
+    StreamEvent, Thread, ThreadCheckpoint, ThreadGitContext, ThreadLoadError, ThreadStore,
+    ThreadSummary, ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
+    DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -53,8 +55,10 @@ pub(crate) use delegation::{
     get_view as get_delegation_view, list_views as list_delegation_views, DelegationCoordinator,
     DelegationJobView,
 };
+use plugins::{NowPlayingView, PluginView};
 use session::{Session, SessionController, SessionError};
 use spaces::{SpaceState, DEFAULT_SPACE_ID};
+use workspace_files::{WorkspaceFileContent, WorkspaceFileView};
 
 /// Providers shown in the desktop launch picker.
 ///
@@ -826,6 +830,7 @@ struct SessionMeta {
     model: String,
     effort: String,
     root: String,
+    is_free_chat: bool,
     thread_id: String,
     default_model: String,
     models: Vec<ModelCapability>,
@@ -852,6 +857,7 @@ struct SessionInfo {
     model: String,
     effort: String,
     root: String,
+    is_free_chat: bool,
     thread_id: String,
     /// Rust-authoritative catalogue for the active provider (UI may only add labels).
     default_model: String,
@@ -1128,6 +1134,15 @@ fn config_for_session(state: &AppState, root: &Path) -> Result<Config, String> {
     if can_inherit_workspace_config(root) {
         merge_cached_providers(state, &mut config, None);
     }
+    Ok(config)
+}
+
+fn config_for_free_chat(state: &AppState, root: &Path) -> Result<Config, String> {
+    let mut config = Config::find(root).map_err(|e| e.to_string())?;
+    // A free chat has no project-level zest.toml. Keep the provider table from
+    // the workspace the user just left available, including providers that
+    // exist only in that project's config.
+    merge_cached_providers(state, &mut config, None);
     Ok(config)
 }
 
@@ -1792,6 +1807,49 @@ fn usage_snapshot() -> UsageSnapshot {
     Ledger::load().snapshot()
 }
 
+#[tauri::command]
+async fn provider_quota(state: State<'_, AppState>) -> Result<ProviderQuotaSnapshot, String> {
+    let config = load_workspace_config(&state);
+    Ok(zest_core::fetch_provider_quotas(&config).await)
+}
+
+#[tauri::command]
+fn list_plugins() -> Vec<PluginView> {
+    plugins::list()
+}
+
+#[tauri::command]
+fn open_plugins_folder() -> Result<(), String> {
+    let path = plugins::ensure_plugin_folder()?;
+    open_path_in_editor(&path).map_err(|error| format!("Could not open add-ons folder: {error}"))
+}
+
+#[tauri::command]
+fn set_plugin_enabled(id: String, enabled: bool) -> Result<Vec<PluginView>, String> {
+    plugins::set_enabled(&id, enabled)
+}
+
+#[tauri::command]
+async fn now_playing() -> Result<NowPlayingView, String> {
+    tauri::async_runtime::spawn_blocking(plugins::now_playing)
+        .await
+        .map_err(|_| "Could not read the music.".to_string())
+}
+
+#[tauri::command]
+async fn control_now_playing(action: String) -> Result<NowPlayingView, String> {
+    tauri::async_runtime::spawn_blocking(move || plugins::control(&action))
+        .await
+        .map_err(|_| "Could not change the music.".to_string())?
+}
+
+#[tauri::command]
+async fn set_now_playing_volume(volume_percent: f64) -> Result<NowPlayingView, String> {
+    tauri::async_runtime::spawn_blocking(move || plugins::set_volume(volume_percent))
+        .await
+        .map_err(|_| "Could not change the volume.".to_string())?
+}
+
 /// Spend, tokens, and cost for the last `days` local days.
 ///
 /// Read fresh from disk on every call rather than served from the session's
@@ -2326,6 +2384,12 @@ fn load_known_workspaces() -> Vec<PathBuf> {
         .collect()
 }
 
+fn write_known_workspaces(list: &[PathBuf]) -> Result<(), String> {
+    let display: Vec<String> = list.iter().map(|path| display_path(path)).collect();
+    let raw = serde_json::to_string_pretty(&display).map_err(|error| error.to_string())?;
+    std::fs::write(known_workspaces_path()?, raw).map_err(|error| error.to_string())
+}
+
 fn require_known_workspace(path: &Path) -> Result<PathBuf, String> {
     let root = canonicalize_dir(path.to_path_buf())?;
     let root_key = display_path(&root);
@@ -2349,12 +2413,91 @@ fn remember_workspace(root: &Path) {
     list.retain(|p| p != &root);
     list.insert(0, root);
     list.truncate(MAX_KNOWN_WORKSPACES);
-    let display: Vec<String> = list.iter().map(|p| display_path(p)).collect();
-    if let Ok(path) = known_workspaces_path() {
-        if let Ok(raw) = serde_json::to_string_pretty(&display) {
-            let _ = std::fs::write(path, raw);
-        }
+    let _ = write_known_workspaces(&list);
+}
+
+fn clear_persisted_workspace(root_key: &str) -> Result<(), String> {
+    let path = zest_config_dir()?.join("last-workspace");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let candidate = PathBuf::from(raw.trim());
+    if candidate.as_os_str().is_empty() {
+        return Ok(());
     }
+    let matches = display_path(&candidate) == root_key
+        || canonicalize_dir(candidate)
+            .ok()
+            .is_some_and(|path| display_path(&path) == root_key);
+    if matches {
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn remove_known_workspace_metadata(
+    state: &AppState,
+    root_key: &str,
+    known_roots: &[PathBuf],
+) -> Result<(), String> {
+    if !known_roots
+        .iter()
+        .any(|root| display_path(root) == root_key)
+    {
+        return Err(format!(
+            "That folder is not a known Zest workspace: {root_key}"
+        ));
+    }
+
+    let mut remaining = known_roots.to_vec();
+    remaining.retain(|root| display_path(root) != root_key);
+    clear_persisted_workspace(root_key)?;
+    write_known_workspaces(&remaining)?;
+
+    let mut spaces = state
+        .space_state
+        .lock()
+        .map_err(|_| "Space state lock poisoned.".to_string())?;
+    let previous = spaces.clone();
+    spaces.forget_project(root_key);
+    if let Err(error) = save_space_state(&spaces) {
+        *spaces = previous;
+        let _ = write_known_workspaces(known_roots);
+        return Err(error);
+    }
+    drop(spaces);
+
+    if let Ok(mut cache) = state.chat_summary_cache.lock() {
+        cache
+            .projects
+            .retain(|root, _| display_path(root) != root_key);
+    }
+    Ok(())
+}
+
+fn workspace_removal_target(
+    state: &AppState,
+    project_path: &str,
+) -> Result<(PathBuf, String, Vec<PathBuf>), String> {
+    let root = require_known_workspace(Path::new(project_path.trim()))?;
+    let root_key = display_path(&root);
+    let active_root = state.sessions.active_root().map_err(map_session_err)?;
+    if active_root
+        .as_ref()
+        .is_some_and(|active| display_path(active) == root_key)
+    {
+        return Err("Switch to another project before removing the active workspace.".to_string());
+    }
+    let known_roots = load_known_workspaces();
+    if !known_roots
+        .iter()
+        .any(|known| display_path(known) == root_key)
+    {
+        return Err(format!(
+            "That folder is not a known Zest workspace: {root_key}"
+        ));
+    }
+    Ok((root, root_key, known_roots))
 }
 
 fn space_snapshot(state: &AppState) -> Result<SpacesSnapshot, String> {
@@ -2362,6 +2505,7 @@ fn space_snapshot(state: &AppState) -> Result<SpacesSnapshot, String> {
         .sessions
         .active_root()
         .map_err(map_session_err)?
+        .filter(|root| !is_free_chat_root(root))
         .or_else(|| resolve_workspace_root(state).ok());
 
     let mut roots = load_known_workspaces();
@@ -2466,6 +2610,21 @@ fn resolve_workspace_root(state: &AppState) -> Result<PathBuf, String> {
         *guard = Some(resolved.clone());
     }
     Ok(resolved)
+}
+
+/// Storage for conversations that are intentionally not attached to a
+/// project. This lives in Zest's user data area, never in the known-workspaces
+/// list, so a free chat cannot accidentally become a project in the sidebar.
+fn free_chats_root() -> Result<PathBuf, String> {
+    let root = zest_config_dir()?.join("free-chats");
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    canonicalize_dir(root)
+}
+
+fn is_free_chat_root(root: &Path) -> bool {
+    free_chats_root()
+        .ok()
+        .is_some_and(|free| display_path(&free) == display_path(root))
 }
 
 fn set_workspace_root(state: &AppState, root: PathBuf) -> Result<PathBuf, String> {
@@ -2666,6 +2825,7 @@ fn session_meta_from(session: &Session, warning: Option<String>) -> SessionMeta 
         model: session.model.clone(),
         effort: session.effort.clone(),
         root: display_path(&session.root),
+        is_free_chat: is_free_chat_root(&session.root),
         thread_id: session.thread_id.clone(),
         default_model,
         models,
@@ -2690,6 +2850,7 @@ fn session_info_from(session: &Session, warning: Option<String>) -> SessionInfo 
         model: session.model.clone(),
         effort: session.effort.clone(),
         root: display_path(&session.root),
+        is_free_chat: is_free_chat_root(&session.root),
         thread_id: session.thread_id.clone(),
         default_model,
         models,
@@ -2820,7 +2981,7 @@ async fn start_session(
     model: Option<String>,
     effort: Option<String>,
 ) -> Result<SessionInfo, String> {
-    start_session_inner(state, id, model, effort, None).await
+    start_session_inner(state, id, model, effort, None, None).await
 }
 
 async fn start_session_inner(
@@ -2828,12 +2989,17 @@ async fn start_session_inner(
     id: String,
     model: Option<String>,
     effort: Option<String>,
+    root_override: Option<PathBuf>,
     thread_override: Option<(Thread, Option<String>)>,
 ) -> Result<SessionInfo, String> {
     zest_core::load_env();
 
-    let root = resolve_workspace_root(&state)?;
-    let config = config_for_session(&state, &root)?;
+    let root = root_override.unwrap_or(resolve_workspace_root(&state)?);
+    let config = if is_free_chat_root(&root) {
+        config_for_free_chat(&state, &root)?
+    } else {
+        config_for_session(&state, &root)?
+    };
 
     let (selectable, provider_label) = if config.providers.contains_key(&id) {
         let provider = ProviderRegistry::from_config(&config)
@@ -3018,13 +3184,16 @@ async fn start_session_inner(
         question_hub,
     };
 
+    let session_is_free_chat = is_free_chat_root(&session.root);
     if let Err(error) = state.sessions.set_session(session) {
         if thread_created {
             let _ = store.delete(&thread_id);
         }
         return Err(map_session_err(error));
     }
-    remember_workspace_config(&state, &session_config);
+    if !session_is_free_chat {
+        remember_workspace_config(&state, &session_config);
+    }
 
     // A dropped preference is worth saying out loud — otherwise the picker just
     // shows a different model than last time with no explanation.
@@ -3245,11 +3414,24 @@ fn move_project_to_space(
     space_snapshot(&state)
 }
 
+/// Remove a project from Zest's recent workspace registry without touching its
+/// folder or the chats stored inside it.
+#[tauri::command]
+fn forget_workspace(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<SpacesSnapshot, String> {
+    let (_root, root_key, known_roots) = workspace_removal_target(&state, &project_path)?;
+    remove_known_workspace_metadata(&state, &root_key, &known_roots)?;
+    space_snapshot(&state)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectChats {
     name: String,
-    path: String,
+    /// `None` is the user-local free-chat bucket rendered under RECENT.
+    path: Option<String>,
     active: bool,
     space_id: String,
     threads: Vec<ThreadSummary>,
@@ -3363,14 +3545,17 @@ fn list_cached_threads(
     out
 }
 
-/// Chats grouped by known project folders (MRU), for the sidebar.
+/// Chats grouped by known project folders (MRU), plus the free-chat bucket for
+/// RECENT, for the sidebar.
 #[tauri::command]
 fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, String> {
-    let active_root = state
-        .sessions
-        .active_root()
-        .map_err(map_session_err)?
-        .unwrap_or(resolve_workspace_root(&state)?);
+    let active_session_root = state.sessions.active_root().map_err(map_session_err)?;
+    let active_root = active_session_root
+        .as_ref()
+        .filter(|root| !is_free_chat_root(root))
+        .cloned()
+        .or_else(|| resolve_workspace_root(&state).ok())
+        .ok_or_else(no_writable_workspace_error)?;
     remember_workspace(&active_root);
 
     let spaces = state
@@ -3386,7 +3571,9 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         roots.insert(0, active_root.clone());
     }
 
-    let cache_roots: HashSet<PathBuf> = roots.iter().cloned().collect();
+    let free_root = free_chats_root()?;
+    let mut cache_roots: HashSet<PathBuf> = roots.iter().cloned().collect();
+    cache_roots.insert(free_root.clone());
     let mut cache = state
         .chat_summary_cache
         .lock()
@@ -3411,10 +3598,30 @@ fn list_chat_projects(state: State<'_, AppState>) -> Result<Vec<ProjectChats>, S
         let active = root == active_root;
         out.push(ProjectChats {
             name: project_display_name(&root),
-            path: display_path(&root),
+            path: Some(display_path(&root)),
             active,
             space_id,
             threads,
+        });
+    }
+
+    let free_threads = match open_store(&free_root) {
+        Ok(store) => list_cached_threads(
+            &store,
+            None,
+            cache.projects.entry(free_root.clone()).or_default(),
+        ),
+        Err(_) => Vec::new(),
+    };
+    if !free_threads.is_empty() {
+        out.push(ProjectChats {
+            name: "Free chats".to_string(),
+            path: None,
+            active: active_session_root
+                .as_ref()
+                .is_some_and(|root| is_free_chat_root(root)),
+            space_id: DEFAULT_SPACE_ID.to_string(),
+            threads: free_threads,
         });
     }
     cache.projects.retain(|root, _| cache_roots.contains(root));
@@ -3798,10 +4005,12 @@ mod chat_recovery_tests {
 }
 
 /// Switch project (and optional thread) while keeping the current provider.
+/// A `null` root opens the user-local free-chat store without changing the
+/// active workspace.
 #[tauri::command]
 async fn open_project_chat(
     state: State<'_, AppState>,
-    root: String,
+    root: Option<String>,
     thread_id: Option<String>,
     new_thread: Option<bool>,
     provider_id: Option<String>,
@@ -3817,9 +4026,17 @@ async fn open_project_chat(
     // Validate the target before changing the active workspace. In particular,
     // a project-local zest.toml may intentionally omit the provider used by the
     // current chat.
+    let free_chat = root.is_none();
     let previous_root = resolve_workspace_root(&state).ok();
-    let root = canonicalize_dir(PathBuf::from(root.trim()))?;
-    let config = config_for_session(&state, &root)?;
+    let root = match root {
+        Some(raw) => canonicalize_dir(PathBuf::from(raw.trim()))?,
+        None => free_chats_root()?,
+    };
+    let config = if free_chat {
+        config_for_free_chat(&state, &root)?
+    } else {
+        config_for_session(&state, &root)?
+    };
     let thread_id = thread_id
         .as_deref()
         .map(str::trim)
@@ -3918,18 +4135,22 @@ async fn open_project_chat(
         .lock()
         .map_err(|_| "Space state lock poisoned.".to_string())?
         .clone();
-    set_workspace_root(&state, root.clone())?;
-    if let Err(error) = remember_active_space_workspace(&state, &root) {
-        restore_snapshot(&target_state_path, previous_target_state.clone());
-        if let Some(thread_id) = created_thread_id.as_ref() {
-            let _ = target_store.delete(thread_id);
+    if !free_chat {
+        set_workspace_root(&state, root.clone())?;
+    }
+    if !free_chat {
+        if let Err(error) = remember_active_space_workspace(&state, &root) {
+            restore_snapshot(&target_state_path, previous_target_state.clone());
+            if let Some(thread_id) = created_thread_id.as_ref() {
+                let _ = target_store.delete(thread_id);
+            }
+            restore_last_provider(previous_last_provider.clone());
+            restore_space_state(&state, previous_space_state.clone());
+            if let Some(previous_root) = previous_root.as_ref() {
+                let _ = set_workspace_root(&state, previous_root.clone());
+            }
+            return Err(error);
         }
-        restore_last_provider(previous_last_provider.clone());
-        restore_space_state(&state, previous_space_state.clone());
-        if let Some(previous_root) = previous_root.as_ref() {
-            let _ = set_workspace_root(&state, previous_root.clone());
-        }
-        return Err(error);
     }
 
     // Keep the old route alive until the new runtime has been built. If it is
@@ -3940,6 +4161,7 @@ async fn open_project_chat(
         provider_id.clone(),
         None,
         None,
+        Some(root.clone()),
         target_thread,
     )
     .await;
@@ -3967,7 +4189,11 @@ fn load_thread(state: State<'_, AppState>, id: String) -> Result<SessionInfo, St
         .session_info_snapshot(|session| session.root.clone())
         .map_err(map_session_err)?
         .ok_or_else(|| desktop_err("no_session", "open a project before opening a chat"))?;
-    let config = config_for_session(&state, &root)?;
+    let config = if is_free_chat_root(&root) {
+        config_for_free_chat(&state, &root)?
+    } else {
+        config_for_session(&state, &root)?
+    };
 
     state
         .sessions
@@ -4192,6 +4418,7 @@ fn delete_thread(
     state: State<'_, AppState>,
     id: String,
     project_path: Option<String>,
+    free_chat: Option<bool>,
 ) -> Result<SessionInfo, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
 
@@ -4200,17 +4427,21 @@ fn delete_thread(
         return Err(desktop_err("invalid", "chat id is empty"));
     }
 
-    let target_root = match project_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
-        None => state
-            .sessions
-            .active_root()
-            .map_err(map_session_err)?
-            .ok_or_else(|| desktop_err("no_session", "open a project before deleting a chat"))?,
+    let target_root = if free_chat.unwrap_or(false) {
+        free_chats_root()?
+    } else {
+        match project_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+            None => state
+                .sessions
+                .active_root()
+                .map_err(map_session_err)?
+                .ok_or_else(|| desktop_err("no_session", "open a chat before deleting a chat"))?,
+        }
     };
 
     // A background turn still owns the authoritative transcript. Refuse to
@@ -4279,6 +4510,7 @@ fn set_thread_pinned(
     state: State<'_, AppState>,
     id: String,
     project_path: Option<String>,
+    free_chat: Option<bool>,
     pinned: bool,
 ) -> Result<(), String> {
     state.sessions.require_idle().map_err(map_session_err)?;
@@ -4286,13 +4518,17 @@ fn set_thread_pinned(
     let target_root = state
         .sessions
         .with_session_mut(|session| -> Result<PathBuf, String> {
-            let target_root = match project_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
-                None => session.root.clone(),
+            let target_root = if free_chat.unwrap_or(false) {
+                free_chats_root()?
+            } else {
+                match project_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+                    None => session.root.clone(),
+                }
             };
             let store = open_store(&target_root)?;
             let summary = store.set_pinned(&id, pinned).map_err(|e| e.to_string())?;
@@ -4324,6 +4560,7 @@ fn rename_thread(
     state: State<'_, AppState>,
     id: String,
     project_path: Option<String>,
+    free_chat: Option<bool>,
     title: String,
 ) -> Result<ThreadSummary, String> {
     state.sessions.require_idle().map_err(map_session_err)?;
@@ -4340,13 +4577,17 @@ fn rename_thread(
     let (target_root, summary) = state
         .sessions
         .with_session_mut(|session| -> Result<(PathBuf, ThreadSummary), String> {
-            let target_root = match project_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
-                None => session.root.clone(),
+            let target_root = if free_chat.unwrap_or(false) {
+                free_chats_root()?
+            } else {
+                match project_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(raw) => canonicalize_dir(PathBuf::from(raw))?,
+                    None => session.root.clone(),
+                }
             };
             let store = open_store(&target_root)?;
             let summary = store.rename(&id, &title).map_err(|e| e.to_string())?;
@@ -4616,7 +4857,7 @@ fn set_system_prompt(
         .sessions
         .with_session_mut(|session| {
             save_custom_system(&session.root, &custom).map_err(|e| e.to_string())?;
-            let skills = SkillSet::discover(&session.root);
+            let skills = SkillSet::discover();
             {
                 let mut guard = session
                     .skills
@@ -4656,12 +4897,10 @@ pub struct CommandView {
 
 /// Slash commands available here — one per discovered skill.
 ///
-/// Workspace-based for the same reason as [`list_skills`]: the composer must be
-/// able to list commands while a turn is still streaming.
+/// Disk-based so commands remain readable while a turn is streaming.
 #[tauri::command]
-fn list_commands(state: State<'_, AppState>) -> Result<Vec<CommandView>, String> {
-    let root = resolve_workspace_root(&state)?;
-    Ok(SkillSet::discover(&root)
+fn list_commands(_state: State<'_, AppState>) -> Result<Vec<CommandView>, String> {
+    Ok(SkillSet::discover()
         .command_names()
         .into_iter()
         .map(|(name, description)| CommandView { name, description })
@@ -4669,15 +4908,14 @@ fn list_commands(state: State<'_, AppState>) -> Result<Vec<CommandView>, String>
 }
 
 #[tauri::command]
-/// Discovered from the workspace rather than the live session.
+/// Discovered from the user's skill folders rather than the live session.
 ///
 /// `begin_turn` *takes* the session out of the controller, so anything that
 /// reaches through it is unreadable while a turn runs — which made opening
 /// Settings mid-turn fail with "a turn is already in progress". Skills come
 /// from disk, and disk is readable whenever.
-fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillSummary>, String> {
-    let root = resolve_workspace_root(&state)?;
-    Ok(SkillSet::discover(&root).summaries())
+fn list_skills(_state: State<'_, AppState>) -> Result<Vec<SkillSummary>, String> {
+    Ok(SkillSet::discover().summaries())
 }
 
 fn system_prompt_info(session: &Session) -> Result<SystemPromptInfo, String> {
@@ -4917,6 +5155,34 @@ fn last_provider() -> Option<String> {
 #[tauri::command]
 fn get_workspace_folder(state: State<'_, AppState>) -> Result<String, String> {
     Ok(display_path(&resolve_workspace_root(&state)?))
+}
+
+/// List one project directory for the Workbench file browser.
+///
+/// This is intentionally shallow: the UI can ask for a child directory after
+/// the user opens it, which avoids walking a large repository on every render.
+#[tauri::command]
+async fn list_workspace_files(
+    state: State<'_, AppState>,
+    relative_path: Option<String>,
+) -> Result<Vec<WorkspaceFileView>, String> {
+    let root = resolve_workspace_root(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_files::list(&root, relative_path.as_deref())
+    })
+    .await
+    .map_err(|error| format!("could not list workspace files: {error}"))?
+}
+
+#[tauri::command]
+async fn read_workspace_file(
+    state: State<'_, AppState>,
+    relative_path: String,
+) -> Result<WorkspaceFileContent, String> {
+    let root = resolve_workspace_root(&state)?;
+    tauri::async_runtime::spawn_blocking(move || workspace_files::read(&root, &relative_path))
+        .await
+        .map_err(|error| format!("could not read workspace file: {error}"))?
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5782,6 +6048,13 @@ pub fn run() {
             configure_claude_code_provider,
             open_project_config,
             usage_snapshot,
+            provider_quota,
+            list_plugins,
+            open_plugins_folder,
+            set_plugin_enabled,
+            now_playing,
+            control_now_playing,
+            set_now_playing_volume,
             usage_report,
             open_prices_file,
             refresh_rates,
@@ -5802,6 +6075,7 @@ pub fn run() {
             update_space,
             delete_space,
             move_project_to_space,
+            forget_workspace,
             list_chat_projects,
             open_project_chat,
             load_thread,
@@ -5828,6 +6102,8 @@ pub fn run() {
             list_skills,
             list_commands,
             get_workspace_folder,
+            list_workspace_files,
+            read_workspace_file,
             pick_workspace_folder,
             pick_files,
             prepare_pasted_image,

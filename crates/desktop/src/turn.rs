@@ -190,6 +190,24 @@ pub(crate) async fn run_with_sink<S: EventSink>(
     let delegation_root = session.root.clone();
 
     let result = {
+        // Capture external context once per turn. A song title is user-device
+        // metadata, not durable conversation content, and it must not drift
+        // between provider rounds or leak into the saved transcript.
+        let previous_system = session.agent.system.clone();
+        let plugin_context = tauri::async_runtime::spawn_blocking(plugins::agent_context)
+            .await
+            .ok()
+            .flatten();
+        if let Some(context) = plugin_context {
+            let mut system = session
+                .agent
+                .system
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SYSTEM.to_string());
+            system.push_str("\n\n# Enabled local integrations\n\n");
+            system.push_str(&context);
+            session.agent.system = Some(system);
+        }
         let assistant_message_id = assistant_message_id.clone();
         let session_id = session_id.clone();
         let thread_id = thread_id.clone();
@@ -463,7 +481,7 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             sink.emit(&event);
         };
 
-        if multimodal {
+        let result = if multimodal {
             session
                 .agent
                 .send_blocks_cancellable(user_blocks, &mut on_event, Some(&cancel))
@@ -486,7 +504,9 @@ pub(crate) async fn run_with_sink<S: EventSink>(
                 .agent
                 .send_cancellable(&agent_text, &mut on_event, Some(&cancel))
                 .await
-        }
+        };
+        session.agent.system = previous_system;
+        result
     };
 
     session.thread = match Arc::try_unwrap(live_thread) {
