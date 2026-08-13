@@ -1,120 +1,111 @@
 <div align="center">
 
-<img src="./assets/logo.png" alt="Zest logo" width="512" height="512" />
+<img src="./assets/logo.png" alt="Zest logo" width="256" height="256" />
 
 # Zest
 
-[![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
-[![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
-[![Latest release](https://img.shields.io/github/v/release/LemonMantis5571/Zest?include_prereleases&label=latest%20beta)](https://github.com/LemonMantis5571/Zest/releases)
+[![Windows verify](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest/actions/workflows/windows-verify.yml)
+[![Linux verify](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml/badge.svg?branch=master)](https://github.com/LemonMantis5571/Zest/actions/workflows/linux-verify.yml)
+[![Latest beta](https://img.shields.io/github/v/release/LemonMantis5571/Zest?include_prereleases=true&label=latest%20beta)](https://github.com/LemonMantis5571/Zest/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**🧭 A local-first coding workspace with approvals, diffs, and optional model delegation. 🛠️**
+**A local-first coding workspace with approvals, diffs, quotas, and optional model delegation.**
 
-Zest helps you use AI in real projects while keeping control of your files,
-commands, credentials, and model accounts.
+Run AI-assisted work in your own projects while keeping files, commands,
+credentials, and provider accounts under local control.
 
-> **Beta:** Zest is ready for early adopters. Keep backups and review every
-> approval before accepting it.
-
-[Quick start](#quick-start) · [Build from source](#build-from-source) · [Contributing](CONTRIBUTING.md)
+[Install the beta](#how-do-i-install-zest) · [Build from source](#how-do-i-build-zest-from-source) · [Documentation](#where-can-i-find-the-docs)
 
 </div>
 
-## Table of contents
+## What is Zest?
 
-- [Why Zest](#why-zest)
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Build from source](#build-from-source)
-- [Plugins](#plugins)
-- [Configuration](#configuration)
-- [Supported platforms](#supported-platforms)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
+Zest is a desktop and terminal coding workspace. It connects to supported model
+providers, opens a project folder, and shows proposed file changes and commands
+before they run.
 
-## Why Zest
+Zest runs locally. It does not require a Zest account or send telemetry to a
+Zest server. Provider sign-ins remain with their providers, and external coding
+CLIs remain responsible for their own sessions.
 
-AI coding tools are most useful when they can make progress without making
-unreviewed changes. Zest gives you a focused workspace for that loop:
+## What can Zest do?
 
-1. Choose the model provider you want to use.
-2. Open a project and describe the change.
-3. Review proposed writes and commands before they run.
-4. Inspect the diff, continue the conversation, or reject the change.
-
-Zest runs locally, keeps credentials in your operating system's credential
-store, and does not require a Zest account or send telemetry to a Zest server.
-You can use one model for planning and hand focused tasks to an already
-configured specialist CLI when that suits the work.
-
-## Features
-
-- **Optional plugins** - add local integrations without rebuilding the Zest
-  desktop app.
-- **Approvals with diff previews** — review file changes and shell commands
-  before accepting them.
-- **Desktop and terminal clients** — use a focused desktop workspace or the
-  `zest` terminal client.
-- **Bring your own provider** — connect supported sign-ins, native APIs, or
+- **Reviewable changes** — inspect diffs and approve file writes or commands.
+- **Desktop and terminal clients** — use the Tauri desktop app or the `zest`
+  terminal client.
+- **Provider choice** — use supported sign-ins, native APIs, or
   OpenAI-compatible endpoints.
-- **Usage and quota** — keep local usage separate from live provider limits and
-  official balances.
-- **Resumable sessions** — keep project chats, checkpoints, and context
-  handling available across restarts.
-- **Optional task delegation** — send bounded work to a configured external
-  coding CLI and review the result before accepting it.
+- **Local usage** — track requests and tokens without presenting local usage as
+  a provider balance.
+- **Live quota data** — show provider-reported limits when an official,
+  supported source is available.
+- **Resumable sessions** — keep project chats and checkpoints across restarts.
+- **Optional delegation** — send bounded work to a configured external coding
+  CLI and review its result before applying it.
+- **Optional plugins** — add local integrations without rebuilding Zest.
 
-## Quick start
+## How do I install Zest?
 
-### Install a release
+### Download the beta
 
-Download the latest beta installer or package from
-[GitHub Releases](https://github.com/LemonMantis5571/Zest/releases).
+Open the [Zest v0.1.0 beta release](https://github.com/LemonMantis5571/Zest/releases/tag/v0.1.0).
 
-- **Windows** — install the `.msi` or `.exe` package.
-- **Linux** — install the `.deb` or `.rpm` package, or run the AppImage.
+- **Windows x64** — install the `.msi` or `.exe` package.
+- **Linux x64** — install the `.deb` or `.rpm` package, or run the AppImage.
 
-Each release includes a platform checksum file. Verify the download before
-installing it.
+Each release includes a platform-specific `SHA256SUMS` file and third-party
+notices.
 
-Launch Zest, choose a provider in Settings, open a project folder, and start a
-chat. The first time Zest is about to write a file or run a command, it shows
-you the proposed action and waits for your approval.
+### Start a first session
 
-### Terminal client
+1. Launch Zest.
+2. Choose a provider in **Settings**.
+3. Open a project folder.
+4. Start a chat and inspect the proposed changes or commands shown by Zest.
 
-```bash
-zest
-```
+## How do I build Zest from source?
 
-## Build from source
-
-You need Rust 1.97.1, Node.js 24.16.0+, npm, Git, and PowerShell. Linux builds
-also need the desktop libraries listed in
+Install Rust 1.97.1, Node.js 24.16.0, npm, Git, and PowerShell (`pwsh` on
+Linux or macOS). Linux also needs the desktop libraries listed in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+### Windows PowerShell
 
 ```powershell
 npm ci
-./scripts/fetch-gateway.ps1
-npm run ui:build
-cargo run -p zest-desktop
+.\scripts\fetch-gateway.ps1
+npm run dev
 ```
 
-To run the terminal client instead:
+### Linux or macOS
+
+```bash
+npm ci
+pwsh ./scripts/fetch-gateway.ps1
+npm run dev
+```
+
+Build the terminal client with Cargo:
+
+```bash
+cargo run -p zest -- --help
+```
+
+Run the full local verification gate with:
 
 ```powershell
-cargo run -p zest
+.\scripts\release-verify.ps1
 ```
 
-On Linux or macOS, run the PowerShell scripts with `pwsh`.
+## How do I install an optional plugin?
 
-## Plugins
+Official Zest packages do not include plugins. Plugins are installed separately
+as folders under the user's Zest plugin directory.
 
-Plugins are optional add-ons. They are not bundled with official releases and
-there is no automatic plugin download yet. Install them separately by copying
-their folder into the Zest plugin folder, then use **Settings > Extras >
-Refresh > Turn on**.
+1. Open **Settings > Extras**.
+2. Press **Open folder**.
+3. Copy one complete plugin folder into the folder that opens.
+4. Press **Refresh**, then **Turn on**.
 
 On Windows, the folder is:
 
@@ -122,47 +113,54 @@ On Windows, the folder is:
 %LOCALAPPDATA%\Zest\plugins
 ```
 
-For the included Windows music add-on, run:
+Install the included Windows music plugin from the repository root with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-now-playing-plugin.ps1
 ```
 
-To build it without installing:
+The complete install guide, plugin protocol, security rules, and acceptance
+checklist are in [`docs/PLUGINS.md`](docs/PLUGINS.md).
 
-```powershell
-cargo build -p zest-now-playing-plugin --release
-```
+## How do I configure providers and quotas?
 
-`npm run dev` starts Zest. Cargo builds Rust plugins. The full install guide,
-plugin standard, protocol, security rules, and review checklist are in
-[`docs/PLUGINS.md`](docs/PLUGINS.md).
+Zest stores user configuration at `~/.zest/zest.toml`. Supported provider
+credentials use the operating system credential manager when available; do not
+put secrets in project files or commit them to Git.
 
-## Configuration
+Zest keeps these values separate:
 
-Zest creates a user-level configuration at `~/.zest/zest.toml`. You can add a
-project-local override by copying [`zest.toml.example`](zest.toml.example) to
-`zest.toml`.
+- local usage recorded by Zest;
+- rate limits returned by a provider; and
+- account balances or subscription limits owned by a provider.
 
-Keep secrets out of configuration files. Zest stores supported API credentials
-in the operating system's credential manager; sign-ins owned by a provider
-remain with that provider.
+The quota panel only shows provider-reported data. See the
+[quota guide](docs/QUOTA.md) for provider-specific behavior.
 
-## Supported platforms
+## Which platforms are supported?
 
 | Platform | Status |
 | --- | --- |
-| Windows 10/11 (x64) | Primary target and verified in CI |
-| Linux (x64) | Supported and verified in CI |
-| Windows/Linux ARM64 | Source paths exist; beta installers are not published yet |
-| macOS | Supported code paths; not yet CI-verified |
+| Windows 10/11 x64 | Beta installer and CI-verified |
+| Linux x64 | Beta packages and CI-verified |
+| Windows/Linux ARM64 | Source builds only |
+| macOS | Source paths exist; CI and installers are not available yet |
 
-## Documentation
+## What are the security limits?
 
-- [Plugins](docs/PLUGINS.md) - install, build, and develop optional add-ons
-- [Skills](docs/SKILLS.md) - personal skills and install locations
-- [Provider quota](docs/QUOTA.md) - live limits, balances, and provider limits
-- [Contributing](CONTRIBUTING.md) — development, verification, and pull requests
+Zest's approval layer makes proposed writes and commands visible before
+execution. An approved command still runs with the user's operating-system
+permissions; Zest is not an operating-system sandbox.
+
+Plugins run as separate child processes, but the plugin boundary is not a
+sandbox either. Install only plugins whose source and behavior are trusted.
+
+## Where can I find the docs?
+
+- [Plugins](docs/PLUGINS.md) — install, build, protocol, and review standard
+- [Skills](docs/SKILLS.md) — personal skills and install locations
+- [Provider quota](docs/QUOTA.md) — live limits, balances, and local usage
+- [Contributing](CONTRIBUTING.md) — development, tests, and pull requests
 - [Design notes](DESIGN.md) — product and architecture context
 - [Releasing](docs/RELEASING.md) — maintainer release checklist
 - [Beta release notes](docs/releases/0.1.0.md) — scope and known limits
@@ -170,11 +168,10 @@ remain with that provider.
 - [Security policy](SECURITY.md) — vulnerability reporting
 - [Third-party notices](THIRD_PARTY_NOTICES.md) — dependency attribution
 
-## Contributing
+## How do I contribute?
 
-Issues and pull requests are welcome. Start with
-[`CONTRIBUTING.md`](CONTRIBUTING.md), keep changes focused, and include tests
-for behavior changes. Please report security vulnerabilities privately using
-the process in [`SECURITY.md`](SECURITY.md).
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md), keep changes focused, and include
+tests for behavior changes. Report security vulnerabilities privately using
+[`SECURITY.md`](SECURITY.md).
 
 Zest is released under the [MIT License](LICENSE).
