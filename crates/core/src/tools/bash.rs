@@ -1218,7 +1218,7 @@ mod tests {
         // Waits, then leaves a marker. If the kill works the marker never
         // appears, because the process is gone before it gets that far.
         let command = if cfg!(windows) {
-            "cmd /C ping -n 4 127.0.0.1 > nul & echo done > marker.txt"
+            r#"powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 10; Set-Content -LiteralPath marker.txt -Value done""#
         } else {
             "sleep 3; echo done > marker.txt"
         };
@@ -1229,7 +1229,7 @@ mod tests {
         assert!(err.contains("did not finish"), "{err}");
 
         // Wait well past when the marker would have been written.
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(if cfg!(windows) { 11 } else { 5 })).await;
         assert!(
             !dir.join("marker.txt").exists(),
             "process survived the timeout and kept running"
