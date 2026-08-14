@@ -5,19 +5,29 @@
 # for the machine. Credentials never belong in this file.
 
 [providers.codex]
-kind = "gateway"
-base_url = "http://127.0.0.1:8317"
-api_key_env = "ZEST_GATEWAY_KEY"
-model = "gpt-5.6-terra"
+kind = "codex_cli"
+command = "codex"
+model = "gpt-5.6-sol"
+allow_mcp = false
+timeout_secs = 900
 
 [default]
 provider = "codex"
-model = "gpt-5.6-terra"
+model = "gpt-5.6-sol"
 
 [tools.bash]
 # Read-only commands can run without an extra approval; other commands ask.
 enabled = true
 
+# CLIProxyAPI gateway providers remain an explicit compatibility path. Existing
+# `kind = "gateway"` installations are never rewritten automatically.
+#
+# [providers.codex_gateway]
+# kind = "gateway"
+# base_url = "http://127.0.0.1:8317"
+# api_key_env = "ZEST_GATEWAY_KEY"
+# model = "gpt-5.6-terra"
+#
 # OpenAI-compatible providers are configured explicitly when needed. Their
 # API keys are stored in the OS credential manager, not here.
 # The native Anthropic API can be added from the launch picker as well; its key

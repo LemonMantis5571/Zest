@@ -170,6 +170,7 @@ impl TurnAccumulator {
             usage_available: true,
             limits,
             served_model: self.served_model,
+            provider_session: None,
         }
     }
 }

@@ -33,6 +33,7 @@ import type {
   WorkspaceFileContent,
   WorkspaceFileView,
   WorkspacePickResult,
+  WorkspaceChange,
   WorkspaceReview,
 } from "./types";
 
@@ -274,6 +275,10 @@ export function forkThread() {
   return invoke<SessionInfo>("fork_thread");
 }
 
+export function forkThreadFromCheckpoint(checkpointId: string) {
+  return invoke<SessionInfo>("fork_thread_from_checkpoint", { checkpointId });
+}
+
 export function rewindThread(checkpointId: string) {
   return invoke<SessionInfo>("rewind_thread", { checkpointId });
 }
@@ -380,6 +385,10 @@ export function gitBranch() {
 
 export function gitContext() {
   return invoke<GitContext>("git_context");
+}
+
+export function workspaceChanges() {
+  return invoke<WorkspaceChange>("workspace_changes");
 }
 
 export function verifyWorkspace() {

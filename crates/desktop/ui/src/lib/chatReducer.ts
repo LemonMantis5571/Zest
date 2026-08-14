@@ -475,6 +475,11 @@ export function reduceChatEvent(
       effects.warningToast = event.message;
       return { state, effects };
     }
+    case "workspace_changed": {
+      // This event drives the branch-review surface in App; it must not add a
+      // synthetic transcript message or alter the turn state.
+      return { state, effects };
+    }
   }
 }
 

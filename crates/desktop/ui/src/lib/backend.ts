@@ -35,6 +35,7 @@ import type {
   WorkspaceFileContent,
   WorkspaceFileView,
   WorkspacePickResult,
+  WorkspaceChange,
   WorkspaceReview,
 } from "./types";
 
@@ -123,6 +124,7 @@ export type DesktopBackend = {
   newThread(): Promise<SessionInfo>;
   sessionInfo(): Promise<SessionInfo | null>;
   forkThread(): Promise<SessionInfo>;
+  forkThreadFromCheckpoint(checkpointId: string): Promise<SessionInfo>;
   rewindThread(checkpointId: string): Promise<SessionInfo>;
   editMessage(messageId: string): Promise<SessionInfo>;
   compactContext(): Promise<ContextUsage>;
@@ -176,6 +178,7 @@ export type DesktopBackend = {
   }): Promise<PreparedAttachment>;
   gitBranch(): Promise<string | null>;
   gitContext(): Promise<GitContext>;
+  workspaceChanges(): Promise<WorkspaceChange>;
   verifyWorkspace(): Promise<WorkspaceReview>;
   contextUsage(): Promise<ContextUsage>;
   getUserProfile(): Promise<UserProfile>;
@@ -242,6 +245,7 @@ export function createTauriBackend(): DesktopBackend {
     newThread: () => tauriApi.newThread(),
     sessionInfo: () => tauriApi.sessionInfo(),
     forkThread: () => tauriApi.forkThread(),
+    forkThreadFromCheckpoint: (checkpointId) => tauriApi.forkThreadFromCheckpoint(checkpointId),
     rewindThread: (checkpointId) => tauriApi.rewindThread(checkpointId),
     editMessage: (messageId) => tauriApi.editMessage(messageId),
     compactContext: () => tauriApi.compactContext(),
@@ -275,6 +279,7 @@ export function createTauriBackend(): DesktopBackend {
     preparePastedImage: (options) => tauriApi.preparePastedImage(options),
     gitBranch: () => tauriApi.gitBranch(),
     gitContext: () => tauriApi.gitContext(),
+    workspaceChanges: () => tauriApi.workspaceChanges(),
     verifyWorkspace: () => tauriApi.verifyWorkspace(),
     contextUsage: () => tauriApi.contextUsage(),
     getUserProfile: () => tauriApi.getUserProfile(),

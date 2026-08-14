@@ -149,6 +149,13 @@ pub fn detect_codex() -> AuthStatus {
         };
     }
 
+    detect_codex_cli()
+}
+
+/// Readiness for the native Codex CLI, deliberately ignoring CLIProxyAPI.
+/// Native app-server providers and gateway providers have separate auth
+/// lifecycles even when both are called `codex` in the picker.
+pub fn detect_codex_cli() -> AuthStatus {
     let home = match std::env::var("CODEX_HOME") {
         Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
         _ => match home_dir() {
@@ -410,6 +417,16 @@ pub fn resolve_claude_code_login() -> LoginSpawn {
     }
 }
 
+/// Resolve the direct Codex CLI login used by the native app-server provider.
+pub fn resolve_codex_cli_login() -> LoginSpawn {
+    LoginSpawn {
+        program: PathBuf::from("codex"),
+        args: vec!["login".into()],
+        browser_title: "Sign in with ChatGPT",
+        browser_body: "Finish in your browser. This window will update when you’re done.",
+    }
+}
+
 fn cliproxy_login(
     flag: &str,
     browser_title: &'static str,
@@ -468,6 +485,19 @@ pub fn start_claude_code_login() -> std::result::Result<LoginProcess, String> {
     let spawn = resolve_claude_code_login();
     let child = spawn_silent(&spawn.program, &spawn.args)
         .map_err(|e| format!("could not start Claude Code login: {e}"))?;
+    Ok(LoginProcess { spawn, child })
+}
+
+/// Start the direct Codex CLI subscription login without using a gateway store.
+pub fn start_codex_cli_login() -> std::result::Result<LoginProcess, String> {
+    if !codex_callback_port_available() {
+        return Err(format!(
+            "Codex sign-in cannot start because localhost:{CODEX_OAUTH_CALLBACK_PORT} is already in use. Close any other Codex/Zest sign-in window and try again."
+        ));
+    }
+    let spawn = resolve_codex_cli_login();
+    let child = spawn_silent(&spawn.program, &spawn.args)
+        .map_err(|e| format!("could not start Codex CLI login: {e}"))?;
     Ok(LoginProcess { spawn, child })
 }
 

@@ -1,4 +1,13 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   ChevronDownIcon,
   GitBranchIcon,
@@ -15,6 +24,8 @@ import { cn } from "@/lib/utils";
 export type DiffViewerTarget = {
   path: string;
   diff: string;
+  source?: "tool" | "branch";
+  changeId?: string;
 };
 
 type Props = {
@@ -22,6 +33,9 @@ type Props = {
   onClose: () => void;
   branch?: string | null;
   baseBranch?: string | null;
+  width?: number;
+  onResize?: (width: number) => void;
+  storageKey?: string;
 };
 
 type DiffView = "reading" | "full";
@@ -43,15 +57,26 @@ function sectionKey(section: DiffSection, index: number): string {
 }
 
 /** Compact review sidebar for changed files — portal-free for WebView safety. */
-export function DiffViewer({ target, onClose, branch, baseBranch }: Props) {
+export function DiffViewer({
+  target,
+  onClose,
+  branch,
+  baseBranch,
+  width = 520,
+  onResize,
+  storageKey,
+}: Props) {
   const titleId = useId();
-  const [view, setView] = useState<DiffView>("reading");
+  const [view, setView] = useState<DiffView>(() => {
+    if (!storageKey || typeof window === "undefined") return "reading";
+    return window.localStorage.getItem(storageKey) === "full" ? "full" : "reading";
+  });
   const [reading, setReading] = useState<ReadingDiff | ReadingDiffView | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const resizeCleanup = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!target) return;
-    setView("reading");
     setCollapsed(new Set());
     const fallback = makeReadingDiff(target.diff);
     setReading(fallback);
@@ -68,6 +93,57 @@ export function DiffViewer({ target, onClose, branch, baseBranch }: Props) {
       cancelled = true;
     };
   }, [target]);
+
+  useLayoutEffect(() => {
+    if (!storageKey || typeof window === "undefined") return;
+    const saved = window.localStorage.getItem(storageKey);
+    setView(saved === "full" ? "full" : "reading");
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!storageKey || typeof window === "undefined") return;
+    window.localStorage.setItem(storageKey, view);
+  }, [storageKey, view]);
+
+  useEffect(() => () => resizeCleanup.current?.(), []);
+
+  function clampWidth(value: number): number {
+    const maximum = typeof window === "undefined"
+      ? 760
+      : Math.min(760, Math.max(360, window.innerWidth - 320));
+    return Math.max(360, Math.min(maximum, value));
+  }
+
+  function beginResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!onResize) return;
+    event.preventDefault();
+    const originX = event.clientX;
+    const originWidth = width;
+    const move = (next: PointerEvent) => onResize(clampWidth(originWidth + originX - next.clientX));
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      resizeCleanup.current = null;
+    };
+    resizeCleanup.current?.();
+    resizeCleanup.current = end;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end, { once: true });
+  }
+
+  function handleResizeKey(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (!onResize) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      onResize(clampWidth(width + (event.key === "ArrowLeft" ? 24 : -24)));
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      onResize(360);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      onResize(clampWidth(760));
+    }
+  }
 
   useEffect(() => {
     if (!target) return;
@@ -91,7 +167,7 @@ export function DiffViewer({ target, onClose, branch, baseBranch }: Props) {
       : reading?.foldedLines ?? 0;
   const totalAdded = sections.reduce((sum, section) => sum + section.added, 0);
   const totalRemoved = sections.reduce((sum, section) => sum + section.removed, 0);
-  const hasBranchContext = Boolean(branch || baseBranch);
+  const hasBranchContext = target?.source === "branch" || Boolean(branch || baseBranch);
 
   function toggleSection(key: string) {
     setCollapsed((current) => {
@@ -105,13 +181,26 @@ export function DiffViewer({ target, onClose, branch, baseBranch }: Props) {
   if (!target) return null;
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-50 flex justify-end p-2 sm:p-3">
-      <aside
+    <aside
         role="dialog"
-        aria-modal="false"
         aria-labelledby={titleId}
-        className="pointer-events-auto flex h-full w-[min(520px,calc(100%_-_16px))] min-w-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-[#0f1011] text-foreground shadow-2xl outline-none animate-in slide-in-from-right-2 duration-150"
+        className="relative z-40 flex h-full min-w-0 shrink-0 flex-col overflow-hidden border-l border-border/80 bg-[#0f1011] text-foreground shadow-2xl outline-none animate-in slide-in-from-right-2 duration-150 max-md:absolute max-md:inset-0 max-md:!w-full"
+        style={{ width }}
       >
+        {onResize ? (
+          <button
+            type="button"
+            role="separator"
+            aria-label="Resize branch changes pane"
+            aria-orientation="vertical"
+            aria-valuemin={360}
+            aria-valuemax={760}
+            aria-valuenow={Math.round(width)}
+            className="absolute -left-1 top-0 z-50 h-full w-2 cursor-col-resize touch-none bg-transparent outline-none after:absolute after:inset-y-0 after:left-[3px] after:w-px after:bg-border/70 hover:after:bg-primary focus-visible:after:bg-primary"
+            onPointerDown={beginResize}
+            onKeyDown={handleResizeKey}
+          />
+        ) : null}
         <header className="shrink-0 border-b border-border/70 bg-[#141516]">
           <div className="flex items-start justify-between gap-3 px-3 py-2.5">
             <div className="min-w-0">
@@ -228,6 +317,5 @@ export function DiffViewer({ target, onClose, branch, baseBranch }: Props) {
           )}
         </div>
       </aside>
-    </div>
   );
 }

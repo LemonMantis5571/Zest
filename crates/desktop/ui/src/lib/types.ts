@@ -12,6 +12,7 @@ import type { ToolMetaView } from "./generated/ToolMetaView.ts";
 import type { GitContextView as GeneratedGitContext } from "./generated/GitContext.ts";
 import type { PullRequestView } from "./generated/PullRequestView.ts";
 import type { WorkspaceReview as GeneratedWorkspaceReview } from "./generated/WorkspaceReview.ts";
+import type { WorkspaceChange as GeneratedWorkspaceChange } from "./generated/WorkspaceChange.ts";
 import type { DelegationEvent as GeneratedDelegationEvent } from "./generated/DelegationEvent.ts";
 import type { DelegationJobView } from "./generated/DelegationJobView.ts";
 import type { PlanningQuestion } from "./planningQuestion.ts";
@@ -82,6 +83,7 @@ export type LoginStatus = {
 
 export type { ModelCapability };
 export type WorkspaceReview = GeneratedWorkspaceReview;
+export type WorkspaceChange = GeneratedWorkspaceChange;
 export type DelegationEvent = GeneratedDelegationEvent;
 export type DelegationJob = DelegationJobView;
 

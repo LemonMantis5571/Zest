@@ -12,6 +12,7 @@ import {
   FileIcon,
   FileTextIcon,
   FolderOpenIcon,
+  GitBranchIcon,
   ImageIcon,
   CommandIcon,
   LoaderCircleIcon,
@@ -29,6 +30,7 @@ import {
   writeSidebarOpen,
 } from "@/components/ChatHistorySidebar";
 import { CommandOutputCard } from "@/components/CommandOutputCard";
+import { CheckpointRail } from "@/components/CheckpointRail";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { AgentQuotaButton } from "@/components/AgentQuotaButton";
 import { Composer } from "@/components/Composer";
@@ -85,6 +87,7 @@ import type {
   SessionInfo,
   SessionWarning,
   UserProfile,
+  WorkspaceChange,
   WorkspaceReview,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -117,8 +120,11 @@ type Props = {
   onStop?: () => void;
   onNewChat: () => void;
   onForkThread: () => Promise<void>;
+  onForkFromCheckpoint: (checkpointId: string) => Promise<void>;
   onRewindThread: (checkpointId: string) => Promise<void>;
   workspaceReview: WorkspaceReview | null;
+  workspaceChange: WorkspaceChange | null;
+  onRefreshWorkspaceChanges: () => Promise<WorkspaceChange>;
   onVerifyWorkspace: () => Promise<void>;
   compacting?: boolean;
   onDeleteThread: (
@@ -577,8 +583,11 @@ export function ChatScreen({
   onStop,
   onNewChat,
   onForkThread,
+  onForkFromCheckpoint,
   onRewindThread,
   workspaceReview,
+  workspaceChange,
+  onRefreshWorkspaceChanges,
   onVerifyWorkspace,
   compacting = false,
   onDeleteThread,
@@ -619,6 +628,25 @@ export function ChatScreen({
   const [shortcutsRequest, setShortcutsRequest] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   const [diffTarget, setDiffTarget] = useState<DiffViewerTarget | null>(null);
+  const diffWidthKey = `zest:diff-width:${session.threadId}`;
+  const diffOpenKey = `zest:diff-open:${session.threadId}`;
+  const dismissedDiffKey = `zest:dismissed-change:${session.threadId}`;
+  const [diffWidth, setDiffWidth] = useState(() => {
+    if (typeof window === "undefined") return 520;
+    const saved = Number(window.localStorage.getItem(diffWidthKey));
+    return Number.isFinite(saved) && saved >= 360 ? saved : 520;
+  });
+  const [dismissedChangeId, setDismissedChangeId] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : window.localStorage.getItem(dismissedDiffKey)
+  );
+  const rememberDiffOpen = useCallback(
+    (open: boolean) => {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(diffOpenKey, String(open));
+      }
+    },
+    [diffOpenKey]
+  );
   const [providerSwitchOpen, setProviderSwitchOpen] = useState(false);
   const [providerSwitchBusy, setProviderSwitchBusy] = useState(false);
   /**
@@ -640,10 +668,123 @@ export function ChatScreen({
     if (session.isFreeChat) return;
     setWorkbenchOpen((value) => !value);
   }, [session.isFreeChat]);
+
+  useEffect(() => {
+    setDiffTarget(null);
+    if (typeof window === "undefined") {
+      setDiffWidth(520);
+      setDismissedChangeId(null);
+      return;
+    }
+    const savedWidth = Number(window.localStorage.getItem(diffWidthKey));
+    setDiffWidth(Number.isFinite(savedWidth) && savedWidth >= 360 ? savedWidth : 520);
+    setDismissedChangeId(window.localStorage.getItem(dismissedDiffKey));
+  }, [diffWidthKey, dismissedDiffKey]);
+
   const openDiff = useCallback(
-    (path: string, diff: string) => setDiffTarget({ path, diff }),
+    (path: string, diff: string) => {
+      rememberDiffOpen(true);
+      setDiffTarget({ path, diff, source: "tool" });
+    },
+    [rememberDiffOpen]
+  );
+
+  const branchTarget = useCallback(
+    (change: WorkspaceChange): DiffViewerTarget => ({
+      path: "Branch changes",
+      diff: change.diff,
+      source: "branch",
+      changeId: change.changeId,
+    }),
     []
   );
+
+  useEffect(() => {
+    if (
+      session.isFreeChat ||
+      typeof window === "undefined" ||
+      window.localStorage.getItem(diffOpenKey) !== "true"
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void onRefreshWorkspaceChanges()
+      .then((change) => {
+        if (!cancelled) setDiffTarget(branchTarget(change));
+      })
+      .catch(() => {
+        // A persisted open state is best-effort when the workspace is unavailable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [branchTarget, diffOpenKey, onRefreshWorkspaceChanges, session.isFreeChat]);
+
+  const openBranchChanges = useCallback(async () => {
+    if (session.isFreeChat) return;
+    try {
+      const change = await onRefreshWorkspaceChanges();
+      rememberDiffOpen(true);
+      setDiffTarget(branchTarget(change));
+    } catch {
+      // Keep the existing review surface closed when Git cannot be inspected.
+    }
+  }, [branchTarget, onRefreshWorkspaceChanges, rememberDiffOpen, session.isFreeChat]);
+
+  useEffect(() => {
+    if (
+      !workspaceChange ||
+      workspaceChange.unavailable ||
+      (!workspaceChange.changedFiles.length && !workspaceChange.diff)
+    ) {
+      return;
+    }
+    if (dismissedChangeId === workspaceChange.changeId) return;
+    if (diffTarget?.source === "branch" && diffTarget.changeId === workspaceChange.changeId) return;
+    rememberDiffOpen(true);
+    setDiffTarget(branchTarget(workspaceChange));
+  }, [branchTarget, diffTarget, dismissedChangeId, rememberDiffOpen, workspaceChange]);
+
+  const openBranchChangeId = diffTarget?.source === "branch" ? diffTarget.changeId : null;
+  useEffect(() => {
+    if (!openBranchChangeId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await onRefreshWorkspaceChanges();
+        if (cancelled) return;
+        setDiffTarget((current) =>
+          current?.source === "branch" ? branchTarget(next) : current
+        );
+      } catch {
+        // The last rendered snapshot stays visible when Git is temporarily unavailable.
+      }
+    };
+    const interval = window.setInterval(tick, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [branchTarget, onRefreshWorkspaceChanges, openBranchChangeId]);
+
+  const resizeDiff = useCallback(
+    (next: number) => {
+      setDiffWidth(next);
+      if (typeof window !== "undefined") window.localStorage.setItem(diffWidthKey, String(next));
+    },
+    [diffWidthKey]
+  );
+
+  const closeDiff = useCallback(() => {
+    rememberDiffOpen(false);
+    if (diffTarget?.source === "branch" && diffTarget.changeId) {
+      setDismissedChangeId(diffTarget.changeId);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(dismissedDiffKey, diffTarget.changeId);
+      }
+    }
+    setDiffTarget(null);
+  }, [diffTarget, dismissedDiffKey, rememberDiffOpen]);
   const showPicker = sessionSupportsModelPicker(session.models);
   const folderLabel = session.isFreeChat ? "No workspace" : shortRoot(session.root);
   const planToBuild = useMemo(() => buildablePlanId(messages), [messages]);
@@ -836,7 +977,7 @@ export function ChatScreen({
       if (e.key !== "Escape") return;
       if (diffTarget) {
         e.preventDefault();
-        setDiffTarget(null);
+        closeDiff();
         return;
       }
       if (providerSwitchOpen) {
@@ -866,7 +1007,7 @@ export function ChatScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cancelEditingMessage, diffTarget, editingMessageId, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
+  }, [cancelEditingMessage, closeDiff, diffTarget, editingMessageId, onStop, paletteOpen, providerSwitchBusy, providerSwitchOpen, sending, settingsOpen]);
 
   // Everything else comes from the registry, so the shortcuts editor is the one
   // place that decides which key runs which command.
@@ -943,6 +1084,25 @@ export function ChatScreen({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {!session.isFreeChat ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="flex shrink-0 gap-1.5 px-2 text-[11px]"
+                title="Open cumulative branch changes"
+                aria-label="Open cumulative branch changes"
+                onClick={() => void openBranchChanges()}
+              >
+                <GitBranchIcon className="size-3.5" aria-hidden="true" />
+                <span>Branch changes</span>
+                {workspaceChange ? (
+                  <span className="text-muted-foreground">
+                    {workspaceChange.changedFiles.length} · +{workspaceChange.additions} −{workspaceChange.deletions}
+                  </span>
+                ) : null}
+              </Button>
+            ) : null}
             <AgentQuotaButton providers={providers} refreshKey={`${session.threadId}:${messages.length}`} />
             <NowPlayingButton />
             <Button
@@ -1016,6 +1176,13 @@ export function ChatScreen({
         ) : null}
 
         <div className="relative min-h-0 flex-1">
+          <CheckpointRail
+            checkpoints={session.checkpoints}
+            messages={messages}
+            onJump={jumpToMessage}
+            onFork={onForkFromCheckpoint}
+            onRewind={onRewindThread}
+          />
           <MessageScrollerProvider autoScroll scrollEdgeThreshold={24}>
             <MessageScroller
               className={cn("absolute inset-0", !hasNeedsInput && "pb-40")}
@@ -1027,7 +1194,7 @@ export function ChatScreen({
               }}
             >
               <MessageScrollerViewport className="scroll-fade-b">
-                <MessageScrollerContent className="mx-auto w-full max-w-[var(--chat-max)] gap-6 px-4 py-6">
+                <MessageScrollerContent className="mx-auto w-full max-w-[var(--chat-max)] gap-6 pl-10 pr-4 py-6">
                   {messages.length === 0 ? (
                     <MessageScrollerItem messageId="empty">
                       <div className="flex min-h-[42vh] flex-col items-center justify-center gap-4 text-center">
@@ -1274,7 +1441,10 @@ export function ChatScreen({
         target={diffTarget}
         branch={gitContext?.branch ?? branch}
         baseBranch={gitContext?.baseBranch}
-        onClose={() => setDiffTarget(null)}
+        width={diffWidth}
+        onResize={resizeDiff}
+        storageKey={`zest:diff-view:${session.threadId}`}
+        onClose={closeDiff}
       />
     </section>
   );

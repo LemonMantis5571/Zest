@@ -24,7 +24,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufRead
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::AbortHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, Instant};
 
 use super::approval::{ApprovalPreview, ToolRisk};
 use super::outcome::{ToolMetadata, ToolOutcome};
@@ -35,7 +35,7 @@ use super::Tool;
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::config::{ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace};
 use crate::handoff::ContextHandoff;
-use crate::provider::RateLimitSnapshot;
+use crate::provider::{session::JsonlProcess, RateLimitSnapshot};
 use crate::usage::{ExternalCost, ExternalUsageReport};
 
 pub const EXTERNAL_AGENT_TOOL: &str = "delegate_external";
@@ -572,7 +572,7 @@ pub(crate) async fn run_headless_command_streaming(
             "parent CLI provider must use headless mode".into(),
         ));
     }
-    spawn_and_run_with_cancel(cwd, config, prompt, cancel, Some(on_event), &[])
+    spawn_headless_with_session(cwd, config, prompt, cancel, Some(on_event))
         .await
         .map_err(|error| {
             if error == EXTERNAL_RUN_CANCELLED {
@@ -581,6 +581,114 @@ pub(crate) async fn run_headless_command_streaming(
                 crate::error::HarnessError::Other(error)
             }
         })
+}
+
+async fn spawn_headless_with_session(
+    cwd: &Path,
+    config: &ExternalAgentConfig,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+    on_event: Option<&mut ExternalEventSink<'_>>,
+) -> Result<ExternalAgentRun, String> {
+    let args = expanded_args(config, prompt);
+    let mut command = Command::new(&config.command);
+    command.args(args).current_dir(cwd);
+    prepare_external_command(&mut command);
+    if config.allow_mcp {
+        scrub_zest_secret_environment(&mut command, &[]);
+    } else {
+        scrub_secret_environment(&mut command, &[]);
+    }
+
+    let mut process = JsonlProcess::spawn_command(command, &config.command)
+        .await
+        .map_err(|error| error.to_string())?;
+    let timeout = Duration::from_secs(config.timeout_secs.min(MAX_TIMEOUT_SECS));
+    let run_result = tokio::select! {
+        result = read_headless_with_session(&mut process, on_event, timeout) => result,
+        _ = sleep(timeout) => Err(format!("timed out after {} seconds", timeout.as_secs())),
+        _ = wait_cancel(cancel) => Err(EXTERNAL_RUN_CANCELLED.to_string()),
+    };
+
+    let mut run = match run_result {
+        Ok(run) => run,
+        Err(error) => {
+            process.kill().await;
+            let _ = process.wait().await;
+            let stderr = process.stderr_text().await;
+            return Err(with_stderr(error, stderr));
+        }
+    };
+
+    let status = process.wait().await.map_err(|error| error.to_string())?;
+    let stderr = process.stderr_text().await;
+    if !status.success() {
+        let detail = if stderr.is_empty() {
+            format!("process exited with {status}")
+        } else {
+            format!("process exited with {status}: {}", clip(&stderr))
+        };
+        return Err(detail);
+    }
+    if !stderr.is_empty() {
+        run.events.push(ExternalAgentEvent::Error(clip(&stderr)));
+    }
+    Ok(run)
+}
+
+async fn read_headless_with_session(
+    process: &mut JsonlProcess,
+    mut on_event: Option<&mut ExternalEventSink<'_>>,
+    timeout: Duration,
+) -> Result<ExternalAgentRun, String> {
+    let started = Instant::now();
+    let mut run = ExternalAgentRun::default();
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(format!("timed out after {} seconds", timeout.as_secs()));
+        }
+        let line = process
+            .next_line(remaining, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(line) = line else {
+            break;
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(value) => {
+                let event_start = run.events.len();
+                absorb_headless_value(&value, &mut run);
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    for event in run.events[event_start..].iter().cloned() {
+                        on_event(event);
+                    }
+                }
+            }
+            Err(_) => {
+                run.malformed_lines += 1;
+                let text = line.to_string();
+                run.events.push(ExternalAgentEvent::Text(text.clone()));
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    on_event(ExternalAgentEvent::Text(text));
+                }
+            }
+        }
+    }
+    run.events.push(ExternalAgentEvent::Done);
+    Ok(run)
+}
+
+fn with_stderr(error: String, stderr: String) -> String {
+    if stderr.is_empty() {
+        error
+    } else {
+        format!("{error}: {}", clip(&stderr))
+    }
 }
 
 fn validate_config(config: &ExternalAgentConfig) -> Result<(), String> {

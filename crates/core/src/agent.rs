@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use crate::anthropic::types::{tool_result, tool_uses, Message, Usage};
 use crate::cancel::{wait_cancel, CancelToken};
 use crate::error::{HarnessError, Result};
-use crate::provider::{Provider, StreamEvent, TurnRequest};
+use crate::provider::{
+    Provider, ProviderInteractionHost, ProviderSessionRef, StreamEvent, TurnRequest,
+};
 use crate::thread::new_id;
 use crate::tools::approval::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyApprover, PolicyOutcome,
@@ -56,6 +58,10 @@ pub struct Agent {
     pub effort: String,
     pub system: Option<String>,
     pub messages: Vec<Message>,
+    /// Provider-native continuation state. The desktop copies this to the
+    /// durable thread only after a successful terminal turn.
+    pub provider_session: Option<ProviderSessionRef>,
+    pub provider_interaction: Option<Arc<dyn ProviderInteractionHost>>,
     /// Last completed turn's usage (input fills the context window estimate).
     pub last_usage: Option<Usage>,
     /// Tool-use ids whose results must be redacted when persisting wire history.
@@ -77,6 +83,8 @@ impl Agent {
             effort: "high".to_string(),
             system: None,
             messages: Vec::new(),
+            provider_session: None,
+            provider_interaction: None,
             last_usage: None,
             sensitive_tool_ids: Vec::new(),
         }
@@ -96,6 +104,27 @@ impl Agent {
     pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
         self.messages = messages;
         self
+    }
+
+    pub fn with_provider_session(mut self, session: Option<ProviderSessionRef>) -> Self {
+        self.provider_session = session;
+        self
+    }
+
+    pub fn with_provider_interaction(
+        mut self,
+        interaction: Arc<dyn ProviderInteractionHost>,
+    ) -> Self {
+        self.provider_interaction = Some(interaction);
+        self
+    }
+
+    pub fn provider_session(&self) -> Option<ProviderSessionRef> {
+        self.provider_session.clone()
+    }
+
+    pub fn clear_provider_session(&mut self) {
+        self.provider_session = None;
     }
 
     /// Hook for desktop (or a CLI prompt) to allow/deny gated tools.
@@ -124,6 +153,7 @@ impl Agent {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.sensitive_tool_ids.clear();
+        self.provider_session = None;
     }
 
     /// Which provider this agent spends against. Keyed on by the usage ledger.
@@ -186,10 +216,19 @@ impl Agent {
             max_tokens: 4_096,
             effort: None,
             thinking: false,
+            provider_session: self.provider_session.clone(),
+            interaction: self.provider_interaction.clone(),
             cancel: None,
         };
         let mut sink = |_event: StreamEvent<'_>| {};
-        let completion = self.provider.stream_turn(&request, &mut sink).await?;
+        let completion = match self.provider.stream_turn(&request, &mut sink).await {
+            Ok(completion) => completion,
+            Err(error) => {
+                self.provider_session = None;
+                return Err(error);
+            }
+        };
+        self.provider_session = None;
         if let Some(ledger) = &self.ledger {
             if let Ok(mut ledger) = ledger.lock() {
                 ledger.record(
@@ -230,6 +269,7 @@ impl Agent {
             })]),
         ];
         self.sensitive_tool_ids.clear();
+        self.provider_session = None;
         // The compaction request measured the old history, not the compacted
         // conversation. Do not let that maintenance request masquerade as the
         // next turn's context usage in the footer.
@@ -303,6 +343,8 @@ impl Agent {
                 max_tokens: self.max_tokens,
                 effort: self.effort_for_model(),
                 thinking: true,
+                provider_session: self.provider_session.clone(),
+                interaction: self.provider_interaction.clone(),
                 cancel: cancel.cloned(),
             };
 
@@ -310,9 +352,12 @@ impl Agent {
                 Ok(c) => c,
                 Err(e) => {
                     // Do not commit staged history — keep prior wire messages intact.
+                    self.provider_session = None;
                     return Err(e);
                 }
             };
+
+            self.provider_session = completion.provider_session.clone();
 
             // Say so when the endpoint served something other than what was
             // asked for. Only on disagreement: a notice on every turn would be
@@ -1036,6 +1081,7 @@ mod tests {
                 usage_available: true,
                 limits: None,
                 served_model: None,
+                provider_session: None,
             })
         }
     }
@@ -1086,6 +1132,7 @@ mod tests {
                 usage_available: true,
                 limits: None,
                 served_model: None,
+                provider_session: None,
             })
         }
     }
@@ -1249,6 +1296,7 @@ mod tests {
                     usage_available: true,
                     limits: None,
                     served_model: None,
+                    provider_session: None,
                 });
             }
             let content = self
@@ -1265,6 +1313,7 @@ mod tests {
                 usage_available: true,
                 limits: None,
                 served_model: None,
+                provider_session: None,
             })
         }
     }
@@ -1309,6 +1358,7 @@ mod tests {
                     usage_available: true,
                     limits: None,
                     served_model: None,
+                    provider_session: None,
                 })
             } else {
                 Ok(Completion {
@@ -1318,6 +1368,7 @@ mod tests {
                     usage_available: true,
                     limits: None,
                     served_model: None,
+                    provider_session: None,
                 })
             }
         }

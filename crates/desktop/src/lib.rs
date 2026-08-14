@@ -31,18 +31,21 @@ use tokio::sync::oneshot;
 use ts_rs::TS;
 use zest_core::{
     can_start_login, compose_system_with_docs, derive_profile_stats, descriptor_for_picker_id,
-    descriptor_from_config, detect_all, detect_claude_code, display_path, ensure_gateway_running,
-    env_context, load_custom_system, load_project_docs, new_id, probe, save_custom_system,
-    start_claude_code_login as core_start_claude_code_login, start_login as core_start_login,
+    descriptor_from_config, detect_all, detect_claude_code, detect_codex_cli, display_path,
+    ensure_gateway_running, env_context, load_custom_system, load_project_docs, new_id, probe,
+    save_custom_system, start_claude_code_login as core_start_claude_code_login,
+    start_codex_cli_login as core_start_codex_cli_login, start_login as core_start_login,
     truncate_chars, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalRequest, Approver,
     AuthStatus, ChatFacts, ChatPersistence, Config, ExternalAgentMode, ExternalWorkspace,
     GatewayLease, GatewayState, HarnessError, Ledger, LoginProcess, PersistPriority,
-    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState, ProviderConfig,
-    ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot, PullRequestLink, QuestionRequest,
-    Questioner, RatesStatus, RecoverableRun, RuntimeBuilder, SkillSet, SkillSummary, StoredMessage,
-    StreamEvent, Thread, ThreadCheckpoint, ThreadGitContext, ThreadLoadError, ThreadStore,
-    ThreadSummary, ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
-    DEFAULT_SYSTEM, THREAD_FORMAT_VERSION,
+    PersistSnapshot, PersistWorker, Prices, ProfileStats, ProjectSessionState,
+    ProviderCommandRequest, ProviderConfig, ProviderFileChangeRequest, ProviderInteractionHost,
+    ProviderQuestionRequest, ProviderQuotaSnapshot, ProviderRegistry, ProviderSlot,
+    PullRequestLink, QuestionRequest, Questioner, RatesStatus, RecoverableRun, RuntimeBuilder,
+    SkillSet, SkillSummary, StoredMessage, StreamEvent, Thread, ThreadCheckpoint,
+    ThreadCheckpointKind, ThreadGitContext, ThreadLoadError, ThreadStore, ThreadSummary,
+    ToolMetadata, ToolRisk, UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS, DEFAULT_SYSTEM,
+    THREAD_FORMAT_VERSION,
 };
 
 use attachments::{
@@ -268,6 +271,48 @@ impl Questioner for HubQuestioner {
     }
 }
 
+struct DesktopProviderInteraction {
+    approval_hub: Arc<ApprovalHub>,
+    question_hub: Arc<QuestionHub>,
+}
+
+#[async_trait]
+impl ProviderInteractionHost for DesktopProviderInteraction {
+    async fn prepare_command_approval(&self, approval_id: &str) {
+        self.approval_hub.prepare(approval_id);
+    }
+
+    async fn approve_command(&self, request: ProviderCommandRequest) -> bool {
+        matches!(
+            self.approval_hub.wait(&request.approval_id).await,
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+        )
+    }
+
+    async fn prepare_file_change_approval(&self, approval_id: &str) {
+        self.approval_hub.prepare(approval_id);
+    }
+
+    async fn approve_file_change(&self, request: ProviderFileChangeRequest) -> bool {
+        matches!(
+            self.approval_hub.wait(&request.approval_id).await,
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+        )
+    }
+
+    async fn prepare_question(&self, question_id: &str) {
+        self.question_hub.prepare(question_id);
+    }
+
+    async fn answer_question(&self, request: ProviderQuestionRequest) -> Option<Vec<String>> {
+        self.question_hub
+            .wait(&request.id)
+            .await
+            .ok()
+            .map(|answer| vec![answer])
+    }
+}
+
 /// The desktop opens in Auto: writes apply, allowlisted commands run, anything
 /// else asks. Core's own default is Manual — see `ApprovalMode` — because a
 /// library with no wired-up gate must not be permissive. Choosing the product
@@ -460,6 +505,13 @@ struct ThreadCheckpointView {
     label: String,
     message_count: usize,
     agent_message_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    anchor_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    preview: Option<String>,
+    kind: String,
 }
 
 impl From<ThreadCheckpoint> for ThreadCheckpointView {
@@ -470,6 +522,14 @@ impl From<ThreadCheckpoint> for ThreadCheckpointView {
             label: checkpoint.label,
             message_count: checkpoint.message_count,
             agent_message_count: checkpoint.agent_message_count,
+            anchor_message_id: checkpoint.anchor_message_id,
+            preview: checkpoint.preview,
+            kind: match checkpoint.kind {
+                ThreadCheckpointKind::Turn => "turn",
+                ThreadCheckpointKind::Compaction => "compaction",
+                ThreadCheckpointKind::Manual => "manual",
+            }
+            .into(),
         }
     }
 }
@@ -564,10 +624,10 @@ struct ExternalAgentCheckView {
 
 fn provider_view_from_slot(slot: &ProviderSlot, config: &Config) -> ProviderView {
     let configured_provider = config.providers.get(slot.id);
-    let auth_status = if matches!(configured_provider, Some(ProviderConfig::ClaudeCode { .. })) {
-        detect_claude_code()
-    } else {
-        slot.status.clone()
+    let auth_status = match configured_provider {
+        Some(ProviderConfig::ClaudeCode { .. }) => detect_claude_code(),
+        Some(ProviderConfig::CodexCli { .. }) => detect_codex_cli(),
+        _ => slot.status.clone(),
     };
     let (status_kind, status_label, detail) = match &auth_status {
         AuthStatus::Ready { account } => (
@@ -728,6 +788,7 @@ fn provider_method(config: &ProviderConfig) -> &'static str {
             }
         }
         ProviderConfig::ClaudeCode { .. } => "Claude Code subscription",
+        ProviderConfig::CodexCli { .. } => "Codex CLI subscription",
         ProviderConfig::Gateway { .. } => "Gateway",
         ProviderConfig::OpenaiCompatible {
             credential,
@@ -884,6 +945,79 @@ struct ReadingDiffView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "WorkspaceFileChange.ts", rename_all = "camelCase")
+)]
+struct WorkspaceFileChangeView {
+    path: String,
+    status: String,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    additions: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    deletions: u64,
+    binary: bool,
+    sensitive: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "WorkspaceChange.ts", rename_all = "camelCase")
+)]
+struct WorkspaceChangeView {
+    change_id: String,
+    repository: String,
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    base_commit: Option<String>,
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    base_branch: Option<String>,
+    #[cfg_attr(feature = "export-bindings", ts(optional))]
+    branch: Option<String>,
+    changed_files: Vec<WorkspaceFileChangeView>,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    additions: u64,
+    #[cfg_attr(feature = "export-bindings", ts(type = "number"))]
+    deletions: u64,
+    diff: String,
+    truncated: bool,
+    unavailable: bool,
+}
+
+impl From<zest_core::WorkspaceChangeSet> for WorkspaceChangeView {
+    fn from(change: zest_core::WorkspaceChangeSet) -> Self {
+        Self {
+            change_id: change.change_id,
+            repository: change.repository,
+            base_commit: change.base_commit,
+            base_branch: change.base_branch,
+            branch: change.branch,
+            changed_files: change
+                .changed_files
+                .into_iter()
+                .map(|file| WorkspaceFileChangeView {
+                    path: file.path,
+                    status: file.status,
+                    additions: file.additions,
+                    deletions: file.deletions,
+                    binary: file.binary,
+                    sensitive: file.sensitive,
+                })
+                .collect(),
+            additions: change.additions,
+            deletions: change.deletions,
+            diff: change.diff,
+            truncated: change.truncated,
+            unavailable: change.unavailable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
 #[cfg_attr(
@@ -999,6 +1133,15 @@ enum ChatEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "export-bindings", ts(optional))]
         placeholder: Option<String>,
+    },
+    /// Emitted before every terminal event when the effective workspace patch
+    /// changed during the turn. It is intentionally not applied to the
+    /// transcript projection.
+    WorkspaceChanged {
+        session_id: String,
+        thread_id: String,
+        turn_id: String,
+        change: WorkspaceChangeView,
     },
     Done {
         session_id: String,
@@ -1179,6 +1322,7 @@ fn append_configured_direct_provider_views(rows: &mut Vec<ProviderView>, config:
                 entry,
                 ProviderConfig::Anthropic { .. }
                     | ProviderConfig::ClaudeCode { .. }
+                    | ProviderConfig::CodexCli { .. }
                     | ProviderConfig::OpenaiCompatible { .. }
             )
         {
@@ -2119,6 +2263,7 @@ fn local_gateway_url(config: &Config, id: &str) -> Option<String> {
         ProviderConfig::Gateway { base_url, .. } => Some(base_url.clone()),
         ProviderConfig::Anthropic { .. }
         | ProviderConfig::ClaudeCode { .. }
+        | ProviderConfig::CodexCli { .. }
         | ProviderConfig::OpenaiCompatible { .. } => None,
     }
 }
@@ -2152,8 +2297,14 @@ fn start_login(state: State<'_, AppState>, id: String) -> Result<LoginStarted, S
         *active = None;
     }
 
+    let native_codex = matches!(
+        load_workspace_config(&state).providers.get(&id),
+        Some(ProviderConfig::CodexCli { .. })
+    );
     let process = if id == "claude" {
         core_start_claude_code_login()?
+    } else if native_codex {
+        core_start_codex_cli_login()?
     } else {
         core_start_login(&id)?
     };
@@ -2985,6 +3136,7 @@ fn apply_event_to_thread(thread: &mut Thread, event: &ChatEvent) {
             diff,
         ),
         ChatEvent::QuestionNeeded { .. } => {}
+        ChatEvent::WorkspaceChanged { .. } => {}
         ChatEvent::Done { message_id, .. } => thread.apply_done(message_id),
         ChatEvent::Error {
             message_id,
@@ -3162,6 +3314,11 @@ async fn start_session_inner(
     let runtime_warnings = runtime.warnings.clone();
     let mut agent = runtime.agent;
     agent.messages = thread.agent_messages.clone();
+    agent.provider_session = thread.provider_session.clone();
+    agent.provider_interaction = Some(Arc::new(DesktopProviderInteraction {
+        approval_hub: approval_hub.clone(),
+        question_hub: question_hub.clone(),
+    }));
 
     // A legacy thread is claimed only after the target provider has built a
     // usable runtime. Git context is persisted at the same point so a failed
@@ -4311,9 +4468,10 @@ fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
         .sessions
         .with_session_mut(|session| -> Result<SessionInfo, String> {
             let store = open_store(&session.root)?;
-            let fork = store
+            let mut fork = store
                 .fork(&session.thread, None)
                 .map_err(|e| e.to_string())?;
+            fork.provider_session = None;
             session.agent.clear_messages();
             session.agent.messages = fork.agent_messages.clone();
             session.agent.last_usage = None;
@@ -4324,6 +4482,40 @@ fn fork_thread(state: State<'_, AppState>) -> Result<SessionInfo, String> {
             Ok(session_info_from(
                 session,
                 Some("A new conversation was created from this one.".into()),
+            ))
+        })
+        .map_err(map_session_err)
+        .and_then(|r| r)
+}
+
+/// Fork from a saved checkpoint without changing the original conversation.
+/// Provider-native cursors are intentionally discarded so the new chat is
+/// rehydrated from its canonical checkpoint transcript.
+#[tauri::command]
+fn fork_thread_from_checkpoint(
+    state: State<'_, AppState>,
+    checkpoint_id: String,
+) -> Result<SessionInfo, String> {
+    state.sessions.require_idle().map_err(map_session_err)?;
+
+    state
+        .sessions
+        .with_session_mut(|session| -> Result<SessionInfo, String> {
+            let store = open_store(&session.root)?;
+            let mut fork = store
+                .fork_from_checkpoint(&session.thread, checkpoint_id.trim(), None)
+                .map_err(|e| e.to_string())?;
+            fork.provider_session = None;
+            session.agent.clear_messages();
+            session.agent.messages = fork.agent_messages.clone();
+            session.agent.last_usage = None;
+            session.thread_id = fork.id.clone();
+            session.thread = fork;
+            session.recovery = None;
+            persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
+            Ok(session_info_from(
+                session,
+                Some("A new conversation was forked from this checkpoint.".into()),
             ))
         })
         .map_err(map_session_err)
@@ -4341,17 +4533,18 @@ fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<Se
         .sessions
         .with_session_mut(|session| -> Result<SessionInfo, String> {
             let store = open_store(&session.root)?;
-            let checkpoints = session.thread.checkpoints.clone();
             let mut restored = store
-                .load_checkpoint(&session.thread_id, checkpoint_id.trim())
+                .rewind_to_checkpoint(&session.thread, checkpoint_id.trim())
                 .map_err(|e| e.to_string())?;
-            restored.checkpoints = checkpoints;
+            restored.provider_session = None;
             restored
                 .assert_provider(&session.provider_id)
                 .map_err(|e| e.to_string())?;
             session.agent.clear_messages();
             session.agent.messages = restored.agent_messages.clone();
             session.agent.last_usage = None;
+            session.agent.clear_provider_session();
+            restored.provider_session = None;
             session.thread = restored;
             session.thread_id = session.thread.id.clone();
             session.recovery = None;
@@ -4364,6 +4557,30 @@ fn rewind_thread(state: State<'_, AppState>, checkpoint_id: String) -> Result<Se
         })
         .map_err(map_session_err)
         .and_then(|r| r)
+}
+
+/// Read the cumulative branch/worktree patch for the active chat. This is
+/// local-only; the raw patch is never submitted to a provider by this command.
+#[tauri::command]
+async fn workspace_changes(state: State<'_, AppState>) -> Result<WorkspaceChangeView, String> {
+    let snapshot = state
+        .sessions
+        .session_info_snapshot(|session| (session.root.clone(), session.thread.git_context.clone()))
+        .map_err(map_session_err)?
+        .ok_or_else(|| desktop_err("no_session", "no active chat"))?;
+    let (root, context) = snapshot;
+    let changes = zest_core::workspace_changes::inspect(
+        root,
+        context
+            .as_ref()
+            .and_then(|context| context.start_commit.as_deref()),
+        context
+            .as_ref()
+            .and_then(|context| context.base_branch.as_deref()),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(changes.into())
 }
 
 /// Remove a user message and its later branch so the UI can submit an edited
@@ -4391,6 +4608,8 @@ fn edit_message(state: State<'_, AppState>, message_id: String) -> Result<Sessio
             session.agent.clear_messages();
             session.agent.messages = restored.agent_messages.clone();
             session.agent.last_usage = None;
+            session.agent.clear_provider_session();
+            restored.provider_session = None;
             session.thread = restored;
             session.recovery = None;
             persist_provider_thread(&session.root, &session.provider_id, &session.thread_id)?;
@@ -4419,7 +4638,13 @@ async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView,
         let _ = state.sessions.finish_turn(&turn, session);
         return Err("there is not enough conversation to compact yet".into());
     }
-    if let Err(error) = store.create_checkpoint(&mut session.thread, "Before compaction") {
+    if let Err(error) = store.create_checkpoint_with_metadata(
+        &mut session.thread,
+        "Before compaction",
+        None,
+        Some("Context compaction".into()),
+        ThreadCheckpointKind::Compaction,
+    ) {
         let _ = state.sessions.finish_turn(&turn, session);
         return Err(error.to_string());
     }
@@ -4427,6 +4652,7 @@ async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView,
     let result = session.agent.compact_context().await;
     let output = match result {
         Ok(_) => {
+            session.thread.provider_session = None;
             session
                 .thread
                 .set_agent_messages(session.agent.messages_for_persist());
@@ -4437,6 +4663,9 @@ async fn compact_context(state: State<'_, AppState>) -> Result<ContextUsageView,
             estimate_context(&session.agent, session.thread.checkpoints.len())
         }
         Err(error) => {
+            session.agent.clear_provider_session();
+            session.thread.provider_session = None;
+            let _ = store.save(&session.thread);
             let _ = state.sessions.finish_turn(&turn, session);
             return Err(error.to_string());
         }
@@ -6117,6 +6346,7 @@ pub fn run() {
             load_thread,
             new_thread,
             fork_thread,
+            fork_thread_from_checkpoint,
             rewind_thread,
             edit_message,
             compact_context,
@@ -6145,6 +6375,7 @@ pub fn run() {
             prepare_pasted_image,
             git_branch,
             git_context,
+            workspace_changes,
             verify_workspace,
             context_usage,
             get_user_profile,
@@ -6288,6 +6519,8 @@ mod export_bindings {
         ExternalAgentCheckView::export_all().expect("export ExternalAgentCheckView bindings");
         ModelCapability::export_all().expect("export ModelCapability bindings");
         WorkspaceReview::export_all().expect("export WorkspaceReview bindings");
+        WorkspaceFileChangeView::export_all().expect("export WorkspaceFileChange bindings");
+        WorkspaceChangeView::export_all().expect("export WorkspaceChange bindings");
         PullRequestView::export_all().expect("export PullRequestView bindings");
         GitContextView::export_all().expect("export GitContext bindings");
         ThreadCheckpointView::export_all().expect("export ThreadCheckpoint bindings");

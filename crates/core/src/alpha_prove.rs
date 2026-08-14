@@ -106,6 +106,7 @@ impl Provider for ScriptedProvider {
                 usage_available: true,
                 limits: None,
                 served_model: None,
+                provider_session: None,
             });
         }
 
@@ -121,6 +122,7 @@ impl Provider for ScriptedProvider {
             usage_available: true,
             limits: None,
             served_model: None,
+            provider_session: None,
         })
     }
 }

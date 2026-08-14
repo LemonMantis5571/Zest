@@ -385,6 +385,7 @@ impl OpenAiAccumulator {
             usage_available: self.usage_available,
             limits,
             served_model: self.served_model,
+            provider_session: None,
         }
     }
 }

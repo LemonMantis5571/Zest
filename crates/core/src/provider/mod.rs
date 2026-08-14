@@ -12,12 +12,15 @@
 
 pub mod anthropic;
 pub mod claude_code;
+pub mod codex_app_server;
 pub mod openai_compatible;
 pub mod registry;
+pub mod session;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::anthropic::types::{Message, ToolDef, Usage, DEFAULT_MODEL};
 use crate::auth::AuthStatus;
@@ -45,6 +48,11 @@ pub fn descriptor_from_config(provider_id: &str, config: &ProviderConfig) -> Pro
                 models: catalogue_without_efforts(&default_model, models),
             }
         }
+        ProviderConfig::CodexCli { model, models, .. } => ProviderDescriptor {
+            id: provider_id.to_string(),
+            default_model: model.clone(),
+            models: catalogue_for_provider(provider_id, model, models, &[]),
+        },
         ProviderConfig::Gateway {
             model,
             models,
@@ -265,9 +273,70 @@ pub struct TurnRequest {
     pub max_tokens: u32,
     pub effort: Option<String>,
     pub thinking: bool,
+    /// Provider-owned continuation cursor. Only providers that explicitly
+    /// support a durable session may persist one; it never contains auth.
+    pub provider_session: Option<ProviderSessionRef>,
+    /// Host for provider-originated approvals/questions. A missing host means
+    /// the provider must fail closed for interactive requests.
+    pub interaction: Option<Arc<dyn ProviderInteractionHost>>,
     /// When set, the provider races the HTTP/SSE work against this token and
     /// aborts the body on cancel (drop).
     pub cancel: Option<crate::cancel::CancelToken>,
+}
+
+/// Non-secret provider session reference persisted with a thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderSessionRef {
+    CodexAppServer { thread_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCommandRequest {
+    pub approval_id: String,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFileChangeRequest {
+    pub approval_id: String,
+    pub path: Option<String>,
+    pub diff: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderQuestionRequest {
+    pub id: String,
+    pub prompt: String,
+    pub choices: Vec<String>,
+    pub multiple: bool,
+}
+
+/// Narrow interaction seam shared by native CLI providers and the desktop.
+/// Implementations must return `false`/`None` when the request cannot be
+/// represented safely; providers must never guess an approval.
+#[async_trait]
+pub trait ProviderInteractionHost: Send + Sync {
+    async fn prepare_command_approval(&self, _approval_id: &str) {}
+
+    async fn approve_command(&self, _request: ProviderCommandRequest) -> bool {
+        false
+    }
+
+    async fn prepare_file_change_approval(&self, _approval_id: &str) {}
+
+    async fn approve_file_change(&self, _request: ProviderFileChangeRequest) -> bool {
+        false
+    }
+
+    async fn prepare_question(&self, _question_id: &str) {}
+
+    async fn answer_question(&self, _request: ProviderQuestionRequest) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// Whether a provider can continue a durable stream after the process that
@@ -469,6 +538,9 @@ pub struct Completion {
     /// gateway is free to route a request anywhere. `None` means the endpoint
     /// did not say, which is not the same as agreeing.
     pub served_model: Option<String>,
+    /// Updated provider-owned session reference. Persist only after the
+    /// surrounding turn reaches a successful terminal state.
+    pub provider_session: Option<ProviderSessionRef>,
 }
 
 /// Send the smallest possible real turn, to find out whether this provider can
@@ -492,6 +564,8 @@ pub async fn probe(provider: &dyn Provider, model: &str) -> Result<()> {
         // Thinking would ignore max_tokens: 1 and make the cheapest possible
         // probe an expensive one.
         thinking: false,
+        provider_session: None,
+        interaction: None,
         cancel: None,
     };
     let mut sink = |_: StreamEvent<'_>| {};

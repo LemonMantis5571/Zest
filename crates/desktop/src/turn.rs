@@ -56,25 +56,41 @@ pub(crate) async fn run_with_sink<S: EventSink>(
     turn.approval_hub.begin_turn(&turn.turn_id);
     turn.question_hub.begin_turn(&turn.turn_id);
 
-    // Every non-empty turn gets a rewind point before the UI projection changes.
-    // The first empty draft does not need a snapshot and should not create
-    // visible history by itself.
-    if !session.thread.messages.is_empty() || !session.agent.messages.is_empty() {
-        let store = match open_store(&session.root) {
-            Ok(store) => store,
-            Err(error) => {
-                turn.approval_hub.clear();
-                turn.question_hub.clear();
-                let _ = state.sessions.finish_turn(&turn, session);
-                return Err(error);
-            }
-        };
-        if let Err(error) = store.create_checkpoint(&mut session.thread, "Before turn") {
+    // Capture the effective patch before the transcript or provider can touch
+    // the workspace. A dirty workspace on load is deliberately harmless: only
+    // a different terminal identity will produce WorkspaceChanged.
+    let baseline_changes = workspace_changes_for(&session).await;
+    let user_message_id = new_id("user");
+    let checkpoint_preview = checkpoint_preview(&display_text);
+
+    // Every submitted turn gets a durable checkpoint. The first one is the
+    // conversation-start anchor; later ones point at the exact user message
+    // that is about to be appended.
+    let store = match open_store(&session.root) {
+        Ok(store) => store,
+        Err(error) => {
             turn.approval_hub.clear();
             turn.question_hub.clear();
             let _ = state.sessions.finish_turn(&turn, session);
-            return Err(error.to_string());
+            return Err(error);
         }
+    };
+    let label = if session.thread.messages.is_empty() {
+        "Conversation start"
+    } else {
+        "Before turn"
+    };
+    if let Err(error) = store.create_checkpoint_with_metadata(
+        &mut session.thread,
+        label,
+        Some(user_message_id.clone()),
+        Some(checkpoint_preview),
+        zest_core::ThreadCheckpointKind::Turn,
+    ) {
+        turn.approval_hub.clear();
+        turn.question_hub.clear();
+        let _ = state.sessions.finish_turn(&turn, session);
+        return Err(error.to_string());
     }
 
     // Plan mode and the `plan` skill are one feature, not two things that share
@@ -127,7 +143,6 @@ pub(crate) async fn run_with_sink<S: EventSink>(
     let session_id = turn.session_id.clone();
     let thread_id = turn.thread_id.clone();
     let turn_id = turn.turn_id.clone();
-    let user_message_id = new_id("user");
     let assistant_message_id = new_id("assistant");
     let run_persisted = match persistence.runs.create_or_resume_for_turn(
         &turn_id,
@@ -522,6 +537,7 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             session
                 .thread
                 .set_agent_messages(session.agent.messages_for_persist());
+            session.thread.provider_session = session.agent.provider_session();
             ChatEvent::Done {
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
@@ -536,6 +552,8 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             session
                 .thread
                 .set_agent_messages(session.agent.messages_for_persist());
+            session.agent.clear_provider_session();
+            session.thread.provider_session = None;
             ChatEvent::Cancelled {
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
@@ -548,6 +566,8 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             session
                 .thread
                 .set_agent_messages(session.agent.messages_for_persist());
+            session.agent.clear_provider_session();
+            session.thread.provider_session = None;
             ChatEvent::Error {
                 session_id: session_id.clone(),
                 thread_id: thread_id.clone(),
@@ -562,6 +582,14 @@ pub(crate) async fn run_with_sink<S: EventSink>(
             }
         }
     };
+    if let Some(change) = changed_workspace(&baseline_changes, &session).await {
+        sink.emit(&ChatEvent::WorkspaceChanged {
+            session_id: session_id.clone(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            change: change.into(),
+        });
+    }
     apply_event_to_thread(&mut session.thread, &final_event);
     let history_save_failed = if worker
         .save_and_wait(
@@ -628,6 +656,31 @@ pub(crate) async fn run_with_sink<S: EventSink>(
     // Error/cancel already emitted as chat-events; keep invoke Ok to avoid
     // double toasts on the frontend catch path.
     Ok(())
+}
+
+async fn workspace_changes_for(session: &Session) -> Option<zest_core::WorkspaceChangeSet> {
+    let context = session.thread.git_context.as_ref();
+    zest_core::workspace_changes::inspect(
+        &session.root,
+        context.and_then(|context| context.start_commit.as_deref()),
+        context.and_then(|context| context.base_branch.as_deref()),
+    )
+    .await
+    .ok()
+}
+
+async fn changed_workspace(
+    baseline: &Option<zest_core::WorkspaceChangeSet>,
+    session: &Session,
+) -> Option<zest_core::WorkspaceChangeSet> {
+    let latest = workspace_changes_for(session).await?;
+    let baseline = baseline.as_ref()?;
+    (baseline.change_id != latest.change_id).then_some(latest)
+}
+
+fn checkpoint_preview(text: &str) -> String {
+    let preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    preview.chars().take(180).collect()
 }
 
 #[cfg(test)]

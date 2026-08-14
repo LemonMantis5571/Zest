@@ -25,6 +25,7 @@ import type {
   SessionInfo,
   SpacesSnapshot,
   ThreadSummary,
+  WorkspaceChange,
 } from "./types";
 
 const FIXTURE_MODELS = CODEX_MODELS.map((m) => ({
@@ -879,7 +880,34 @@ export function createFixtureBackend(): DesktopBackend {
       };
       return { ...session };
     },
-    async rewindThread() {
+    async forkThreadFromCheckpoint(checkpointId: string) {
+      const checkpointIndex = session.checkpoints.findIndex(
+        (item) => item.id === checkpointId
+      );
+      const checkpoint =
+        checkpointIndex >= 0 ? session.checkpoints[checkpointIndex] : undefined;
+      if (!checkpoint) throw new Error("fixture: checkpoint not found");
+      fixturePinned = false;
+      session = {
+        ...session,
+        threadId: `fixture-${crypto.randomUUID()}`,
+        checkpoints: session.checkpoints.slice(0, checkpointIndex + 1),
+        messages: session.messages.slice(0, checkpoint.messageCount),
+      };
+      return { ...session };
+    },
+    async rewindThread(checkpointId: string) {
+      const checkpointIndex = session.checkpoints.findIndex(
+        (item) => item.id === checkpointId
+      );
+      const checkpoint =
+        checkpointIndex >= 0 ? session.checkpoints[checkpointIndex] : undefined;
+      if (!checkpoint) throw new Error("fixture: checkpoint not found");
+      session = {
+        ...session,
+        checkpoints: session.checkpoints.slice(0, checkpointIndex + 1),
+        messages: session.messages.slice(0, checkpoint.messageCount),
+      };
       return { ...session };
     },
     async editMessage(messageId: string) {
@@ -1134,6 +1162,21 @@ export function createFixtureBackend(): DesktopBackend {
         deletions: 3,
         changedFiles: 1,
         statsSource: "branch",
+      };
+    },
+    async workspaceChanges(): Promise<WorkspaceChange> {
+      return {
+        changeId: "fixture-clean",
+        repository: "git",
+        baseCommit: undefined,
+        baseBranch: "master",
+        branch: "master",
+        changedFiles: [],
+        additions: 0,
+        deletions: 0,
+        diff: "",
+        truncated: false,
+        unavailable: false,
       };
     },
     async verifyWorkspace() {
