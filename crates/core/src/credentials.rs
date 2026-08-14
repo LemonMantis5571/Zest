@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const SERVICE: &str = "zest";
 type CachedCredential = Result<Option<String>, String>;
 type CredentialCache = HashMap<String, CachedCredential>;
@@ -26,18 +27,24 @@ fn invalidate(account: &str) {
 }
 
 pub fn get(account: &str) -> Result<Option<String>, String> {
-    if let Some(cached) = cache().lock().unwrap().get(account) {
+    // Held across `fetch`, not just the cache read/write: two concurrent
+    // callers for the same not-yet-cached account (e.g. the quota widget and
+    // the provider list both querying on startup) would otherwise each run
+    // their own `fetch` — on Windows/Linux that's each its own credential-
+    // manager prompt for the same item. Serializing means the second caller
+    // waits and gets the first caller's cached result instead of prompting
+    // again.
+    let mut guard = cache().lock().unwrap();
+    if let Some(cached) = guard.get(account) {
         return cached.clone();
     }
 
     let result = fetch(account);
-    cache()
-        .lock()
-        .unwrap()
-        .insert(account.to_string(), result.clone());
+    guard.insert(account.to_string(), result.clone());
     result
 }
 
+#[cfg(not(target_os = "macos"))]
 fn fetch(account: &str) -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())?;
     match entry.get_password() {
@@ -48,6 +55,7 @@ fn fetch(account: &str) -> Result<Option<String>, String> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn set(account: &str, secret: &str) -> Result<(), String> {
     if secret.trim().is_empty() {
         return Err("API key cannot be empty".into());
@@ -76,6 +84,7 @@ pub fn set(account: &str, secret: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn delete(account: &str) -> Result<(), String> {
     invalidate(account);
     let entry = keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())?;
@@ -83,6 +92,73 @@ pub fn delete(account: &str) -> Result<(), String> {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(err) => Err(err.to_string()),
     }
+}
+
+// macOS: an unsigned/ad-hoc dev build has no stable code-signing identity, so
+// the Keychain cannot durably trust it — every single lookup re-prompts for
+// the login password (sometimes twice: unlock, then re-confirm access) with
+// no way to make "Always Allow" stick between runs. Rather than fight that,
+// keys are kept in a plain JSON file under the app's data directory, owner-only
+// (0600) on disk. That is a deliberate, user-accepted trade of "OS-managed
+// secret store" for "no interactive prompt on every launch" — not a fix for
+// the signing problem, a different storage backend entirely.
+#[cfg(target_os = "macos")]
+fn store_path() -> Result<std::path::PathBuf, String> {
+    dirs::data_dir()
+        .map(|dir| dir.join("zest").join("credentials.json"))
+        .ok_or_else(|| "could not locate the app data directory".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn read_store() -> Result<HashMap<String, String>, String> {
+    let path = store_path()?;
+    match std::fs::read(&path) {
+        Ok(raw) => serde_json::from_slice(&raw)
+            .map_err(|e| format!("credentials file is corrupt: {e}")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn write_store(store: &HashMap<String, String>) -> Result<(), String> {
+    let path = store_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?;
+    std::fs::write(&path, raw).map_err(|e| e.to_string())?;
+
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn fetch(account: &str) -> Result<Option<String>, String> {
+    Ok(read_store()?.get(account).cloned())
+}
+
+#[cfg(target_os = "macos")]
+pub fn set(account: &str, secret: &str) -> Result<(), String> {
+    if secret.trim().is_empty() {
+        return Err("API key cannot be empty".into());
+    }
+    invalidate(account);
+    let mut store = read_store()?;
+    store.insert(account.to_string(), secret.to_string());
+    write_store(&store)
+}
+
+#[cfg(target_os = "macos")]
+pub fn delete(account: &str) -> Result<(), String> {
+    invalidate(account);
+    let mut store = read_store()?;
+    if store.remove(account).is_some() {
+        write_store(&store)?;
+    }
+    Ok(())
 }
 
 pub fn present(account: &str) -> Result<bool, String> {
