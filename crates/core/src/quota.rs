@@ -386,10 +386,12 @@ async fn fetch_codex_rate_limits(provider_id: &str) -> ProviderQuotaView {
     {
         Ok(child) => child,
         Err(error) => {
-            return unavailable_view(
-                provider_id,
-                format!("Codex app-server is not available: {error}"),
-            )
+            let detail = if command == "codex" && error.kind() == std::io::ErrorKind::NotFound {
+                codex_cli_unavailable_detail()
+            } else {
+                format!("Codex app-server is not available: {error}")
+            };
+            return unavailable_view(provider_id, detail);
         }
     };
 
@@ -399,6 +401,15 @@ async fn fetch_codex_rate_limits(provider_id: &str) -> ProviderQuotaView {
     match result {
         Ok(result) => codex_quota_view(provider_id, result),
         Err(detail) => unavailable_view(provider_id, detail),
+    }
+}
+
+fn codex_cli_unavailable_detail() -> String {
+    if cfg!(target_os = "macos") {
+        "Codex CLI is not installed. The ChatGPT macOS app does not expose codex app-server to Zest; install the Codex CLI to read account limits.".into()
+    } else {
+        "Codex CLI is not installed or is not available in PATH. Install it to read account limits."
+            .into()
     }
 }
 
