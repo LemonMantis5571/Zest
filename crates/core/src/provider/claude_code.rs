@@ -219,6 +219,7 @@ impl Provider for ClaudeCodeProvider {
             usage_available,
             limits: run.limits(),
             served_model: None,
+            provider_session: None,
         })
     }
 }
@@ -230,10 +231,10 @@ fn bounded_u32(value: Option<u64>) -> u32 {
 fn parent_prompt(req: &TurnRequest) -> String {
     let mut prompt = String::new();
     prompt.push_str(
-        "You are the parent coding agent running inside Zest through the authenticated \
-         Claude Code runtime. Work directly in the active project. Do not delegate this \
-         request to another agent. Use the project instructions and the Claude Code tools \
-         available in this session.\n\n",
+        "You are the parent coding agent running inside Zest through an authenticated \
+         provider runtime. Work directly in the active project. Do not delegate this \
+         request to another agent. Use the project instructions and the tools available \
+         in this provider session.\n\n",
     );
 
     if let Some(system) = req
@@ -370,6 +371,8 @@ mod tests {
             max_tokens: 100,
             effort: None,
             thinking: false,
+            provider_session: None,
+            interaction: None,
             cancel: None,
         };
 

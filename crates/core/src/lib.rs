@@ -34,6 +34,7 @@ pub mod thread;
 pub mod tools;
 pub mod transcripts;
 pub mod usage;
+pub mod workspace_changes;
 
 pub use agent::Agent;
 pub use anthropic::client::AnthropicClient;
@@ -43,9 +44,9 @@ pub use anthropic::types::{
 };
 pub use auth::{
     adopt_bundled_gateway, can_start_login, cliproxy_exe, cliproxy_install, detect_all,
-    detect_claude_code, gateway_auth_present, login_command, resolve_claude_code_login,
-    resolve_login, start_claude_code_login, start_login, AuthStatus, LoginProcess, LoginSpawn,
-    ProviderSlot,
+    detect_claude_code, detect_codex_cli, gateway_auth_present, login_command,
+    resolve_claude_code_login, resolve_codex_cli_login, resolve_login, start_claude_code_login,
+    start_codex_cli_login, start_login, AuthStatus, LoginProcess, LoginSpawn, ProviderSlot,
 };
 pub use cancel::{wait_cancel, CancelToken};
 pub use chat_persistence::{
@@ -60,7 +61,7 @@ pub use commands::{
 pub use config::{
     ensure_user_config, load_env, user_config_path, ClaudeCodePermissionMode, Config,
     ExternalAgentConfig, ExternalAgentMode, ExternalWorkspace, ProviderConfig, Target,
-    DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_USER_CONFIG,
+    DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_USER_CONFIG,
 };
 pub use delegation::{
     apply_diff_checked, capture_workspace_snapshot, dependency_blocker, diff_paths,
@@ -91,12 +92,15 @@ pub use prompt::{
 };
 pub use provider::anthropic::AnthropicProvider;
 pub use provider::claude_code::ClaudeCodeProvider;
+pub use provider::codex_app_server::CodexAppServerProvider;
 pub use provider::registry::{ProviderRegistry, Skipped};
 pub use provider::{
     catalogue_for_provider, catalogue_from_lists, catalogue_without_efforts,
     context_window_for_model, descriptor_for_picker_id, descriptor_from_config, normalize_effort,
-    probe, Completion, ModelSpec, Provider, ProviderDescriptor, RateLimitSnapshot, ResumeHandle,
-    ResumeSupport, StreamEvent, TurnRequest, CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
+    probe, Completion, ModelSpec, Provider, ProviderCommandRequest, ProviderDescriptor,
+    ProviderFileChangeRequest, ProviderInteractionHost, ProviderQuestionRequest,
+    ProviderSessionRef, RateLimitSnapshot, ResumeHandle, ResumeSupport, StreamEvent, TurnRequest,
+    CODEX_KNOWN_MODELS, STANDARD_EFFORTS,
 };
 pub use quota::{
     fetch_provider_quotas, ProviderBalanceView, ProviderQuotaKind, ProviderQuotaSnapshot,
@@ -112,9 +116,9 @@ pub use skills::{
     MAX_SKILL_BYTES,
 };
 pub use thread::{
-    new_id, PullRequestLink, StoredMessage, Thread, ThreadCheckpoint, ThreadGitContext, ThreadId,
-    ThreadLoad, ThreadLoadError, ThreadStore, ThreadSummary, ToolPart as ThreadToolPart,
-    THREAD_FORMAT_VERSION, WIRE_FORMAT_ANTHROPIC_MESSAGES,
+    new_id, PullRequestLink, StoredMessage, Thread, ThreadCheckpoint, ThreadCheckpointKind,
+    ThreadGitContext, ThreadId, ThreadLoad, ThreadLoadError, ThreadStore, ThreadSummary,
+    ToolPart as ThreadToolPart, THREAD_FORMAT_VERSION, WIRE_FORMAT_ANTHROPIC_MESSAGES,
 };
 pub use tools::approval::{
     AllowApprover, ApprovalDecision, ApprovalMode, ApprovalPolicy, ApprovalPreview,
@@ -122,8 +126,8 @@ pub use tools::approval::{
 };
 pub use tools::browser::{BrowserAction, BrowserAdapter, BrowserLocator, BrowserRequest};
 pub use tools::external_agent::{
-    prepare_external_command, run_delegation_reviewer, run_delegation_worker, ExternalAgent,
-    ExternalAgentResult, EXTERNAL_AGENT_TOOL,
+    prepare_external_command, resolve_program, run_delegation_reviewer, run_delegation_worker,
+    ExternalAgent, ExternalAgentResult, EXTERNAL_AGENT_TOOL,
 };
 pub use tools::glob_files::GlobFiles;
 pub use tools::grep::Grep;
@@ -147,3 +151,4 @@ pub use usage::{
     ProviderDayPoint, ProviderUsage, ProviderUsageView, RangeTotals, RatesStatus, TokenCounts,
     UsageReport, UsageSnapshot, DAILY_RETENTION_DAYS,
 };
+pub use workspace_changes::{FileChangeSummary, WorkspaceChangeSet};

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use super::anthropic::AnthropicProvider;
 use super::claude_code::ClaudeCodeProvider;
+use super::codex_app_server::CodexAppServerProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
 use super::{catalogue_for_provider, catalogue_without_efforts, Provider};
 use crate::config::{Config, ProviderConfig};
@@ -133,6 +134,26 @@ fn build(
                 *timeout_secs,
             )
             .map_err(|error| format!("could not build Claude Code provider: {error}"))?;
+            Ok(Arc::new(provider))
+        }
+
+        ProviderConfig::CodexCli {
+            command,
+            model,
+            models,
+            allow_mcp,
+            timeout_secs,
+        } => {
+            let provider = CodexAppServerProvider::new(
+                id.to_string(),
+                root,
+                command.clone(),
+                model.clone(),
+                models.clone(),
+                *allow_mcp,
+                *timeout_secs,
+            )
+            .map_err(|error| format!("could not build Codex CLI provider: {error}"))?;
             Ok(Arc::new(provider))
         }
 

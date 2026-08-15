@@ -20,6 +20,7 @@ use crate::error::{HarnessError, Result};
 
 pub const CONFIG_FILE: &str = "zest.toml";
 pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "sonnet";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 
 /// Safe starter config embedded in every build. It contains provider metadata,
 /// never a credential, so a fresh install can bootstrap user-global config
@@ -168,6 +169,26 @@ pub enum ProviderConfig {
         #[serde(default = "default_external_timeout_secs")]
         timeout_secs: u64,
     },
+    /// Native Codex app-server. Authentication and account state belong to
+    /// the Codex CLI (`codex login`), never to zest.toml.
+    CodexCli {
+        /// Executable name or absolute path. Spawned directly, without a shell.
+        #[serde(default = "default_codex_command")]
+        command: String,
+        /// Default model sent to `thread/start` / `turn/start`.
+        #[serde(default = "default_codex_model")]
+        model: String,
+        /// Optional allow-list for the model picker. Empty uses the built-in
+        /// conservative catalogue until a successful `model/list` is cached.
+        #[serde(default)]
+        models: Vec<String>,
+        /// MCP is opt-in because the app-server can execute server-owned work
+        /// outside Zest's approval boundary.
+        #[serde(default)]
+        allow_mcp: bool,
+        #[serde(default = "default_external_timeout_secs")]
+        timeout_secs: u64,
+    },
     Gateway {
         /// Origin only — `http://127.0.0.1:8317`, not `.../v1/messages`.
         base_url: String,
@@ -303,16 +324,17 @@ impl ProviderConfig {
     pub fn gateway_base_url(&self) -> Option<&str> {
         match self {
             Self::Gateway { base_url, .. } => Some(base_url),
-            Self::Anthropic { .. } | Self::ClaudeCode { .. } | Self::OpenaiCompatible { .. } => {
-                None
-            }
+            Self::Anthropic { .. }
+            | Self::ClaudeCode { .. }
+            | Self::CodexCli { .. }
+            | Self::OpenaiCompatible { .. } => None,
         }
     }
 
     pub fn key_env(&self) -> Option<&str> {
         match self {
             ProviderConfig::Anthropic { api_key_env, .. } => Some(api_key_env),
-            ProviderConfig::ClaudeCode { .. } => None,
+            ProviderConfig::ClaudeCode { .. } | ProviderConfig::CodexCli { .. } => None,
             ProviderConfig::Gateway { api_key_env, .. } => api_key_env.as_deref(),
             ProviderConfig::OpenaiCompatible { api_key_env, .. } => api_key_env.as_deref(),
         }
@@ -325,6 +347,14 @@ fn default_anthropic_key_env() -> String {
 
 fn default_claude_code_command() -> String {
     "claude".to_string()
+}
+
+fn default_codex_command() -> String {
+    "codex".to_string()
+}
+
+fn default_codex_model() -> String {
+    DEFAULT_CODEX_MODEL.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -576,20 +606,36 @@ impl Config {
             }
         }
         for (id, provider) in &self.providers {
-            if let ProviderConfig::ClaudeCode {
-                command,
-                timeout_secs,
-                ..
-            } = provider
-            {
-                if command.trim().is_empty() {
-                    issues.push(format!("Claude Code provider {id} has an empty command"));
+            match provider {
+                ProviderConfig::ClaudeCode {
+                    command,
+                    timeout_secs,
+                    ..
+                } => {
+                    if command.trim().is_empty() {
+                        issues.push(format!("Claude Code provider {id} has an empty command"));
+                    }
+                    if *timeout_secs == 0 || *timeout_secs > 3_600 {
+                        issues.push(format!(
+                            "Claude Code provider {id} timeout_secs must be between 1 and 3600"
+                        ));
+                    }
                 }
-                if *timeout_secs == 0 || *timeout_secs > 3_600 {
-                    issues.push(format!(
-                        "Claude Code provider {id} timeout_secs must be between 1 and 3600"
-                    ));
+                ProviderConfig::CodexCli {
+                    command,
+                    timeout_secs,
+                    ..
+                } => {
+                    if command.trim().is_empty() {
+                        issues.push(format!("Codex CLI provider {id} has an empty command"));
+                    }
+                    if *timeout_secs == 0 || *timeout_secs > 3_600 {
+                        issues.push(format!(
+                            "Codex CLI provider {id} timeout_secs must be between 1 and 3600"
+                        ));
+                    }
                 }
+                _ => {}
             }
         }
         issues
@@ -950,6 +996,44 @@ efforts = ["low", "high", "max"]
             }
             other => panic!("expected gateway, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn native_codex_defaults_are_explicit_and_gateway_remains_distinct() {
+        let config = Config::parse(
+            r#"
+[providers.codex]
+kind = "codex_cli"
+"#,
+        )
+        .expect("valid");
+
+        match &config.providers["codex"] {
+            ProviderConfig::CodexCli {
+                command,
+                model,
+                allow_mcp,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(command, "codex");
+                assert_eq!(model, DEFAULT_CODEX_MODEL);
+                assert!(!allow_mcp);
+                assert_eq!(*timeout_secs, 900);
+            }
+            other => panic!("expected native Codex provider, got {other:?}"),
+        }
+
+        let gateway = Config::parse(
+            r#"
+[providers.codex]
+kind = "gateway"
+base_url = "http://127.0.0.1:8317"
+model = "gpt-5.6-sol"
+"#,
+        )
+        .expect("valid gateway");
+        assert!(gateway.providers["codex"].is_gateway());
     }
 
     #[test]

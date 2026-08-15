@@ -80,6 +80,7 @@ import type {
   ToolPart,
   UserAttachmentChip,
   UserProfile,
+  WorkspaceChange,
   WorkspaceReview,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -345,6 +346,7 @@ export default function App() {
   const [attachments, setAttachments] = useState<PreparedAttachment[]>([]);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [workspaceReview, setWorkspaceReview] = useState<WorkspaceReview | null>(null);
+  const [workspaceChange, setWorkspaceChange] = useState<WorkspaceChange | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [profile, setProfile] = useState<UserProfile>({
@@ -377,6 +379,8 @@ export default function App() {
   const activeAssistantId = useRef<string | null>(null);
   /** Live UI projections for chats that continue while another one is open. */
   const chatStatesRef = useRef(new Map<string, ChatUiState>());
+  /** Keep terminal change snapshots available while another chat is visible. */
+  const workspaceChangesRef = useRef(new Map<string, WorkspaceChange>());
   const messagesRef = useRef<ChatMessage[]>([]);
   messagesRef.current = messages;
   const sendingRef = useRef(sending);
@@ -714,6 +718,12 @@ export default function App() {
   const applyChatEventNow = useCallback((event: ChatEvent) => {
     const threadKey = event.thread_id;
     const isCurrent = threadIdRef.current === threadKey;
+    if (isCurrent && event.kind === "workspace_changed") {
+      setWorkspaceChange(event.change);
+    }
+    if (event.kind === "workspace_changed") {
+      workspaceChangesRef.current.set(threadKey, event.change);
+    }
     const previous =
       chatStatesRef.current.get(threadKey) ??
       initialChatUiState([], { threadId: threadKey });
@@ -958,6 +968,7 @@ export default function App() {
     setSession(info);
     setWorkspacePath(info.isFreeChat ? null : info.root);
     setWorkspaceReview(null);
+    setWorkspaceChange(workspaceChangesRef.current.get(info.threadId) ?? null);
     setGitContext(null);
     void backend.gitBranch().then(setBranch).catch(() => setBranch(null));
     void backend.gitContext().then(setGitContext).catch(() => setGitContext(null));
@@ -1386,6 +1397,17 @@ export default function App() {
       });
     }
   }
+
+  const refreshWorkspaceChanges = useCallback(async () => {
+    const requestedThreadId = threadIdRef.current;
+    const next = await backend.workspaceChanges();
+    if (!requestedThreadId || threadIdRef.current !== requestedThreadId) {
+      throw new Error("workspace changed while reading Git changes");
+    }
+    workspaceChangesRef.current.set(requestedThreadId, next);
+    setWorkspaceChange(next);
+    return next;
+  }, []);
 
   async function onVerifyWorkspace() {
     try {
@@ -2209,6 +2231,8 @@ export default function App() {
             onForkThread={onForkThread}
             onRewindThread={onRewindThread}
             workspaceReview={workspaceReview}
+            workspaceChange={workspaceChange}
+            onRefreshWorkspaceChanges={refreshWorkspaceChanges}
             onVerifyWorkspace={onVerifyWorkspace}
             compacting={compacting}
             onDeleteThread={onDeleteThread}

@@ -71,6 +71,8 @@ pub async fn abridge(
         max_tokens: 4_000,
         effort: Some(effort.to_string()),
         thinking: false,
+        provider_session: None,
+        interaction: None,
         cancel: None,
     };
     let mut sink = |_event: StreamEvent<'_>| {};

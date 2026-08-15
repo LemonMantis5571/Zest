@@ -6,7 +6,7 @@ import { NowPlayingCard } from "@/components/NowPlayingCard";
 import { TopbarPanel } from "@/components/TopbarPanel";
 import { getBackend } from "@/lib/backend";
 import { createNowPlayingCoordinator } from "@/lib/nowPlayingCoordinator";
-import { nowPlayingPluginState } from "@/lib/nowPlayingPluginState";
+import { nowPlayingButtonVisible, nowPlayingPluginState } from "@/lib/nowPlayingPluginState";
 import type { NowPlayingView, PluginView } from "@/lib/types";
 
 type MediaAction = "previous" | "toggle" | "next";
@@ -192,6 +192,10 @@ export function NowPlayingButton() {
   const artist = hasTrack ? value?.artist?.trim() : undefined;
   const trackLabel = artist ? `${title} · ${artist}` : title;
   const pluginState = nowPlayingPluginState(checked, plugin);
+  // Every hook above still runs, so the poll that watches for a later install
+  // keeps going and the button appears on its own once the add-on is there.
+  if (!nowPlayingButtonVisible(pluginState)) return null;
+
   const pluginMessage =
     pluginState === "checking"
       ? "Checking for the add-on…"

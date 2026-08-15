@@ -22,7 +22,9 @@ use crate::fsutil;
 /// Current on-disk thread document version.
 ///
 /// v2 adds optional typed [`ToolPart::metadata`] (delegation provenance).
-pub const THREAD_FORMAT_VERSION: u32 = 2;
+/// v3 adds anchored checkpoint metadata while keeping every new field
+/// optional so older thread files remain readable.
+pub const THREAD_FORMAT_VERSION: u32 = 3;
 
 /// Anthropic Messages API content blocks (today's only wire format).
 pub const WIRE_FORMAT_ANTHROPIC_MESSAGES: &str = "anthropic_messages";
@@ -252,6 +254,18 @@ pub struct ThreadSummary {
     pub git_context: Option<ThreadGitContext>,
 }
 
+/// The reason a checkpoint exists. The UI uses this to give turn checkpoints
+/// and maintenance checkpoints slightly different affordances without
+/// inspecting labels written by a caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadCheckpointKind {
+    #[default]
+    Turn,
+    Compaction,
+    Manual,
+}
+
 /// A durable conversation checkpoint. The full snapshot lives beside the
 /// thread file; this small record is what the UI needs to render the rewind
 /// affordance without loading every snapshot up front.
@@ -263,6 +277,15 @@ pub struct ThreadCheckpoint {
     pub label: String,
     pub message_count: usize,
     pub agent_message_count: usize,
+    /// The user message that follows this checkpoint when it was created.
+    /// Older checkpoints fall back to `message_count` as their anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_message_id: Option<String>,
+    /// Short local preview used by the checkpoint rail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(default)]
+    pub kind: ThreadCheckpointKind,
 }
 
 /// Typed outcomes when loading a thread from disk.
@@ -315,6 +338,10 @@ pub struct Thread {
     /// Provider that owns this conversation (parent is always pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// Provider-owned continuation cursor. It is non-secret and optional so
+    /// gateway, Anthropic, Claude Code, and legacy v2 threads remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session: Option<crate::provider::ProviderSessionRef>,
     /// Git checkout and optional pull request associated with this chat.
     ///
     /// This is deliberately optional so older `.zest` thread files remain
@@ -359,6 +386,7 @@ impl Thread {
             title: None,
             pinned: false,
             provider_id: None,
+            provider_session: None,
             git_context: None,
             wire_format: default_wire_format(),
             messages: Vec::new(),
@@ -420,7 +448,9 @@ impl Thread {
             let from = self.version;
             self.version = THREAD_FORMAT_VERSION;
             if from == 0 {
-                notes.push("migrated thread to format v2".to_string());
+                notes.push(format!(
+                    "migrated thread to format v{THREAD_FORMAT_VERSION}"
+                ));
             } else {
                 notes.push(format!(
                     "migrated thread from format v{from} to v{THREAD_FORMAT_VERSION}"
@@ -953,6 +983,20 @@ impl ThreadStore {
         thread: &mut Thread,
         label: impl Into<String>,
     ) -> Result<ThreadCheckpoint> {
+        self.create_checkpoint_with_metadata(thread, label, None, None, ThreadCheckpointKind::Turn)
+    }
+
+    /// Save a checkpoint with the metadata needed by the desktop's timeline
+    /// rail. The snapshot stays the same durable source of truth; the extra
+    /// fields are only a cheap navigation index.
+    pub fn create_checkpoint_with_metadata(
+        &self,
+        thread: &mut Thread,
+        label: impl Into<String>,
+        anchor_message_id: Option<String>,
+        preview: Option<String>,
+        kind: ThreadCheckpointKind,
+    ) -> Result<ThreadCheckpoint> {
         let thread_id = ThreadId::parse(&thread.id)
             .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
         let checkpoint_id =
@@ -977,6 +1021,9 @@ impl ThreadStore {
             label: label.into(),
             message_count: thread.messages.len(),
             agent_message_count: thread.agent_messages.len(),
+            anchor_message_id,
+            preview,
+            kind,
         };
         thread.checkpoints.push(checkpoint.clone());
 
@@ -1052,6 +1099,40 @@ impl ThreadStore {
         Ok(snapshot)
     }
 
+    /// Restore a checkpoint and remove all newer checkpoint snapshots.
+    ///
+    /// Conversation rewind is intentionally independent of the workspace: the
+    /// thread store only changes transcript snapshots and provider cursors.
+    pub fn rewind_to_checkpoint(&self, thread: &Thread, checkpoint_id: &str) -> Result<Thread> {
+        let checkpoint_index = thread
+            .checkpoints
+            .iter()
+            .position(|checkpoint| checkpoint.id == checkpoint_id)
+            .ok_or_else(|| {
+                HarnessError::Other("checkpoint is not part of this conversation".into())
+            })?;
+        let mut restored = self.load_checkpoint(&thread.id, checkpoint_id)?;
+        let discarded_checkpoints = thread
+            .checkpoints
+            .iter()
+            .skip(checkpoint_index + 1)
+            .map(|checkpoint| checkpoint.id.clone())
+            .collect::<Vec<_>>();
+        restored.checkpoints = thread.checkpoints[..=checkpoint_index].to_vec();
+        restored.provider_session = None;
+        restored.touch();
+        self.save(&restored)?;
+
+        let thread_id = ThreadId::parse(&thread.id)
+            .map_err(|e| HarnessError::Other(format!("invalid thread id: {e}")))?;
+        let checkpoint_dir = self.checkpoints_dir_for(&thread_id);
+        for checkpoint_id in discarded_checkpoints {
+            let _ = fs::remove_file(checkpoint_dir.join(format!("{checkpoint_id}.json")));
+        }
+
+        Ok(restored)
+    }
+
     /// Restore the conversation to the point immediately before a user
     /// message so the caller can submit an edited replacement as a new turn.
     ///
@@ -1114,6 +1195,7 @@ impl ThreadStore {
             .filter(|checkpoint| checkpoint.message_count < message_index)
             .cloned()
             .collect();
+        restored.provider_session = None;
         restored.touch();
         self.save(&restored)?;
 
@@ -1128,6 +1210,27 @@ impl ThreadStore {
     /// Fork the current thread without sharing future checkpoint state.
     pub fn fork(&self, source: &Thread, title: Option<&str>) -> Result<Thread> {
         self.fork_with_provider(source, source.provider_id.as_deref(), title)
+    }
+
+    /// Fork the saved conversation state represented by one checkpoint. The
+    /// original thread and its checkpoint files remain untouched.
+    pub fn fork_from_checkpoint(
+        &self,
+        source: &Thread,
+        checkpoint_id: &str,
+        title: Option<&str>,
+    ) -> Result<Thread> {
+        if !source
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == checkpoint_id)
+        {
+            return Err(HarnessError::Other(
+                "checkpoint is not part of this conversation".into(),
+            ));
+        }
+        let snapshot = self.load_checkpoint(&source.id, checkpoint_id)?;
+        self.fork(&snapshot, title)
     }
 
     /// Fork a thread while assigning the copy to another provider.
@@ -1156,6 +1259,9 @@ impl ThreadStore {
         fork.updated_at = fork.created_at;
         fork.pinned = false;
         fork.provider_id = provider_id.map(str::to_string);
+        // A fork owns a new provider conversation. Its canonical transcript is
+        // copied, but a native continuation cursor must never be shared.
+        fork.provider_session = None;
         fork.title = title
             .map(str::to_string)
             .or_else(|| source.title.as_ref().map(|t| format!("Copy of {t}")));
@@ -1499,6 +1605,35 @@ mod characterization {
         let loaded = store.load(&thread.id).unwrap();
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.agent_messages.len(), 1);
+    }
+
+    #[test]
+    fn rewinding_prunes_later_snapshots_and_clears_native_session_state() {
+        let root = scratch("rewind-checkpoint");
+        let store = ThreadStore::open(&root).unwrap();
+        let mut thread = store.create_for_provider("codex").unwrap();
+        thread.apply_user("u1", "first question");
+        thread.apply_assistant_start("a1", None);
+        thread.apply_text_delta("a1", "first answer");
+        thread.apply_done("a1");
+        store.save(&thread).unwrap();
+
+        let first = store.create_checkpoint(&mut thread, "first").unwrap();
+        thread.apply_user("u2", "second question");
+        store.save(&thread).unwrap();
+        let second = store.create_checkpoint(&mut thread, "second").unwrap();
+        thread.provider_session = Some(crate::provider::ProviderSessionRef::CodexAppServer {
+            thread_id: "native-thread".into(),
+        });
+        store.save(&thread).unwrap();
+
+        let restored = store.rewind_to_checkpoint(&thread, &first.id).unwrap();
+
+        assert!(restored.provider_session.is_none());
+        assert_eq!(restored.checkpoints.len(), 1);
+        assert_eq!(restored.checkpoints[0].id, first.id);
+        assert!(store.load_checkpoint(&thread.id, &second.id).is_err());
+        assert!(store.load_checkpoint(&thread.id, &first.id).is_ok());
     }
 
     #[test]
