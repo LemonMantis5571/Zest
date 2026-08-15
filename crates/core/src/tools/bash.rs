@@ -1216,9 +1216,13 @@ mod tests {
         let dir = scratch("kill");
         let tool = Bash::new(&dir).unwrap();
         // Waits, then leaves a marker. If the kill works the marker never
-        // appears, because the process is gone before it gets that far.
+        // appears, because the process is gone before it gets that far. The
+        // wait must stay comfortably shorter than the assertion delay below,
+        // or a surviving process would simply not have written yet and the
+        // test would pass without proving anything. `ping -n N` takes N-1
+        // seconds, so this settles around six.
         let command = if cfg!(windows) {
-            r#"powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 10; Set-Content -LiteralPath marker.txt -Value done""#
+            r#"(ping -n 7 127.0.0.1 >NUL) & (echo done > marker.txt)"#
         } else {
             "sleep 3; echo done > marker.txt"
         };
