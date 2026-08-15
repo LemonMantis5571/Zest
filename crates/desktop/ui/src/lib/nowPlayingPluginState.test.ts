@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { nowPlayingPluginState } from "./nowPlayingPluginState.ts";
+import { nowPlayingButtonVisible, nowPlayingPluginState } from "./nowPlayingPluginState.ts";
 import type { PluginView } from "./types.ts";
 
 const plugin: PluginView = {
@@ -36,5 +36,31 @@ describe("now playing plugin states", () => {
   it("moves from the missing state to ready after refresh finds the add-on", () => {
     assert.equal(nowPlayingPluginState(true, null), "missing");
     assert.equal(nowPlayingPluginState(true, plugin), "ready");
+  });
+});
+
+describe("now playing button visibility", () => {
+  /** A fresh install has no add-on, so the topbar carries no dead control. */
+  it("stays out of the topbar when the add-on is not installed", () => {
+    assert.equal(nowPlayingButtonVisible(nowPlayingPluginState(true, null)), false);
+  });
+
+  it("stays hidden while discovery is still running, so it never flashes", () => {
+    assert.equal(nowPlayingButtonVisible(nowPlayingPluginState(false, null)), false);
+  });
+
+  it("appears once an install is discovered", () => {
+    assert.equal(nowPlayingButtonVisible(nowPlayingPluginState(true, plugin)), true);
+  });
+
+  it("keeps the button for an installed add-on that is off or broken", () => {
+    assert.equal(
+      nowPlayingButtonVisible(nowPlayingPluginState(true, { ...plugin, enabled: false })),
+      true
+    );
+    assert.equal(
+      nowPlayingButtonVisible(nowPlayingPluginState(true, { ...plugin, available: false })),
+      true
+    );
   });
 });
