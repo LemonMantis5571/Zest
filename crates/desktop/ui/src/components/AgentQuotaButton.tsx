@@ -5,7 +5,9 @@ import { TopbarPanel } from "@/components/TopbarPanel";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
 import { createProviderQuotaLoader } from "@/lib/quotaCache";
+import { gaugeTone, quotaGauges, type QuotaGauge } from "@/lib/quotaGauges";
 import type { ProviderQuotaSnapshot, ProviderRow, UsageSnapshot } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 type Props = {
   providers: ProviderRow[];
@@ -178,6 +180,7 @@ function QuotaRow({
         .join(" · ")
     : "";
   const reset = reported?.requestsReset ?? reported?.tokensReset;
+  const gauges = quotaGauges(quota, headroom);
 
   return (
     <div className="rounded-md border border-border/70 bg-secondary/30 px-2.5 py-2">
@@ -191,6 +194,13 @@ function QuotaRow({
           </span>
         ) : null}
       </div>
+      {gauges.length ? (
+        <div className="mt-1.5 flex flex-col gap-1.5">
+          {gauges.map((gauge) => (
+            <QuotaGaugeBar key={gauge.id} gauge={gauge} />
+          ))}
+        </div>
+      ) : null}
       {balance ? (
         <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
           {balance.balances.length ? (
@@ -210,41 +220,20 @@ function QuotaRow({
           {rateLimit.plan ? (
             <div className="text-foreground/85">Plan: {formatPlan(rateLimit.plan)}</div>
           ) : null}
-          {rateLimit.windows.map((quotaWindow, index) => (
-            <div key={quotaWindow.label + "-" + index}>
-              <span className="text-foreground/85">
-                {quotaWindow.label}: {formatPercentLeft(quotaWindow.usedPercent)} left
-              </span>
-              {quotaWindow.resetsAt != null
-                ? " · resets " + formatResetEpoch(quotaWindow.resetsAt)
-                : ""}
-            </div>
-          ))}
-          {rateLimit.spendLimit ? (
-            <div>
-              <span className="text-foreground/85">
-                Monthly: {formatPercent(rateLimit.spendLimit.remainingPercent)} left
-              </span>
-              {rateLimit.spendLimit.resetsAt != null
-                ? " · resets " + formatResetEpoch(rateLimit.spendLimit.resetsAt)
-                : ""}
-            </div>
-          ) : null}
+          {/* Windows and spend limit are drawn as bars above. */}
           <div>{rateLimit.detail}</div>
         </div>
       ) : reported ? (
         <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
-          {reported.quotaWindow ? (
+          {/* A percentage window is drawn as a bar above; only the status-only
+              form still needs a line of its own. */}
+          {reported.quotaWindow && reported.quotaUsedPercent == null ? (
             <div className="text-foreground/85">
               {formatQuotaWindow(reported.quotaWindow)}
-              {reported.quotaUsedPercent != null
-                ? ": " + formatPercent(reported.quotaUsedPercent) + " used"
-                : reported.quotaStatus
-                  ? ": " + formatQuotaStatus(reported.quotaStatus)
-                  : ""}
+              {reported.quotaStatus ? ": " + formatQuotaStatus(reported.quotaStatus) : ""}
             </div>
           ) : null}
-          {reported.quotaResetAt != null ? (
+          {reported.quotaResetAt != null && reported.quotaUsedPercent == null ? (
             <div>Resets: {formatResetEpoch(reported.quotaResetAt)}</div>
           ) : null}
           {reported.quotaOverageStatus ? (
@@ -276,6 +265,62 @@ function QuotaRow({
   );
 }
 
+const GAUGE_FILL: Record<ReturnType<typeof gaugeTone>, string> = {
+  healthy: "bg-primary",
+  low: "bg-amber-500",
+  critical: "bg-destructive",
+};
+
+const GAUGE_TEXT: Record<ReturnType<typeof gaugeTone>, string> = {
+  healthy: "text-foreground/85",
+  low: "text-amber-500",
+  critical: "text-destructive",
+};
+
+/**
+ * How much of a limit is still available. Width is a plain percentage of the
+ * track, so this renders identically on every platform Zest ships to.
+ */
+function QuotaGaugeBar({ gauge }: { gauge: QuotaGauge }) {
+  const tone = gaugeTone(gauge.remainingPercent);
+  const rounded = Math.round(gauge.remainingPercent);
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-2 text-[10px]">
+        <span className="min-w-0 truncate text-foreground/85" title={gauge.label}>
+          {gauge.label}
+        </span>
+        <span className={cn("shrink-0 font-medium tabular-nums", GAUGE_TEXT[tone])}>
+          {rounded}% left
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label={`${gauge.label} remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={rounded}
+        aria-valuetext={`${rounded}% left`}
+        className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+      >
+        <div
+          className={cn(
+            "h-full rounded-full transition-[width] duration-500 motion-reduce:transition-none",
+            GAUGE_FILL[tone]
+          )}
+          style={{ width: `${gauge.remainingPercent}%` }}
+        />
+      </div>
+      {gauge.resetsAt != null ? (
+        <div className="mt-0.5 text-[10px] text-muted-foreground">
+          Resets {formatResetEpoch(gauge.resetsAt)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function formatAge(secs: number): string {
   if (secs < 60) return `${Math.max(1, secs)}s`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m`;
@@ -302,14 +347,6 @@ function formatReset(value: string): string {
 
 function formatResetEpoch(value: number): string {
   return formatReset(new Date(value * 1000).toISOString());
-}
-
-function formatPercentLeft(usedPercent: number): string {
-  return formatPercent(Math.max(0, 100 - usedPercent));
-}
-
-function formatPercent(value: number): string {
-  return String(Math.max(0, Math.min(100, value)).toFixed(0)) + "%";
 }
 
 function formatPlan(value: string): string {
