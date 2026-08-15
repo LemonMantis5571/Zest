@@ -588,10 +588,10 @@ export function Composer({
               >
                 <GitPullRequestIcon className="size-3 opacity-80" />
                 <span>#{gitContext.pullRequest.number}</span>
-                <span className="text-emerald-600 dark:text-emerald-400">
+                <span className="text-primary">
                   +{gitContext.additions}
                 </span>
-                <span className="text-rose-600 dark:text-rose-400">
+                <span className="text-destructive">
                   −{gitContext.deletions}
                 </span>
               </a>
