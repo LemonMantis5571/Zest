@@ -2,7 +2,7 @@ import { ArrowLeftIcon, ArrowRightIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { cacheMetrics, type CacheMetrics } from "@/lib/cacheMetrics";
+import { cacheMetrics, cacheVerdict, type CacheMetrics } from "@/lib/cacheMetrics";
 import { UserAvatarButton } from "@/components/UserAvatarButton";
 import { getBackend } from "@/lib/backend";
 import { cn } from "@/lib/utils";
@@ -232,8 +232,8 @@ function StatStrip({
     { value: stats ? compact(stats.totalTokens) : "—", label: "Zest tokens" },
     {
       value: cache ? `${cache.hitPercent.toFixed(1)}%` : "—",
-      label: "Cache hit",
-      hint: cache ? `${compact(cache.cachedInputTokens)} cached input` : "No cache data",
+      label: "Prompt from cache",
+      hint: cacheVerdict(cache),
     },
     {
       value: stats?.peakDayTokens ? compact(stats.peakDayTokens) : "—",

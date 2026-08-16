@@ -481,9 +481,11 @@ function DailyChart({
 /**
  * The token strip.
  *
- * Cached and uncached input are separate tiles rather than one "input" figure,
- * because in an agent loop they differ by an order of magnitude in both volume
- * and price, and a combined number hides the single biggest lever on cost.
+ * The prompt is shown as three tiles that add up rather than as one input
+ * figure with a hit rate beside it. In an agent loop the three differ by an
+ * order of magnitude in both volume and price, and — more importantly — a lone
+ * hit rate counts cache writes as failures, so a session busy filling its cache
+ * is indistinguishable from one whose cache never worked.
  */
 function StatStrip({ report }: { report: UsageReport }) {
   const { totals, quality } = report;
@@ -495,13 +497,25 @@ function StatStrip({ report }: { report: UsageReport }) {
     },
     {
       value: compact(totals.cachedInputTokens),
-      label: "Cached input",
-      hint: `${totals.cacheHitPercent.toFixed(1)}% of observed prompt`,
+      label: "Prompt served from cache",
+      hint: `${totals.servedFromCachePercent.toFixed(1)}% of prompt, at a tenth of the price`,
+    },
+    {
+      value: compact(totals.cacheWriteTokens),
+      label: "Prompt written to cache",
+      hint:
+        totals.cacheReuseRatio != null
+          ? `reused ${totals.cacheReuseRatio.toFixed(1)}x before expiring`
+          : // Only providers that bill writes separately report them; the
+            // rest cache the prefix themselves and report reads only.
+            totals.cachedInputTokens > 0
+            ? "provider caches without reporting writes"
+            : "nothing cached yet",
     },
     {
       value: compact(totals.uncachedInputTokens),
-      label: "Uncached input",
-      hint: `${compact(totals.cacheWriteTokens)} cache writes`,
+      label: "Prompt read fresh",
+      hint: `${totals.readFreshPercent.toFixed(1)}% of prompt, at full price`,
     },
     {
       value: compact(totals.outputTokens),
@@ -519,7 +533,7 @@ function StatStrip({ report }: { report: UsageReport }) {
   ];
 
   return (
-    <ul className="m-0 grid list-none grid-cols-2 gap-px overflow-hidden rounded-lg border border-border/70 bg-border/60 p-0 sm:grid-cols-3 lg:grid-cols-5">
+    <ul className="m-0 grid list-none grid-cols-2 gap-px overflow-hidden rounded-lg border border-border/70 bg-border/60 p-0 sm:grid-cols-3 lg:grid-cols-6">
       {items.map((item) => (
         <li key={item.label} className="bg-card/60 px-4 py-3">
           <div className="text-[11px] text-muted-foreground">{item.label}</div>
