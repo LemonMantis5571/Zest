@@ -55,22 +55,45 @@ pub struct ToolDef {
     pub cache_control: Option<Value>,
 }
 
-/// `{"type": "ephemeral"}` — the only cache_control shape in use.
+/// `{"type": "ephemeral"}` — the five-minute breakpoint, for the moving end of
+/// the conversation, which is rewritten every turn anyway.
 pub fn ephemeral_cache_control() -> Value {
     json!({ "type": "ephemeral" })
 }
 
-/// A system prompt as a single cacheable text block.
+/// `{"type": "ephemeral", "ttl": "1h"}` — for the parts of the prompt that are
+/// fixed for a whole session.
+///
+/// The default five minutes is tuned for a request loop, not for a person. A
+/// user who reads a reply for six minutes before typing the next one loses the
+/// tools and system prefix and pays to rebuild it, which is the single largest
+/// avoidable miss in a desktop chat. The hour costs 2x on write instead of
+/// 1.25x and reads back at the same 0.1x, so it pays for itself on the first
+/// re-read and every one after that is free money.
+pub fn long_cache_control() -> Value {
+    json!({ "type": "ephemeral", "ttl": "1h" })
+}
+
+/// A system prompt as cacheable text blocks.
 ///
 /// The API accepts `system` as either a bare string or an array of blocks, and
 /// only the array form can carry `cache_control`. Callers that do not cache keep
 /// sending the string, so nothing changes on providers that would reject it.
-pub fn cached_system_blocks(text: &str) -> Value {
-    json!([{
+///
+/// `volatile` becomes a second, unmarked block after the breakpoint rather than
+/// being folded into the first. Anything appended to the cached text would take
+/// the whole block's key with it every time it changed; anything placed after
+/// the breakpoint cannot.
+pub fn cached_system_blocks(cacheable: &str, volatile: &str) -> Value {
+    let mut blocks = vec![json!({
         "type": "text",
-        "text": text,
-        "cache_control": ephemeral_cache_control(),
-    }])
+        "text": cacheable,
+        "cache_control": long_cache_control(),
+    })];
+    if !volatile.is_empty() {
+        blocks.push(json!({ "type": "text", "text": volatile }));
+    }
+    Value::Array(blocks)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,6 +137,12 @@ pub struct Request {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,
+    /// Only ever `{"type": "none"}`, and only for maintenance turns that need
+    /// the tool list present for the cached prefix but must not call anything.
+    /// Changing it invalidates the message cache but *not* tools or system,
+    /// which is exactly the trade being made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<Thinking>,
     #[serde(skip_serializing_if = "Option::is_none")]

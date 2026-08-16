@@ -16,6 +16,7 @@ use crate::prompt::{
 };
 use crate::provider::normalize_effort;
 use crate::provider::registry::{ProviderRegistry, Skipped};
+use crate::provider::SystemPrompt;
 use crate::skills::SkillSet;
 use crate::tools::approval::{ApprovalPolicy, Approver, DenyApprover};
 use crate::tools::external_agent::ExternalAgent;
@@ -340,9 +341,12 @@ impl RuntimeBuilder {
                 .read()
                 .map_err(|_| HarnessError::Other("skill registry lock poisoned".into()))?;
             let composed = compose_system_with_docs(&base_system, &custom, &project_docs, &guard);
-            // Environment goes last, after everything a cache breakpoint would
-            // cover. The branch name changes; the prefix above it must not.
-            format!("{composed}\n\n{}", env_context(&root))
+            // Environment goes after the cache breakpoint, not merely last in
+            // the string. Concatenating the two put the branch name inside the
+            // cached block, so checking out a branch and reopening the project
+            // threw away the base prompt, project docs, and every skill
+            // description to re-report one line.
+            SystemPrompt::new(composed).with_volatile(env_context(&root))
         };
 
         let mut worker_tools = ToolRegistry::new();
@@ -506,12 +510,7 @@ mod tests {
             .build()
             .unwrap();
         assert!(!headless.agent.tool_names().contains(&"ask_user"));
-        assert!(!headless
-            .agent
-            .system
-            .as_deref()
-            .unwrap_or_default()
-            .contains("# Asking the user"));
+        assert!(!headless.agent.system_text().contains("# Asking the user"));
 
         let interactive = RuntimeBuilder::new(&dir)
             .with_config(config)
@@ -524,10 +523,35 @@ mod tests {
         assert!(interactive.agent.tool_names().contains(&"ask_user"));
         assert!(interactive
             .agent
-            .system
-            .as_deref()
-            .unwrap_or_default()
+            .system_text()
             .contains("# Asking the user"));
+    }
+
+    /// The environment block names the git branch, so it differs between two
+    /// sessions in one project. Keeping it out of the cacheable half is what
+    /// lets the base prompt, project docs, and skills survive a checkout.
+    #[test]
+    fn the_environment_block_is_kept_out_of_the_cacheable_prompt() {
+        let dir = two_provider_dir("system-split");
+        let runtime = RuntimeBuilder::new(&dir)
+            .with_config(Config::find(&dir).unwrap())
+            .with_provider("codex")
+            .enable_external_agents(false)
+            .register_write_tools(false)
+            .register_exec_tools(false)
+            .build()
+            .unwrap();
+
+        let system = runtime.agent.system.as_ref().expect("a composed prompt");
+        assert!(
+            !system.cacheable.contains("# Environment"),
+            "the cached half must not carry the environment: {}",
+            system.cacheable
+        );
+        assert!(system.volatile.contains("# Environment"));
+        // The model still reads both, in the same order as before the split.
+        assert!(system.text().contains("# Environment"));
+        assert!(runtime.agent.system_text().contains("Working directory:"));
     }
 
     #[test]
@@ -544,12 +568,7 @@ mod tests {
             .unwrap();
 
         assert!(runtime.agent.tool_names().contains(&"browser"));
-        assert!(runtime
-            .agent
-            .system
-            .as_deref()
-            .unwrap_or_default()
-            .contains("# Local browser"));
+        assert!(runtime.agent.system_text().contains("# Local browser"));
     }
 
     #[test]
@@ -585,12 +604,7 @@ provider = "codex"
             .unwrap();
         assert!(enabled.agent.tool_names().contains(&"delegate_external"));
         assert!(enabled.agent.tool_names().contains(&"delegate_feature"));
-        assert!(enabled
-            .agent
-            .system
-            .as_deref()
-            .unwrap_or_default()
-            .contains("# External workers"));
+        assert!(enabled.agent.system_text().contains("# External workers"));
 
         let disabled = RuntimeBuilder::new(&dir)
             .with_config(config)
@@ -637,24 +651,12 @@ provider = "claude"
             .unwrap();
 
         assert!(runtime.agent.tool_names().is_empty());
-        assert!(runtime
-            .agent
-            .system
-            .as_deref()
-            .unwrap_or_default()
-            .contains("parent coding agent"));
+        assert!(runtime.agent.system_text().contains("parent coding agent"));
         assert!(!runtime
             .agent
-            .system
-            .as_deref()
-            .unwrap_or_default()
+            .system_text()
             .contains("File tools are scoped"));
-        assert!(!runtime
-            .agent
-            .system
-            .as_deref()
-            .unwrap_or_default()
-            .contains("# External workers"));
+        assert!(!runtime.agent.system_text().contains("# External workers"));
     }
 
     /// Reproduces the reported failure: opening a folder that has no

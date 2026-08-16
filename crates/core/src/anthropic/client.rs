@@ -364,6 +364,7 @@ mod tests {
             system: None,
             messages: vec![Message::user_text("hi")],
             tools: Vec::new(),
+            tool_choice: None,
             thinking: None,
             output_config: None,
         }

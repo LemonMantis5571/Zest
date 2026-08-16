@@ -64,7 +64,12 @@ pub fn estimate_context(agent: &Agent, checkpoint_count: usize) -> ContextUsageV
         .filter(|window| *window > 0)
         .unwrap_or_else(|| context_window_for_model(&agent.model));
 
-    let system_tokens = chars_to_tok(agent.system.as_deref().unwrap_or("").chars().count() as u64);
+    let system_tokens = chars_to_tok(
+        agent
+            .system
+            .as_ref()
+            .map_or(0, |prompt| prompt.char_len() as u64),
+    );
     let conversation_tokens: u64 = agent
         .messages
         .iter()

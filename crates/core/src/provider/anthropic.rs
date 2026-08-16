@@ -12,13 +12,13 @@
 //! `Agent` no longer carries a flag for it.
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::{catalogue_from_lists, Completion, ModelSpec, Provider, StreamEvent, TurnRequest};
 use crate::anthropic::client::AnthropicClient;
 use crate::anthropic::types::{
-    cached_system_blocks, ephemeral_cache_control, Message, OutputConfig, Request, Thinking,
-    DEFAULT_MODEL,
+    cached_system_blocks, ephemeral_cache_control, long_cache_control, Message, OutputConfig,
+    Request, Thinking, ToolDef, DEFAULT_MODEL,
 };
 use crate::auth::AuthStatus;
 use crate::error::Result;
@@ -163,22 +163,16 @@ impl Provider for AnthropicProvider {
     ) -> Result<Completion> {
         let caching = self.supports_prompt_cache();
 
-        let mut tools = req.tools.clone();
-        // One breakpoint on the last tool covers the entire tool list — the
-        // largest fixed prefix any request has.
-        if caching {
-            if let Some(last) = tools.last_mut() {
-                last.cache_control = Some(ephemeral_cache_control());
-            }
-        }
+        let (tools, tool_choice) = tool_plan(req, caching);
 
-        let system = req.system.as_ref().map(|text| {
+        let system = req.system.as_ref().map(|prompt| {
             if caching {
                 // A second breakpoint here extends the cached region to cover
-                // tools + system, which together are stable for a whole session.
-                cached_system_blocks(text)
+                // tools + system, which together are stable for a whole
+                // session. The environment half stays outside it.
+                cached_system_blocks(&prompt.cacheable, &prompt.volatile)
             } else {
-                Value::String(text.clone())
+                Value::String(prompt.text())
             }
         });
 
@@ -194,6 +188,7 @@ impl Provider for AnthropicProvider {
             system,
             messages,
             tools,
+            tool_choice,
             thinking: (self.extensions && req.thinking).then(Thinking::default),
             output_config: match (self.extensions, req.effort.as_ref()) {
                 (true, Some(effort)) => Some(OutputConfig {
@@ -209,34 +204,92 @@ impl Provider for AnthropicProvider {
     }
 }
 
-/// Put a rolling breakpoint near the end of the conversation so the history
-/// that already exists is read from cache instead of reprocessed every turn.
+/// What goes on the wire for `tools`, and whether the model may call any of it.
 ///
-/// It goes on the **second-to-last** message, not the last. The last message is
-/// the one that just changed; a breakpoint there would write a new cache entry
-/// every turn and read none of it back. One message earlier is the newest point
-/// that was also present on the previous request.
-fn mark_conversation_prefix(messages: &mut [Message]) {
-    let Some(index) = messages.len().checked_sub(2) else {
-        return;
+/// A turn that may not call tools still carries the list **when caching**,
+/// purely so its prefix matches a normal turn's and hits the same cache.
+/// Without caching there is no prefix to match, so shipping a tool schema the
+/// model is forbidden to use is pure cost — and leaves a gateway that quietly
+/// drops `tool_choice` free to call one anyway, which for compaction means a
+/// `tool_use` reply where text was required.
+///
+/// `tool_choice` is gated on the list actually being present. `Request.tools`
+/// is skipped when empty, so an ungated choice would constrain a tool list the
+/// body never sent — the exact shape `probe` and the reading-diff pass produce.
+fn tool_plan(req: &TurnRequest, caching: bool) -> (Vec<ToolDef>, Option<Value>) {
+    let mut tools = if req.allow_tool_use || caching {
+        req.tools.clone()
+    } else {
+        Vec::new()
     };
-    let Some(block) = messages[index].content.last_mut() else {
-        return;
-    };
-    // Only object-shaped blocks take cache_control. Thinking blocks carry a
-    // signature that must round-trip byte for byte, so never touch those.
-    let Some(map) = block.as_object_mut() else {
-        return;
-    };
-    if map.get("type").and_then(Value::as_str) == Some("thinking") {
-        return;
+    // One breakpoint on the last tool covers the entire tool list — the largest
+    // fixed prefix any request has, and fixed for the whole session, so it
+    // earns the long TTL.
+    if caching {
+        if let Some(last) = tools.last_mut() {
+            last.cache_control = Some(long_cache_control());
+        }
     }
-    map.insert("cache_control".into(), ephemeral_cache_control());
+    let tool_choice = (!req.allow_tool_use && !tools.is_empty()).then(|| json!({ "type": "none" }));
+    (tools, tool_choice)
+}
+
+/// Put rolling breakpoints near the end of the conversation so the history that
+/// already exists is read from cache instead of reprocessed every turn.
+///
+/// The newest goes on the **second-to-last** message, not the last. The last
+/// message is the one that just changed; a breakpoint there would write a new
+/// cache entry every turn and read none of it back. One message earlier is the
+/// newest point that was also present on the previous request.
+///
+/// A second breakpoint goes on the message before that, using the last of the
+/// four the API allows. A cache lookup only walks a bounded number of content
+/// blocks backwards before giving up, and one round of a tool-calling turn —
+/// a thinking block, N `tool_use`, then N `tool_result` — can exceed that
+/// window on its own when the model fans out. With a single breakpoint the
+/// whole conversation then silently re-reads at full price on exactly the
+/// turns that are most expensive. Two adjacent breakpoints bound the gap to a
+/// single message's worth of blocks, and cost nothing extra: each entry only
+/// stores the delta past the one before it.
+fn mark_conversation_prefix(messages: &mut [Message]) {
+    let Some(newest) = markable_before(messages, messages.len().saturating_sub(1)) else {
+        return;
+    };
+    mark(&mut messages[newest]);
+    if let Some(older) = markable_before(messages, newest) {
+        mark(&mut messages[older]);
+    }
+}
+
+/// Nearest message strictly before `end` whose last content block can carry a
+/// breakpoint, or `None`.
+///
+/// Walks rather than indexing because a message is not always markable, and a
+/// breakpoint that silently fails to land is a full-price turn nobody notices.
+fn markable_before(messages: &[Message], end: usize) -> Option<usize> {
+    messages[..end]
+        .iter()
+        .rposition(|message| message.content.last().is_some_and(markable))
+}
+
+/// Only object-shaped blocks take `cache_control`. Thinking blocks carry a
+/// signature that must round-trip byte for byte, so never touch those.
+fn markable(block: &Value) -> bool {
+    block
+        .as_object()
+        .is_some_and(|map| map.get("type").and_then(Value::as_str) != Some("thinking"))
+}
+
+fn mark(message: &mut Message) {
+    if let Some(map) = message.content.last_mut().and_then(Value::as_object_mut) {
+        map.insert("cache_control".into(), ephemeral_cache_control());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::SystemPrompt;
     use serde_json::json;
 
     fn conversation(n: usize) -> Vec<Message> {
@@ -261,19 +314,25 @@ mod tests {
     }
 
     #[test]
-    fn rolling_breakpoint_lands_on_the_second_to_last_message() {
+    fn rolling_breakpoints_land_on_the_two_messages_before_the_last() {
         // The last message is the one that just changed. A breakpoint there
-        // would write a fresh entry every turn and never read one back.
+        // would write a fresh entry every turn and never read one back. The
+        // pair keeps the gap a lookup has to walk down to one message.
         let mut messages = conversation(5);
         mark_conversation_prefix(&mut messages);
-        assert_eq!(cached_indices(&messages), vec![3]);
+        assert_eq!(cached_indices(&messages), vec![2, 3]);
     }
 
     #[test]
-    fn a_single_message_conversation_gets_no_breakpoint() {
+    fn a_short_conversation_takes_the_breakpoints_it_can() {
+        let mut messages = conversation(2);
+        mark_conversation_prefix(&mut messages);
+        assert_eq!(cached_indices(&messages), vec![0]);
+
         let mut messages = conversation(1);
         mark_conversation_prefix(&mut messages);
         assert!(cached_indices(&messages).is_empty());
+
         let mut empty: Vec<Message> = Vec::new();
         mark_conversation_prefix(&mut empty);
     }
@@ -291,6 +350,37 @@ mod tests {
         mark_conversation_prefix(&mut messages);
         assert!(cached_indices(&messages).is_empty());
         assert_eq!(messages[0].content[0]["signature"], "sig");
+    }
+
+    /// The old placement indexed straight to `len - 2` and gave up if that one
+    /// message happened to end in a thinking block, so the turn silently ran
+    /// with no conversation breakpoint at all.
+    #[test]
+    fn an_unmarkable_message_is_stepped_over_rather_than_skipping_the_turn() {
+        let mut messages = vec![
+            Message::user_text("first"),
+            Message::assistant(vec![json!({ "type": "text", "text": "answer" })]),
+            Message::assistant(vec![
+                json!({ "type": "thinking", "thinking": "hmm", "signature": "sig" }),
+            ]),
+            Message::user_text("latest"),
+        ];
+        mark_conversation_prefix(&mut messages);
+        assert_eq!(cached_indices(&messages), vec![0, 1]);
+        assert_eq!(messages[2].content[0]["signature"], "sig");
+    }
+
+    /// A message with no content blocks has nowhere to put a breakpoint; the
+    /// walk has to keep going rather than treat it as the answer.
+    #[test]
+    fn an_empty_message_is_stepped_over() {
+        let mut messages = vec![
+            Message::user_text("first"),
+            Message::assistant(Vec::new()),
+            Message::user_text("latest"),
+        ];
+        mark_conversation_prefix(&mut messages);
+        assert_eq!(cached_indices(&messages), vec![0]);
     }
 
     #[test]
@@ -317,22 +407,163 @@ mod tests {
             system: Some(Value::String("hello".into())),
             messages: Vec::new(),
             tools: Vec::new(),
+            tool_choice: None,
             thinking: None,
             output_config: None,
         };
         let json = serde_json::to_value(&plain).unwrap();
         assert_eq!(json["system"], json!("hello"));
+        assert!(json.get("tool_choice").is_none());
 
         let cached = Request {
-            system: Some(cached_system_blocks("hello")),
+            system: Some(cached_system_blocks("hello", "")),
             ..plain
         };
         let json = serde_json::to_value(&cached).unwrap();
         assert_eq!(json["system"][0]["text"], json!("hello"));
+        assert_eq!(json["system"].as_array().unwrap().len(), 1);
         assert_eq!(
             json["system"][0]["cache_control"]["type"],
             json!("ephemeral")
         );
+        // The session-stable half of the prompt outlives the default five
+        // minutes, which is shorter than the pause between two human turns.
+        assert_eq!(json["system"][0]["cache_control"]["ttl"], json!("1h"));
+    }
+
+    /// The environment block reports the git branch, so it changes between
+    /// sessions in one project. Folded into the cached text it would take the
+    /// base prompt, project docs, and every skill description down with it.
+    #[test]
+    fn the_environment_block_sits_after_the_breakpoint_not_inside_it() {
+        let json = serde_json::to_value(cached_system_blocks("stable", "# Environment\nbranch x"))
+            .unwrap();
+        let blocks = json.as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["text"], json!("stable"));
+        assert!(blocks[0].get("cache_control").is_some());
+        assert_eq!(blocks[1]["text"], json!("# Environment\nbranch x"));
+        assert!(
+            blocks[1].get("cache_control").is_none(),
+            "a breakpoint here would defeat the split: {json}"
+        );
+
+        // Changing only the volatile half must leave the cached block's bytes
+        // untouched, which is the whole point of the arrangement.
+        let moved = serde_json::to_value(cached_system_blocks("stable", "# Environment\nbranch y"))
+            .unwrap();
+        assert_eq!(moved.as_array().unwrap()[0], blocks[0]);
+    }
+
+    fn turn(tools: Vec<ToolDef>, allow_tool_use: bool) -> TurnRequest {
+        TurnRequest {
+            model: "m".into(),
+            system: None,
+            messages: Vec::new(),
+            tools,
+            allow_tool_use,
+            max_tokens: 16,
+            effort: None,
+            thinking: false,
+            provider_session: None,
+            interaction: None,
+            cancel: None,
+        }
+    }
+
+    fn one_tool() -> Vec<ToolDef> {
+        vec![ToolDef {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: json!({}),
+            cache_control: None,
+        }]
+    }
+
+    /// `Request.tools` is skipped when empty, so an ungated `tool_choice` would
+    /// constrain a list the body never sent. `probe` and the reading-diff pass
+    /// are exactly that shape: no tools, and no tool use either.
+    #[test]
+    fn a_tool_less_request_sends_no_tool_choice() {
+        let (tools, choice) = tool_plan(&turn(Vec::new(), false), true);
+        assert!(tools.is_empty());
+        assert_eq!(
+            choice, None,
+            "a tool_choice with no tools constrains a list that was never sent"
+        );
+
+        // And prove it stays absent from the serialized body, alongside `tools`.
+        let wire = Request {
+            model: "m".into(),
+            max_tokens: 1,
+            stream: true,
+            system: None,
+            messages: Vec::new(),
+            tools,
+            tool_choice: choice,
+            thinking: None,
+            output_config: None,
+        };
+        let json = serde_json::to_value(&wire).unwrap();
+        assert!(json.get("tools").is_none());
+        assert!(json.get("tool_choice").is_none(), "{json}");
+    }
+
+    #[test]
+    fn a_maintenance_turn_keeps_the_tools_but_forbids_calling_them() {
+        // Caching on: the list is what makes this prompt share the session's
+        // cached prefix, so it stays and `none` does the forbidding.
+        let (tools, choice) = tool_plan(&turn(one_tool(), false), true);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(choice, Some(json!({ "type": "none" })));
+        assert_eq!(
+            tools[0].cache_control,
+            Some(long_cache_control()),
+            "the tool list is session-stable, so it takes the long TTL"
+        );
+    }
+
+    /// A gateway writes no breakpoints at all, so there is no prefix for the
+    /// tool list to match — sending a schema the model may not use is pure
+    /// cost, and one the gateway may not honour `none` for.
+    #[test]
+    fn a_maintenance_turn_withholds_tools_from_a_provider_that_cannot_cache() {
+        let (tools, choice) = tool_plan(&turn(one_tool(), false), false);
+        assert!(tools.is_empty());
+        assert_eq!(choice, None);
+    }
+
+    #[test]
+    fn a_normal_turn_keeps_its_tools_and_leaves_the_choice_open() {
+        for caching in [true, false] {
+            let (tools, choice) = tool_plan(&turn(one_tool(), true), caching);
+            assert_eq!(tools.len(), 1, "caching={caching}");
+            assert_eq!(choice, None, "caching={caching}");
+        }
+    }
+
+    #[test]
+    fn char_len_matches_the_rendered_prompt() {
+        let prompt = SystemPrompt::new("stable").with_volatile("# Environment");
+        assert_eq!(prompt.char_len(), prompt.text().chars().count());
+        assert_eq!(
+            SystemPrompt::new("stable").char_len(),
+            "stable".chars().count()
+        );
+        // Multi-byte content must count characters, not bytes, to match
+        // `text().chars().count()`.
+        let wide = SystemPrompt::new("héllo").with_volatile("wörld");
+        assert_eq!(wide.char_len(), wide.text().chars().count());
+        assert_eq!(SystemPrompt::default().char_len(), 0);
+    }
+
+    #[test]
+    fn a_gateway_receives_both_halves_as_one_string() {
+        // No breakpoints there, so the split must not change what the model
+        // reads — only where the boundary falls for a provider that caches.
+        let prompt = SystemPrompt::new("stable").with_volatile("# Environment");
+        assert_eq!(prompt.text(), "stable\n\n# Environment");
+        assert_eq!(SystemPrompt::new("stable").text(), "stable");
     }
 
     #[test]
