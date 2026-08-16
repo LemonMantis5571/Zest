@@ -9,6 +9,7 @@ import {
   markApprovalRunning,
   reduceChatEvent,
   restoreApprovalCard,
+  retireApprovalCard,
   type ChatUiState,
 } from "./chatReducer.ts";
 import type { ChatEvent, ChatMessage } from "./types.ts";
@@ -36,6 +37,25 @@ function reduceAll(events: ChatEvent[], start?: ChatUiState): ChatUiState {
     state = reduceChatEvent(state, event, { newId }).state;
   }
   return state;
+}
+
+function pendingApproval(
+  approvalId: string,
+  toolCallId: string,
+  messageId = "a1"
+): ChatEvent {
+  return {
+    kind: "approval_needed",
+    ...ID,
+    message_id: messageId,
+    approval_id: approvalId,
+    tool_name: "bash",
+    tool_call_id: toolCallId,
+    risk: "exec",
+    path: "",
+    summary: "node --version",
+    diff: "",
+  };
 }
 
 function assistant(state: ChatUiState, index = 0): Extract<ChatMessage, { role: "assistant" }> {
@@ -531,6 +551,53 @@ describe("reduceChatEvent characterization", () => {
     assert.equal(tool.status, "awaiting_approval");
     assert.equal(tool.approvalId, "ap1");
     assert.equal(tool.diff, "+x");
+  });
+
+  it("retires an approval card whose waiter the backend dropped", () => {
+    const state = reduceAll([pendingApproval("ap1", "t1")]);
+    const retired = retireApprovalCard(state.messages, "ap1");
+    const tool = assistant({ ...state, messages: retired }).tools[0];
+    assert.equal(tool.status, "error");
+    // Nothing may still point at the dead waiter, or the card keeps offering
+    // buttons that can only fail.
+    assert.equal(tool.approvalId, undefined);
+    assert.match(tool.summary ?? "", /approval expired/);
+  });
+
+  /**
+   * A terminal turn cannot leave a tool waiting on a human. These rows used to
+   * survive, and because the approval queue scans the whole transcript in
+   * order, a dead one shadowed the live card and could never be cleared.
+   */
+  for (const kind of ["done", "cancelled", "error"] as const) {
+    it(`${kind} terminalizes a tool still awaiting approval`, () => {
+      const state = reduceAll([
+        pendingApproval("ap1", "t1"),
+        kind === "error"
+          ? { kind, ...ID, message_id: "a1", message: "boom" }
+          : { kind, ...ID, message_id: "a1" },
+      ]);
+      const tool = assistant(state).tools[0];
+      assert.equal(tool.status, "error");
+      assert.match(tool.summary ?? "", /approval interrupted/);
+      assert.equal(
+        state.messages
+          .filter((m) => m.role === "assistant")
+          .flatMap((m) => m.tools)
+          .filter((t) => t.status === "awaiting_approval").length,
+        0
+      );
+    });
+  }
+
+  it("terminalizes a stale approval left in an earlier assistant message", () => {
+    // The queue is flattened across messages, so the sweep has to be too.
+    const state = reduceAll([
+      pendingApproval("ap1", "t1", "a1"),
+      { kind: "assistant_start", ...ID, message_id: "a2" },
+      { kind: "cancelled", ...ID, message_id: "a2" },
+    ]);
+    assert.equal(assistant(state, 0).tools[0].status, "error");
   });
 });
 
