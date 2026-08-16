@@ -776,10 +776,30 @@ fn print_recent_cost(ledger: &Ledger, catalog: &zest_core::RateCatalog) {
             "s"
         },
     );
+    // Three shares that add to the whole prompt, not one hit rate: a lone rate
+    // scores cache writes as failures, so a session busy filling its cache
+    // reads the same as one whose cache never worked.
     println!(
-        "    cache      {} read · {:.0}% of prompt  \x1b[90m(saved ~${:.2} at list rates)\x1b[0m",
+        "    prompt     {:.0}% from cache · {:.0}% cached for later · {:.0}% read fresh",
+        report.totals.served_from_cache_percent,
+        report.totals.written_to_cache_percent,
+        report.totals.read_fresh_percent,
+    );
+    println!(
+        "    cache      {} read{}  \x1b[90m(saved ~${:.2} at list rates)\x1b[0m",
         compact(report.totals.cached_input_tokens),
-        report.totals.cache_hit_percent,
+        match report.totals.cache_reuse_ratio {
+            // Below ~0.3 reads per write the 1.25x write premium never comes
+            // back, so caching is a net cost rather than a saving.
+            Some(ratio) if ratio < 0.3 => " · costing more than it saves".to_string(),
+            Some(ratio) => format!(" · each cached token reused {ratio:.1}x"),
+            // No writes reported is not the same as a cold cache: OpenAI and
+            // Codex cache the prefix themselves and report reads only.
+            None if report.totals.cached_input_tokens > 0 => {
+                " · cached by the provider, writes not reported".to_string()
+            }
+            None => " · nothing cached yet".to_string(),
+        },
         report.totals.cache_savings_usd,
     );
     println!(
