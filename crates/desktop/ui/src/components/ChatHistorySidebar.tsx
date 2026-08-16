@@ -796,72 +796,78 @@ export function ChatHistorySidebar({
         {activity && activity.state !== "idle" ? (
           <ThreadActivityCard activity={activity} now={now} />
         ) : null}
-        {active ? (
+        {/* One flex row rather than three fixed offsets. Fork only exists on
+            the active chat, and pinning it to its own `right-7` slot meant
+            every other row rendered that slot empty — a hole between the pin
+            and the bin that read as a missing button. Packing them lets the
+            row close up when fork is absent. */}
+        <div className="absolute top-1 right-0.5 flex items-center gap-0.5">
           <Button
             type="button"
             variant="ghost"
             size="icon-xs"
-            title="Fork conversation"
-            aria-label="Fork conversation"
-            disabled={sending || deleting}
+            title={thread.pinned ? "Unpin chat" : "Pin chat"}
+            aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
+            aria-pressed={thread.pinned}
+            disabled={sending || deleting || pinning === thread.id}
             className={cn(
-              "absolute top-1 right-7 text-muted-foreground transition-opacity",
+              "text-muted-foreground transition-opacity",
               "hover:bg-muted hover:text-foreground",
-              "focus-visible:opacity-100",
-              "opacity-100"
+              thread.pinned
+                ? "fill-current text-primary opacity-100"
+                : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100"
             )}
             onClick={(event) => {
               event.stopPropagation();
-              void onForkThread();
+              void togglePinned(project.path, thread);
             }}
           >
-            <GitForkIcon aria-hidden="true" />
+            <PinIcon aria-hidden="true" />
           </Button>
-        ) : null}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          title={thread.pinned ? "Unpin chat" : "Pin chat"}
-          aria-label={thread.pinned ? "Unpin chat" : "Pin chat"}
-          aria-pressed={thread.pinned}
-          disabled={sending || deleting || pinning === thread.id}
-          className={cn(
-            "absolute top-1 right-14 text-muted-foreground transition-opacity",
-            "hover:bg-muted hover:text-foreground",
-            thread.pinned
-              ? "fill-current text-primary opacity-100"
-              : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100"
-          )}
-          onClick={(event) => {
-            event.stopPropagation();
-            void togglePinned(project.path, thread);
-          }}
-        >
-          <PinIcon aria-hidden="true" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          title={`Delete “${title}”`}
-          disabled={sending || deleting}
-          className={cn(
-            "absolute top-1 right-0.5 text-muted-foreground transition-opacity",
-            "hover:bg-destructive/15 hover:text-destructive",
-            "focus-visible:opacity-100",
-            active ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100"
-          )}
-          onClick={(event) => {
-            event.stopPropagation();
-            setPendingDelete({
-              thread,
-              projectPath: project.path,
-            });
-          }}
-        >
-          <Trash2Icon />
-        </Button>
+          {active ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              title="Fork conversation"
+              aria-label="Fork conversation"
+              disabled={sending || deleting}
+              className={cn(
+                "text-muted-foreground transition-opacity",
+                "hover:bg-muted hover:text-foreground",
+                "opacity-100 focus-visible:opacity-100"
+              )}
+              onClick={(event) => {
+                event.stopPropagation();
+                void onForkThread();
+              }}
+            >
+              <GitForkIcon aria-hidden="true" />
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            title={`Delete “${title}”`}
+            disabled={sending || deleting}
+            className={cn(
+              "text-muted-foreground transition-opacity",
+              "hover:bg-destructive/15 hover:text-destructive",
+              "focus-visible:opacity-100",
+              active ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100"
+            )}
+            onClick={(event) => {
+              event.stopPropagation();
+              setPendingDelete({
+                thread,
+                projectPath: project.path,
+              });
+            }}
+          >
+            <Trash2Icon />
+          </Button>
+        </div>
       </li>
     );
   }
