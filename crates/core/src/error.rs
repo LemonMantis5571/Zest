@@ -14,6 +14,9 @@ pub enum HarnessError {
 
     /// An `event: error` frame arrived mid-stream (e.g. `overloaded_error`),
     /// or the stream was malformed.
+    ///
+    /// A `kind` beginning with [`PROVIDER_MESSAGE_PREFIX`] promises that `message`
+    /// was written by the provider *for the user* and may be shown verbatim.
     #[error("stream {kind}: {message}")]
     Stream { kind: String, message: String },
 
@@ -51,6 +54,11 @@ pub enum HarnessError {
     Other(String),
 }
 
+/// Marks a [`HarnessError::Stream`] whose `message` is provider-authored user
+/// text. An explicit prefix rather than a heuristic: `Other` and `Stream` also
+/// carry internal strings, and those must never reach a chat bubble.
+pub const PROVIDER_MESSAGE_PREFIX: &str = "provider:";
+
 impl HarnessError {
     /// The failure underneath any retry wrapper.
     ///
@@ -60,6 +68,23 @@ impl HarnessError {
         match self {
             Self::Exhausted { source, .. } => source.root(),
             other => other,
+        }
+    }
+
+    /// A message the provider wrote for the user, safe to show as-is.
+    ///
+    /// The bug this exists for: Codex reports `"You've hit your usage limit ... try
+    /// again at <date>"`, which names both the cause and the fix, and the desktop
+    /// replaced it with `"The provider could not complete the request."` — every
+    /// actionable word thrown away because no classifier matched.
+    pub fn provider_user_message(&self) -> Option<&str> {
+        match self.root() {
+            Self::Stream { kind, message }
+                if kind.starts_with(PROVIDER_MESSAGE_PREFIX) && !message.trim().is_empty() =>
+            {
+                Some(message)
+            }
+            _ => None,
         }
     }
 
@@ -192,6 +217,51 @@ mod tests {
             message: "busy".into()
         }
         .is_transient());
+    }
+
+    /// The prefix is a promise, not a guess: an ordinary `Stream` or `Other`
+    /// carries internal text that must never be rendered as a chat message.
+    #[test]
+    fn only_an_explicitly_tagged_message_is_offered_to_the_ui() {
+        let tagged = HarnessError::Stream {
+            kind: "provider:usageLimitExceeded".into(),
+            message: "You've hit your usage limit.".into(),
+        };
+        assert_eq!(
+            tagged.provider_user_message(),
+            Some("You've hit your usage limit.")
+        );
+
+        let internal = HarnessError::Stream {
+            kind: "codex_protocol".into(),
+            message: "thread/start returned no thread id".into(),
+        };
+        assert_eq!(internal.provider_user_message(), None);
+        assert_eq!(
+            HarnessError::Other("could not read credential".into()).provider_user_message(),
+            None
+        );
+
+        // Blank text is worse than the generic sentence it would replace.
+        let blank = HarnessError::Stream {
+            kind: "provider:codex".into(),
+            message: "   ".into(),
+        };
+        assert_eq!(blank.provider_user_message(), None);
+    }
+
+    /// Retry must not hide the tag, or a single retried attempt would silently
+    /// downgrade the message the user sees.
+    #[test]
+    fn a_provider_message_survives_the_retry_wrapper() {
+        let wrapped = HarnessError::Exhausted {
+            attempts: 3,
+            source: Box::new(HarnessError::Stream {
+                kind: "provider:usageLimitExceeded".into(),
+                message: "try again tomorrow".into(),
+            }),
+        };
+        assert_eq!(wrapped.provider_user_message(), Some("try again tomorrow"));
     }
 
     #[test]
