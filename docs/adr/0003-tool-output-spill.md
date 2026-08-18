@@ -87,13 +87,21 @@ Hook the policy as an `Option` field on `ToolRegistry`, applied inside
   dropped future *unable* to leave a half-written file.
 - **Exempting tools that already bound their own output**: rejected. A policy keyed
   on size stays correct as tools are added; a name list is a second place to
-  forget. At a 32 KiB cap only `grep` and `browser` can reach it in practice, and
-  `bash`'s worst case is ~30.9 KiB, so the one tool whose markers are pinned by
-  tests never also carries a spill notice. Note how narrow grep's reach is: it
-  stops at 100 matches and clips each line to 400 characters, so it only crosses
-  32 KiB when the matching lines are long — a minified bundle or a one-line JSON
-  blob. The default cap therefore fires rarely today; it earns its place as tools
-  grow and for the long-line cases where truncation hurts most.
+  forget. Note how narrow grep's reach is: it stops at 100 matches and clips each
+  line to 400 characters, so it only crosses 32 KiB when the matching lines are
+  long — a minified bundle or a one-line JSON blob. The default cap therefore
+  fires rarely today; it earns its place as tools grow and for the long-line
+  cases where truncation hurts most.
+
+  **A self-bounded tool's output can still spill, and that is accepted rather
+  than prevented.** `bash` clips its captured output to 30 KiB but then prefixes
+  `$ {command}\n{status}\n\n`, and the command is unbounded model output — a
+  couple of kilobytes of command line pushes the body past 32 KiB. Such a result
+  carries both bash's own `[… N bytes omitted from the middle …]` marker and a
+  spill notice. That composition is correct, if wordy: the marker describes what
+  bash discarded during acquisition and the notice describes what the policy
+  moved to disk, and the stored artifact holds exactly the string bash returned.
+  No test constructs a long command line, so the suite does not exercise it.
 - **Sharding artifacts into retrievable-sized parts**: rejected for now. Fully
   retrievable, but the notice would then have to list N paths, and a 10 MB body
   would produce 40 of them and blow the cap — a second bound for the bound.
