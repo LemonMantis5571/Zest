@@ -295,14 +295,17 @@ fn sanitize_text(value: &str, max_bytes: usize) -> String {
     clip_utf8(&without_secrets, max_bytes)
 }
 
+/// Head-only clip that reserves room for its own ellipsis.
+///
+/// Stays a local function rather than moving to [`crate::bounded::ends_within`]:
+/// a handoff wants the *beginning* of a redacted value, and pushing an `Option`
+/// through a redaction path buys nothing when the fallback would be the
+/// unclipped original.
 fn clip_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
     }
-    let mut end = max_bytes.saturating_sub('…'.len_utf8());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = crate::bounded::floor_boundary(value, max_bytes.saturating_sub('…'.len_utf8()));
     format!("{}…", &value[..end])
 }
 

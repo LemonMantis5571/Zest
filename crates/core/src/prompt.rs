@@ -245,7 +245,7 @@ pub fn load_project_docs(root: &Path) -> String {
         }
 
         let (kept, truncated) = if body.len() > budget {
-            (&body[..floor_char_boundary(body, budget)], true)
+            (&body[..crate::bounded::floor_boundary(body, budget)], true)
         } else {
             (body, false)
         };
@@ -259,14 +259,6 @@ pub fn load_project_docs(root: &Path) -> String {
     }
 
     out
-}
-
-fn floor_char_boundary(s: &str, mut index: usize) -> usize {
-    index = index.min(s.len());
-    while index > 0 && !s.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
 }
 
 /// Where the agent is running.
