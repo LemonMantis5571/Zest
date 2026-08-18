@@ -56,9 +56,24 @@ pub trait ProviderDriver: Send + Sync {
 ```
 
 **`descriptor` and `create` are served by the same driver, and every
-implementation derives both from one private `catalogue()` helper.** That is the
-structural fix: a picker offering a model the provider rejects is no longer
-expressible, rather than merely tested for.
+implementation derives both from one private `catalogue()` helper.**
+
+That is *most* of the fix, and it is worth being exact about how much. The
+helper guarantees the driver answers both questions identically; it does not
+guarantee the constructed provider agrees, because a provider may still apply a
+default of its own after construction. That is not hypothetical: after the
+Anthropic drift was fixed, running real configs through both paths found a
+second instance — `ClaudeCodeProvider` kept a private `BUILTIN_MODELS` fallback
+the driver could not see, so an entry with no `models` list offered `[sonnet]`
+and accepted `[sonnet, opus, haiku]`. The list is now `pub(crate)` and the
+driver builds from it.
+
+So the real guarantee is: one helper per driver, plus
+`the_picker_catalogue_matches_the_live_provider_catalogue` comparing the picker
+against a *constructed* provider for every kind, including the cases where the
+optional fields are omitted — which is exactly where a hidden default hides. The
+first version of that test covered `anthropic` alone, and the `claude_code` bug
+walked straight through it.
 
 **Credentials resolve in one place.** The driver states *where* a key lives
 (`CredentialRequest { account, env, policy }`); `driver::resolve` does the reading,
@@ -92,9 +107,11 @@ forget, which is the failure mode this refactor exists to remove.
   `driver_kinds_round_trip_through_the_config_tag`, since the type system cannot.
 - **`DriverKind` equals the `kind = "…"` string**, so an error or label can name
   the thing the user typed.
-- **A driver's `descriptor` and `create` produce the same catalogue.** Enforced
-  structurally by the shared helper and checked by
-  `the_picker_catalogue_matches_the_live_provider_catalogue`.
+- **The picker catalogue equals the constructed provider's catalogue, for every
+  kind.** The shared helper makes the driver self-consistent; the cross-kind test
+  is what covers a default applied inside a provider's own constructor. A test
+  that covers one kind does not establish this invariant — that was learned the
+  hard way.
 - **No capability is decided by a provider id.** The single remaining id-keyed
   function is `descriptor_for_picker_id`, which exists precisely for ids that have
   *no* config entry, hence no kind to consult.
@@ -157,7 +174,13 @@ identical.
 `crates/core/src/provider/mod.rs`:
 `the_picker_catalogue_matches_the_live_provider_catalogue` — written first, watched
 fail with `["claude-haiku-5"]` against `["claude-haiku-5", "claude-opus-5"]`, then
-made to pass by construction.
+made to pass by construction. It now runs six entries covering all four kinds,
+and compares model ids *and* effort levels.
+
+What tests did not find, a live check did: both of this machine's real configs
+were loaded and every configured provider's picker catalogue compared against its
+constructed one. That is what surfaced the `claude_code` fallback, and it is the
+check to repeat when a kind gains a default.
 
 The pre-existing suites are the regression net for the rest: 605 core and 89
 desktop tests pass, `cargo clippy --all-targets -- -D warnings` is clean, and
