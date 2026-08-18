@@ -40,8 +40,7 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # The same gate as Windows CI: fetch the pinned gateway sidecar for this
-      # host target, then run the full release PowerShell gate under pwsh.
+      # The same gate as Windows CI: the full release PowerShell gate under pwsh.
       - name: Verify
         shell: pwsh
         env:

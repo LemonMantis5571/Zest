@@ -88,12 +88,8 @@ jobs:
       - name: Check release version
         run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
 
-      - name: Install dependencies and pinned gateway
-        shell: pwsh
-        run: |
-          npm ci --no-fund --no-audit
-          ./scripts/fetch-gateway.ps1 -CheckPin
-          ./scripts/fetch-gateway.ps1
+      - name: Install dependencies
+        run: npm ci --no-fund --no-audit
 
       - name: Build installers
         run: npm run desktop:build
@@ -152,12 +148,8 @@ jobs:
       - name: Check release version
         run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
 
-      - name: Install dependencies and pinned gateway
-        shell: pwsh
-        run: |
-          npm ci --no-fund --no-audit
-          ./scripts/fetch-gateway.ps1 -CheckPin
-          ./scripts/fetch-gateway.ps1
+      - name: Install dependencies
+        run: npm ci --no-fund --no-audit
 
       - name: Build installers
         run: npm run desktop:build

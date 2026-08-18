@@ -40,10 +40,6 @@ Step "toolchain check" {
   }
 }
 
-Step "gateway release and sidecar" {
-  & (Join-Path $Root "scripts/fetch-gateway.ps1")
-}
-
 Step "npm ci" {
   npm ci --no-fund --no-audit
 }
@@ -108,4 +104,4 @@ Step "git diff --check" {
 Write-Host ""
 Write-Host "release-verify.ps1 passed" -ForegroundColor Green
 Write-Host "Live doctor is opt-in: cargo run -p zest -- doctor --live"
-Write-Host "(requires gateway/creds; do not fake success without them)"
+Write-Host "(requires provider credentials; do not fake success without them)"
