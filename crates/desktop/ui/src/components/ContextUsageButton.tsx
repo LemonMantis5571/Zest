@@ -149,6 +149,21 @@ export function ContextUsageButton({ refreshKey, className }: Props) {
             <span className="font-mono tabular-nums">{usage.checkpointCount}</span>
           </div>
 
+          {usage.source === "last_turn" ? (
+            <div className="mt-3 grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 border-t border-border/60 pt-3 text-[11px]">
+              <span className="text-muted-foreground">Fresh input</span>
+              <span className="font-mono tabular-nums">{formatTokens(usage.inputTokens)}</span>
+              <span className="text-muted-foreground">From cache</span>
+              <span className="font-mono tabular-nums">
+                {formatTokens(usage.cacheReadTokens)}
+              </span>
+              <span className="text-muted-foreground">Cache write</span>
+              <span className="font-mono tabular-nums">
+                {formatTokens(usage.cacheWriteTokens)}
+              </span>
+            </div>
+          ) : null}
+
           {usage.checkpointCount > 0 ? (
             <div className="mt-3 flex items-center gap-1 border-t border-border/60 pt-3 text-[10px] text-muted-foreground">
               <CheckCircle2Icon className="size-3 shrink-0 text-primary" />
