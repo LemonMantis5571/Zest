@@ -33,6 +33,14 @@ fn stream() {
     send(r#"{"type":"result","response":"hello"}"#);
 }
 
+fn wait_for_eof() {
+    send(r#"{"type":"result","response":"finished"}"#);
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut line = String::new();
+    let _ = reader.read_line(&mut line);
+}
+
 fn acp() {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -75,6 +83,7 @@ fn main() {
     match args.nth(1).as_deref() {
         Some("headless") => headless(),
         Some("stream") => stream(),
+        Some("wait_for_eof") => wait_for_eof(),
         Some("acp") => acp(),
         Some("delegation") => delegation(&args.next().unwrap_or_default()),
         other => panic!("unknown external-agent fixture mode: {other:?}"),
