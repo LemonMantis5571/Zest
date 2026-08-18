@@ -342,7 +342,15 @@ fn invoke(plugin: &InstalledPlugin, request: PluginRequest) -> Result<NowPlaying
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    for key in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
+    for key in [
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "PATH",
+        "TMPDIR",
+        "LD_LIBRARY_PATH",
+    ] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
