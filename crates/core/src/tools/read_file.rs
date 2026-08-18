@@ -9,7 +9,16 @@ use super::project::ProjectRoot;
 use super::sensitive::is_sensitive_path;
 use super::Tool;
 
-const MAX_BYTES: usize = 256 * 1024;
+/// This tool's own name, shared so a policy that must exempt it cannot drift
+/// from the string the registry dispatches on.
+pub const READ_FILE_TOOL: &str = "read_file";
+
+/// Bytes this tool will read from a file, counted from byte zero.
+///
+/// Also the *reach* of an `offset`: the window is applied after the read, so no
+/// offset addresses content past this point. Callers that hand the model a file
+/// path larger than this must say so — see [`super::spill`].
+pub const MAX_BYTES: usize = 256 * 1024;
 /// Lines returned when the call does not ask for a narrower window.
 const DEFAULT_LINE_LIMIT: usize = 2_000;
 
@@ -168,7 +177,7 @@ fn number_lines(
 #[async_trait]
 impl Tool for ReadFile {
     fn name(&self) -> &str {
-        "read_file"
+        READ_FILE_TOOL
     }
 
     fn description(&self) -> &str {

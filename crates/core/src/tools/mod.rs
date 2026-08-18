@@ -15,6 +15,7 @@ pub mod question;
 pub mod read_file;
 pub mod read_skill;
 pub mod sensitive;
+pub mod spill;
 pub mod walk;
 pub mod web_search;
 pub mod write_file;
@@ -105,6 +106,17 @@ pub trait Tool: Send + Sync {
 #[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
+    /// Attached by [`crate::runtime::RuntimeBuilder`]. `None` — what every test
+    /// and every headless caller gets — keeps every result inline.
+    ///
+    /// A field here rather than a decorating [`Tool`] because dispatch is the
+    /// one place both call paths meet: the concurrent batch awaits
+    /// [`Self::execute_prepared`] directly and never passes through the agent's
+    /// gated wrapper. A decorator would also have to forward every trait method,
+    /// and forgetting one fails silently — a missed `uses_context` quietly stops
+    /// delegation from seeing conversation context, and a missed `input_schema`
+    /// corrupts the tool list at the front of the cached prompt prefix.
+    spill: Option<Arc<spill::SpillPolicy>>,
 }
 
 impl ToolRegistry {
@@ -114,6 +126,19 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Keep oversized results out of context by storing them under the given
+    /// policy.
+    pub fn with_spill(mut self, policy: Arc<spill::SpillPolicy>) -> Self {
+        self.spill = Some(policy);
+        self
+    }
+
+    /// Project-relative directory oversized results are stored in, when a
+    /// front-end supplied a conversation to store them under.
+    pub fn spill_dir(&self) -> Option<&str> {
+        self.spill.as_ref().map(|policy| policy.spill_dir())
     }
 
     /// Stable order — the tool list renders at the very front of the prompt, so
@@ -181,8 +206,17 @@ impl ToolRegistry {
         prepared: PreparedToolCall,
     ) -> std::result::Result<ToolOutcome, String> {
         let name = prepared.tool_name.clone();
+        let risk = prepared.risk;
         match self.tools.iter().find(|t| t.name() == name) {
-            Some(tool) => tool.execute_prepared(prepared).await,
+            Some(tool) => match tool.execute_prepared(prepared).await {
+                // An error is not a result: it carries corrective feedback the
+                // model needs verbatim, and it is short by construction.
+                Err(message) => Err(message),
+                Ok(outcome) => Ok(match &self.spill {
+                    Some(policy) => policy.apply(&name, risk, outcome),
+                    None => outcome,
+                }),
+            },
             None => Err(format!("unknown tool: {name}")),
         }
     }
@@ -346,5 +380,198 @@ mod characterization {
         assert_eq!(reg.risk("missing"), None);
         let err = reg.prepare("missing", serde_json::json!({})).unwrap_err();
         assert!(err.contains("unknown tool"), "{err}");
+    }
+
+    /// A tool that returns a body of a requested size, or an error.
+    struct Sized {
+        name: &'static str,
+        risk: ToolRisk,
+    }
+
+    #[async_trait]
+    impl Tool for Sized {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn risk(&self) -> ToolRisk {
+            self.risk
+        }
+        async fn run(&self, input: Value) -> std::result::Result<ToolOutcome, String> {
+            let bytes = input.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if input.get("fail").is_some() {
+                return Err("x".repeat(bytes));
+            }
+            Ok(ToolOutcome::text("x".repeat(bytes)))
+        }
+    }
+
+    fn spilling_registry(dir: &std::path::Path, cap: usize, risk: ToolRisk) -> ToolRegistry {
+        let store = self::spill::SpillStore::open(dir, "t-1").unwrap();
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(Sized { name: "big", risk }));
+        reg.register(Arc::new(Sized {
+            name: read_file::READ_FILE_TOOL,
+            risk: ToolRisk::Read,
+        }));
+        reg.with_spill(Arc::new(self::spill::SpillPolicy::new(store, cap)))
+    }
+
+    #[tokio::test]
+    async fn spilling_is_off_until_a_store_is_attached() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(Sized {
+            name: "big",
+            risk: ToolRisk::Read,
+        }));
+        assert_eq!(reg.spill_dir(), None);
+        let out = reg
+            .run("big", serde_json::json!({ "bytes": 200_000 }))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.body.len(),
+            200_000,
+            "an unattached registry must not bound"
+        );
+    }
+
+    /// The concurrent batch awaits `execute_prepared` directly rather than going
+    /// through the agent's gated wrapper, so the hook has to live at dispatch.
+    /// This drives the same entry point both paths use.
+    #[tokio::test]
+    async fn dispatch_bounds_an_oversized_result() {
+        let dir = scratch("spill-dispatch");
+        let reg = spilling_registry(&dir, 2_048, ToolRisk::Read);
+        assert_eq!(reg.spill_dir(), Some(".zest/spill/t-1"));
+        let out = reg
+            .run("big", serde_json::json!({ "bytes": 200_000 }))
+            .await
+            .unwrap();
+        assert!(out.body.len() <= 2_048, "{}", out.body.len());
+        assert!(out.body.contains("Full result stored at"), "{}", out.body);
+    }
+
+    #[tokio::test]
+    async fn dispatch_leaves_a_result_within_the_cap_alone() {
+        let dir = scratch("spill-small");
+        let reg = spilling_registry(&dir, 2_048, ToolRisk::Read);
+        let out = reg
+            .run("big", serde_json::json!({ "bytes": 100 }))
+            .await
+            .unwrap();
+        assert_eq!(out.body.len(), 100);
+        assert!(!dir.join(".zest").exists());
+    }
+
+    #[tokio::test]
+    async fn a_tool_error_is_never_spilled() {
+        let dir = scratch("spill-err");
+        let reg = spilling_registry(&dir, 2_048, ToolRisk::Read);
+        let err = reg
+            .run("big", serde_json::json!({ "bytes": 200_000, "fail": true }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.len(),
+            200_000,
+            "corrective feedback must reach the model verbatim"
+        );
+        assert!(!dir.join(".zest").exists());
+    }
+
+    #[tokio::test]
+    async fn dispatch_never_spills_the_read_tool() {
+        let dir = scratch("spill-read");
+        let reg = spilling_registry(&dir, 2_048, ToolRisk::Read);
+        let out = reg
+            .run(
+                read_file::READ_FILE_TOOL,
+                serde_json::json!({ "bytes": 200_000 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.body.len(), 200_000);
+        assert!(!dir.join(".zest").exists());
+    }
+
+    /// The whole promise, end to end, through the real tools: a real `grep` over
+    /// a tree big enough to exceed the cap, then the real `read_file` retrieving
+    /// the stored output back through the locator the model was handed.
+    ///
+    /// Everything else here uses a fake tool and asserts the policy in isolation.
+    /// This is the one test that proves the loop actually closes — that the
+    /// locator is a path the read tools accept, resolves inside the project root,
+    /// and needs no approval.
+    #[tokio::test]
+    async fn a_real_grep_spill_can_be_read_back_through_its_locator() {
+        let dir = scratch("spill-roundtrip");
+        // `grep` stops at 100 matches and clips each line to 400 chars, so its
+        // output only reaches the 32 KiB cap when the matching lines are long.
+        // Long lines are exactly the case worth keeping: a minified bundle or a
+        // one-line JSON blob.
+        for file in 0..120 {
+            let body = format!("needle {file} {}\n", "wide-".repeat(90));
+            std::fs::write(dir.join(format!("f{file}.txt")), body).unwrap();
+        }
+
+        let store = self::spill::SpillStore::open(&dir, "t-1").unwrap();
+        let mut reg = ToolRegistry::new();
+        register_read_tools(&mut reg, &dir).unwrap();
+        let reg = reg.with_spill(Arc::new(self::spill::SpillPolicy::new(store, 32 * 1024)));
+
+        let out = reg
+            .run("grep", serde_json::json!({ "pattern": "needle" }))
+            .await
+            .unwrap();
+        assert!(out.body.len() <= 32 * 1024, "{}", out.body.len());
+
+        let locator = out
+            .body
+            .split("Full result stored at: ")
+            .nth(1)
+            .and_then(|rest| rest.split(". Use").next())
+            .expect("the model must be handed a locator");
+
+        // Read it back exactly as the notice tells the model to.
+        let back = reg
+            .run(
+                read_file::READ_FILE_TOOL,
+                serde_json::json!({ "path": locator }),
+            )
+            .await
+            .expect("the locator must be readable, with no approval needed");
+        assert!(back.body.contains("needle"), "retrieved nothing useful");
+
+        // And grep it, the other half of the hint.
+        let searched = reg
+            .run(
+                "grep",
+                serde_json::json!({ "pattern": "needle 41", "path": locator }),
+            )
+            .await
+            .expect("the locator must be greppable");
+        assert!(searched.body.contains("needle 41"), "{}", searched.body);
+    }
+
+    #[tokio::test]
+    async fn dispatch_never_spills_a_sensitive_result() {
+        let dir = scratch("spill-sensitive");
+        let reg = spilling_registry(&dir, 2_048, ToolRisk::Sensitive);
+        let prepared = reg
+            .prepare("big", serde_json::json!({ "bytes": 200_000 }))
+            .unwrap();
+        assert_eq!(prepared.risk, ToolRisk::Sensitive);
+        let out = reg.execute_prepared(prepared).await.unwrap();
+        assert_eq!(out.body.len(), 200_000);
+        assert!(
+            !dir.join(".zest").exists(),
+            "a second cleartext copy must never be written"
+        );
     }
 }
