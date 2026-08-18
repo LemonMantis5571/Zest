@@ -7,12 +7,11 @@ and creates a GitHub prerelease only after both platforms pass.
 ## Before tagging
 
 1. Start with a clean worktree. Never commit provider keys, `.env` files,
-   gateway credentials, signing overlays, downloaded sidecars, or local
-   `zest.toml` files.
+   signing overlays, or local `zest.toml` files.
 2. Set the same version in `Cargo.toml` (`workspace.package.version`) and
    `crates/desktop/tauri.conf.json`.
 3. Add release notes at `docs/releases/<version>.md`.
-4. Review `CHANGELOG.md`, beta limitations, and the pinned CLIProxyAPI release.
+4. Review `CHANGELOG.md` and the beta limitations.
 5. Run the full gate locally:
 
    ```powershell
@@ -23,7 +22,7 @@ and creates a GitHub prerelease only after both platforms pass.
    listed in `.github/workflows/linux-verify.yml`.
 
 The gate includes the UI, Rust, generated TypeScript bindings, dependency
-audits, gateway provenance, and Git whitespace. Live provider checks are not a
+audits, and Git whitespace. Live provider checks are not a
 release gate: `cargo run -p zest -- doctor --live` consumes real quota and must
 only be run with a test account, with the result recorded separately.
 
@@ -62,11 +61,11 @@ certificate store or signing service and publish only the public certificate
 fingerprint. The signing overlay is ignored by Git.
 
 Test the exact uploaded files on a clean Windows profile or Linux machine that
-has no Rust, Node.js, source checkout, old Zest state, or manually started
-gateway. Confirm:
+has no Rust, Node.js, source checkout, or old Zest state. Confirm:
 
 - installation and uninstall work;
-- the bundled gateway starts on loopback after a restart;
+- no process listens on a loopback port after a restart — the desktop bundles
+  and supervises nothing;
 - provider setup stores credentials without showing them again;
 - a minimal chat can read a file, asks before a write, and handles denial;
 - provider status, quota wording, and model selection remain correct;

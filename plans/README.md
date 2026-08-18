@@ -13,7 +13,7 @@ without dropping features. Implemented on the working tree 2026-08-02.
 | 002 | Drop Brave path from `web_search` (DDG only) | P1 | S | — | DONE (implemented on WIP) |
 | 003 | Front-ends use `DEFAULT_SYSTEM` (dedupe prompts) | P1 | S | — | DONE (implemented on WIP) |
 | 004 | Optimize custom PFP (128px JPEG file, not fat JSON) | P2 | S | — | DONE (revised + implemented) |
-| 005 | Make gateway bootstrap provider-scoped | P1 | M | - | DONE |
+| 005 | Make gateway bootstrap provider-scoped | P1 | M | - | SUPERSEDED (the gateway was removed; see docs/adr/0004) |
 | 006 | Remove non-release PowerShell noise | P1 | M | 005 | DONE |
 | 007 | Drain plugin output without blocking the host | P1 | M | — | DONE |
 | 008 | Serialize and de-stale Now Playing controls | P1 | M | — | DONE |

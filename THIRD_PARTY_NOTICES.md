@@ -2,8 +2,8 @@
 
 Zest itself is distributed under the [MIT License](LICENSE). This file indexes
 the third-party components used by the source build and desktop bundle. The
-license text for the bundled CLIProxyAPI sidecar is shipped separately at
-[`crates/desktop/licenses/CLIProxyAPI-LICENSE.txt`](crates/desktop/licenses/CLIProxyAPI-LICENSE.txt).
+bundle ships no third-party executables: every provider is reached either over
+HTTP or by spawning a CLI the user installed themselves.
 
 The tables summarize the locked/direct dependency set reviewed for the
 2026-08-05 beta preparation. `Cargo.lock` and `package-lock.json` remain the
@@ -46,6 +46,6 @@ replace upstream copyright and license text with the Zest license.
 
 ## Release handling
 
-Release artifacts must include this index, the CLIProxyAPI notice, and any
-additional license files required by the resolved dependency graph. See
+Release artifacts must include this index and any additional license files
+required by the resolved dependency graph. See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the release checklist.

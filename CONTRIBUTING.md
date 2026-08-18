@@ -21,15 +21,12 @@ From the repository root:
 
 ```powershell
 npm ci
-./scripts/fetch-gateway.ps1
 npm run ui:build
 npm run desktop:dev
 ```
 
 On Linux, install the desktop packages listed in the Linux verification
-workflow, then run the same commands from `pwsh` or Bash. The gateway fetch
-script is PowerShell on every platform so the pinned sidecar is checked the
-same way locally and in CI.
+workflow, then run the same commands from `pwsh` or Bash.
 
 For Ubuntu 24.04, the CI-equivalent prerequisites are:
 
@@ -40,7 +37,7 @@ sudo apt-get install -y build-essential pkg-config libssl-dev cmake \
   libdbus-1-dev libxdo-dev curl wget file tar patchelf libfuse2t64
 ```
 
-Install PowerShell 7 (`pwsh`) before running the gateway or release scripts.
+Install PowerShell 7 (`pwsh`) before running the release scripts.
 
 Run the terminal client with:
 
@@ -97,9 +94,8 @@ relevant characterization tests under `crates/desktop/ui/src`.
 
 Do not commit:
 
-- API keys, gateway keys, `.env` files, credential-manager exports, or signing
-  keys;
-- downloaded gateway binaries or generated `ui/dist` output; or
+- API keys, `.env` files, credential-manager exports, or signing keys;
+- generated `ui/dist` output; or
 - local signing configuration or personal `zest.toml` files.
 
 Use [`zest.toml.example`](zest.toml.example) for shareable configuration

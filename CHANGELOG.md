@@ -5,7 +5,29 @@ a replacement for the commit history.
 
 ## Unreleased
 
-Changes after the current beta will be listed here.
+### Removed
+
+- The bundled CLIProxyAPI sidecar, and with it about 349 MiB from the desktop
+  installer. Codex and Claude subscriptions are now reached through their own
+  CLIs (`codex`, `claude`) instead of a local translating proxy. Zest bundles
+  no third-party executable and starts no background server.
+- The `kind = "gateway"` provider entry, and the `ZEST_BASE_URL` /
+  `ZEST_GATEWAY_KEY` environment override that built one.
+
+### Changed
+
+- An existing `kind = "gateway"` config still starts. On load, `codex` becomes
+  `codex_cli` (keeping its model and effort lists) and `claude` becomes
+  `claude_code` (its model list is dropped, because gateway model ids are not
+  CLI aliases); anything else is skipped with a reason. A warning explains each
+  change and **`zest.toml` is never rewritten**.
+- Both subscription providers run their own agent loop, so Zest's file, shell,
+  browser, and delegation tools are not registered on them. A migrated Codex
+  provider therefore loses the tool layer it had through the gateway. Use an
+  API-key provider (`anthropic`, `openai_compatible`) for Zest's own loop.
+  See [ADR 0004](docs/adr/0004-remove-the-bundled-cliproxyapi-gateway.md).
+- Claude Code now raises Zest approval cards, with a rendered diff for edits,
+  instead of applying changes under `--permission-mode accept_edits`.
 
 ## 0.1.0 beta - 2026-08-13
 

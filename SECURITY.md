@@ -20,7 +20,7 @@ Include:
 - any logs with API keys, credentials, personal data, or workspace contents
   removed.
 
-Never include an API key, gateway key, credential-manager export, private key,
+Never include an API key, credential-manager export, private key,
 or full workspace archive in a report. If a key may have been exposed, revoke
 it with the provider before investigating further.
 

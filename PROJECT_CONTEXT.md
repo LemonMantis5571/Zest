@@ -7,9 +7,9 @@
 ## Purpose
 
 Zest gives a coding agent a focused parent session: it reads and edits a project, runs commands,
-asks before risky work, shows diffs, and keeps the transcript recoverable. The parent can use the
-bundled gateway, a native API provider, an OpenAI-compatible endpoint, or an authenticated Claude
-Code subscription directly.
+asks before risky work, shows diffs, and keeps the transcript recoverable. The parent can use a
+native API provider, an OpenAI-compatible endpoint, or an authenticated Claude Code or Codex
+subscription through its own CLI.
 
 When a task is better handled by another tool, Zest can delegate a bounded subtask to an external
 worker that is already authenticated in its own CLI. Claude Code and Gemini CLI are the first
@@ -35,14 +35,12 @@ component, no accounts or telemetry.
 - **zest** - terminal front-end. One consumer of the core.
 - **zest-desktop** - Tauri shell: provider picker, Codex Connect, API-key setup, ACP worker setup,
   project/chat history, attachments, approvals/diffs, context meter, and recovery controls.
-- **Provider layer** - one Provider per configured parent backend. Anthropic, gateway,
-  OpenAI-compatible, and Claude Code parent providers share the abstraction but do not imply task
-  routing.
+- **Provider layer** - one Provider per configured parent backend. Anthropic, OpenAI-compatible,
+  Claude Code, and Codex CLI parent providers share the abstraction but do not imply task routing.
+  The two subscription kinds own their own agent loop, so Zest's tools are not registered on them.
 - **ACP workers** - configured under [agents.<id>]; invoked only through delegate_external and
   kept separate from the Claude Code parent provider.
 - **Usage ledger** - records Zest traffic honestly per provider. External CLI usage is not invented.
-- **Gateway** - bundled CLIProxyAPI sidecar for the supported subscription bootstrap. It is an
-  implementation detail of provider access, not an external worker.
 
 ## Important Constraints
 
@@ -54,8 +52,8 @@ component, no accounts or telemetry.
   fallback for CI. Worker CLI sessions remain owned by their CLIs.
 - **Usage accounting must be honest.** Mark provider-reported usage separately from unavailable
   usage. Never fabricate exact external-worker token counts.
-- **One install, managed runtime.** The desktop installer includes the pinned gateway sidecar; do
-  not add a second monolithic runtime.
+- **One install, no bundled runtime.** The desktop installer ships no third-party executable; do
+  not add one.
 - **The permission layer gates dangerous tools.** Writes and commands use the approval policy.
   External worker execution is also approval-gated.
 - **Provider-specific history is immutable.** A chat stays with its selected provider because

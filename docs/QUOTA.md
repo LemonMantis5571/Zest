@@ -16,8 +16,8 @@ local token counts into a remaining plan number.
 - Anthropic response headers are saved when the native Messages API returns
   them.
 - OpenAI-compatible providers read the standard `x-ratelimit-*` response
-  headers for request and token windows. A gateway must forward those headers
-  for Zest to see them.
+  headers for request and token windows. A proxy in front of one must forward
+  those headers for Zest to see them.
 - DeepSeek is checked on demand through its official `GET /user/balance`
   endpoint. The check runs only for `https://api.deepseek.com` and uses the
   existing key from the OS credential store or configured environment variable.
@@ -72,6 +72,6 @@ line](https://code.claude.com/docs/en/statusline).
 ## Security rules
 
 - Never put API keys in the quota response, logs, or UI.
-- Never call a custom gateway's account endpoint by guessing its URL.
+- Never call a custom endpoint's account URL by guessing it.
 - Never label local estimates as “remaining”, “balance”, or “quota”.
 - A failed check is an error/unavailable state, not zero balance.
