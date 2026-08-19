@@ -11,10 +11,12 @@ import {
   RefreshCwIcon,
   ScrollTextIcon,
   ServerIcon,
+  TypeIcon,
   UserIcon,
   XIcon,
 } from "lucide-react";
 
+import { FontPicker } from "@/components/FontPicker";
 import {
   KeyboardShortcuts,
   useScrollIntoViewOnBump,
@@ -646,6 +648,14 @@ export function SettingsPanel({
                 </Button>
               ) : null}
             </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Typography"
+            icon={TypeIcon}
+            hint="Font family & appearance"
+          >
+            <FontPicker />
           </SettingsSection>
 
           <SettingsSection
