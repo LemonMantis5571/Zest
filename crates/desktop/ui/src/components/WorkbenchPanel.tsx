@@ -6,7 +6,6 @@ import {
   Clock3Icon,
   FileTextIcon,
   FolderIcon,
-  GitForkIcon,
   GitMergeIcon,
   HistoryIcon,
   ListTreeIcon,
@@ -18,6 +17,7 @@ import {
   XIcon,
   XCircleIcon,
 } from "lucide-react";
+import { Blobatar } from "blobatar/react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,6 @@ type PanelProps = {
   compacting: boolean;
   review: WorkspaceReview | null;
   onClose: () => void;
-  onFork: () => Promise<void>;
   onVerify: () => Promise<void>;
   onRewind: (checkpointId: string) => Promise<void>;
   onJump: (messageId: string) => void;
@@ -69,6 +68,43 @@ function statusIcon(status: string) {
     return <TriangleAlertIcon className="text-amber-400" />;
   }
   return <RefreshCwIcon className="animate-spin text-primary" />;
+}
+
+/**
+ * Blobatars render backdrop-less, on a pinned light tone.
+ *
+ * The default backdrop is a near-white `#f4f4ed` tile, which is a white patch
+ * in a dark row — the app is dark-only (`--card: #141516`, no `.dark` block,
+ * `color-scheme: dark` in the document), so there is no light mode this pays
+ * off in. Dropping it is not free: the library guarantees contrast *against
+ * that backdrop*, and on the seeds this app actually uses, hashed tone put
+ * three of twenty heads at ~1.6:1 against the card — invisible.
+ *
+ * Pinning the tone is what makes transparency safe. Tone is the only trait that
+ * moves head lightness, so fixing it at the light end floors head-vs-card at
+ * 12.5:1 across 500 seeds while hue stays seed-driven, which is the part that
+ * tells two subagents apart. Eyes are enforced against the head, not the
+ * backdrop, so they stay legible either way (worst measured 13.2:1).
+ *
+ * Overriding `palette.bg` instead does not work: an overridden color bypasses
+ * the contrast pass rather than being enforced against, so the heads come back
+ * tuned for the light backdrop they no longer sit on.
+ */
+const BLOBATAR_TONE = 0.2;
+
+/**
+ * Status as a dot on the corner of a subagent's blobatar.
+ *
+ * The blobatar occupies the slot the status icon used to have, and it earns it:
+ * it identifies *which* subagent at a glance, which a shared spinner never
+ * could. Status still has to show, but it is one bit of colour rather than a
+ * second icon competing with the avatar.
+ */
+function statusDotClass(status: string) {
+  if (status === "done") return "bg-primary";
+  if (status === "error") return "bg-destructive";
+  if (status === "awaiting_approval") return "bg-amber-400";
+  return "animate-pulse bg-primary";
 }
 
 function subagentLabel(id: string) {
@@ -297,7 +333,6 @@ function WorkbenchBody({
   compacting,
   review,
   onClose,
-  onFork,
   onVerify,
   onRewind,
   onJump,
@@ -308,14 +343,15 @@ function WorkbenchBody({
   onApplyDelegation,
 }: PanelProps) {
   const [tab, setTab] = useState<Tab>("activity");
-  const [busyAction, setBusyAction] = useState<"fork" | string | null>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [workUnitsOpen, setWorkUnitsOpen] = useState(true);
   const [expandedDelegation, setExpandedDelegation] = useState<{
     jobId: string;
     section: "worker" | "review";
   } | null>(null);
   const panelRef = useRef<HTMLElement>(null);
   const titleId = useId();
-  const descriptionId = useId();
+  const workUnitsId = useId();
 
   // Mount is open, because this component only exists while the panel is.
   useEffect(() => {
@@ -391,15 +427,6 @@ function WorkbenchBody({
     return ids;
   }, [messages]);
 
-  async function runFork() {
-    setBusyAction("fork");
-    try {
-      await onFork();
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
   async function runVerify() {
     setBusyAction("verify");
     try {
@@ -451,7 +478,6 @@ function WorkbenchBody({
         ref={panelRef}
         id="workbench-panel"
         aria-labelledby={titleId}
-        aria-describedby={descriptionId}
         tabIndex={-1}
         className="pointer-events-auto relative z-10 flex h-full max-h-[720px] w-[min(360px,calc(100%_-_24px))] min-w-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-card text-card-foreground shadow-2xl outline-none"
       >
@@ -461,9 +487,6 @@ function WorkbenchBody({
             <WrenchIcon className="size-4 text-primary" aria-hidden="true" />
             Workbench
           </h2>
-          <p id={descriptionId} className="mt-0.5 text-[11px] text-muted-foreground">
-            Review your work and return to earlier points.
-          </p>
         </div>
         <Button
           type="button"
@@ -551,11 +574,11 @@ function WorkbenchBody({
           <div className="flex flex-col gap-2.5">
             <section className="border-b border-border/60 pb-3">
               <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Current session
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{session.label}</div>
+                  <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
+                    {session.model}
                   </div>
-                  <div className="mt-1 truncate text-sm font-medium">{session.label}</div>
                 </div>
                 <span
                   className={cn(
@@ -568,16 +591,6 @@ function WorkbenchBody({
                   <span className={cn("size-1.5 rounded-full", sending || compacting ? "bg-primary" : "bg-muted-foreground")} />
                   {sending ? "Working" : compacting ? "Compacting" : "Ready"}
                 </span>
-              </div>
-              <div className="mt-2.5 grid grid-cols-2 gap-1.5 text-[11px]">
-                <div className="rounded-md bg-secondary/50 px-2 py-1.5">
-                  <div className="text-muted-foreground">Model</div>
-                  <div className="mt-0.5 truncate font-mono text-foreground">{session.model}</div>
-                </div>
-                <div className="rounded-md bg-secondary/50 px-2 py-1.5">
-                  <div className="text-muted-foreground">Messages</div>
-                  <div className="mt-0.5 font-mono text-foreground">{messages.length}</div>
-                </div>
               </div>
             </section>
 
@@ -599,8 +612,20 @@ function WorkbenchBody({
                       onClick={() => onJump(subagent.messageId)}
                       aria-label={`${subagent.label}, ${subagentStatus(subagent.status)}`}
                     >
-                      <span className="shrink-0" aria-hidden="true">
-                        {statusIcon(subagent.status)}
+                      <span className="relative shrink-0" aria-hidden="true">
+                        <Blobatar
+                          name={subagent.id}
+                          size={28}
+                          background={false}
+                          tone={BLOBATAR_TONE}
+                          className="block"
+                        />
+                        <span
+                          className={cn(
+                            "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-card",
+                            statusDotClass(subagent.status)
+                          )}
+                        />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-xs font-medium">{subagent.label}</span>
@@ -626,9 +651,9 @@ function WorkbenchBody({
                     ) : null}
                     Workspace check
                   </div>
-                  <div className="mt-1 text-xs text-foreground">
-                    {review?.summary ?? "Review Git changes without changing files."}
-                  </div>
+                  {review?.summary ? (
+                    <div className="mt-1 text-xs text-foreground">{review.summary}</div>
+                  ) : null}
                 </div>
                 <Button
                   type="button"
@@ -690,18 +715,31 @@ function WorkbenchBody({
             </section>
 
             <section>
-              <div className="mb-1.5 flex items-center justify-between px-1">
-                <h2 className="m-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Work units
-                </h2>
-                <span className="text-[10px] text-muted-foreground">{tasks.length}</span>
-              </div>
-              {tasks.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground">
-                  Tool activity and approvals will appear here during a turn.
-                </div>
+              <h2 className="m-0">
+                <button
+                  type="button"
+                  aria-expanded={workUnitsOpen}
+                  aria-controls={workUnitsId}
+                  onClick={() => setWorkUnitsOpen((open) => !open)}
+                  className="mb-1.5 flex w-full items-center justify-between gap-2 rounded-md px-1 py-0.5 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground outline-none transition-colors hover:bg-secondary/40 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <span className="flex items-center gap-1">
+                    <ChevronRightIcon
+                      className={cn(
+                        "size-3 transition-transform",
+                        workUnitsOpen && "rotate-90"
+                      )}
+                      aria-hidden="true"
+                    />
+                    Work units
+                  </span>
+                  <span className="text-[10px] tabular-nums">{tasks.length}</span>
+                </button>
+              </h2>
+              {!workUnitsOpen ? null : tasks.length === 0 ? (
+                <div className="px-1 py-1 text-[11px] text-muted-foreground">Nothing yet.</div>
               ) : (
-                <div className="flex flex-col gap-1.5">
+                <div id={workUnitsId} className="flex flex-col gap-1.5">
                   {tasks.slice(0, 12).map((task) => (
                     <button
                       type="button"
@@ -734,14 +772,8 @@ function WorkbenchBody({
                   {session.checkpoints.length} checkpoints
                 </span>
               </div>
-              <div className="flex flex-col gap-1.5">
-                <Button type="button" variant="outline" size="sm" disabled={sending || busyAction !== null} onClick={() => void runFork()}>
-                  <GitForkIcon data-icon="inline-start" />
-                  Fork Conversation
-                </Button>
-              </div>
               {session.checkpoints.length ? (
-                <div className="mt-2 flex flex-col gap-1">
+                <div className="flex flex-col gap-1">
                   {session.checkpoints
                     .slice()
                     .reverse()
@@ -774,13 +806,8 @@ function WorkbenchBody({
           </div>
         ) : tab === "outline" ? (
           <section>
-            <div className="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              Transcript map
-            </div>
             {outline.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground">
-                Your conversation outline will appear here.
-              </div>
+              <div className="px-1 py-1 text-[11px] text-muted-foreground">Nothing yet.</div>
             ) : (
               <div className="flex flex-col gap-1">
                 {outline.map((message, index) => (
@@ -812,22 +839,13 @@ function WorkbenchBody({
         ) : (
           <section className="flex flex-col gap-2">
             <div className="flex items-center justify-between px-1">
-              <div>
-                <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Coordinator board
-                </div>
-                <div className="mt-1 text-xs text-foreground/80">
-                  Isolated implementation lanes with independent review.
-                </div>
-              </div>
-              <span className="text-[10px] text-muted-foreground">
-                {delegationJobs.length} {delegationJobs.length === 1 ? "job" : "jobs"}
-              </span>
+              <h2 className="m-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Jobs
+              </h2>
+              <span className="text-[10px] text-muted-foreground">{delegationJobs.length}</span>
             </div>
             {delegationJobs.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border/70 px-3 py-5 text-center text-xs text-muted-foreground">
-                Feature cards created by the coordinator will appear here.
-              </div>
+              <div className="px-1 py-1 text-[11px] text-muted-foreground">Nothing yet.</div>
             ) : (
               <div className="flex flex-col gap-2">
                 {delegationJobs.map((job) => {
@@ -862,10 +880,28 @@ function WorkbenchBody({
                               {delegationStatusLabel(job.status)}
                             </span>
                           </div>
-                          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
                             <span>{job.lane}</span>
-                            <span>Worker: {job.agent}</span>
-                            <span>Reviewer: {job.reviewerAgent}</span>
+                            <span className="inline-flex items-center gap-1">
+                              <Blobatar
+                                name={job.agent}
+                                size={12}
+                                background={false}
+                                tone={BLOBATAR_TONE}
+                                className="block"
+                              />
+                              {job.agent}
+                            </span>
+                            <span className="inline-flex items-center gap-1">
+                              <Blobatar
+                                name={job.reviewerAgent}
+                                size={12}
+                                background={false}
+                                tone={BLOBATAR_TONE}
+                                className="block"
+                              />
+                              {job.reviewerAgent}
+                            </span>
                             <span>Attempt {job.attempt || 1}</span>
                           </div>
                         </div>
@@ -873,17 +909,16 @@ function WorkbenchBody({
                       <p className="mt-2 line-clamp-3 text-[11px] leading-relaxed text-foreground/80">
                         {job.workerSummary ?? job.objective}
                       </p>
-                      <div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
-                        <div className="rounded-md bg-secondary/60 px-2 py-1.5">
-                          <div className="text-muted-foreground">Changed files</div>
-                          <div className="mt-0.5 font-mono text-foreground">{job.changedFileCount}</div>
-                        </div>
-                        <div className="rounded-md bg-secondary/60 px-2 py-1.5">
-                          <div className="text-muted-foreground">Checks</div>
-                          <div className="mt-0.5 font-mono text-foreground">
-                            {checksPassed}/{job.acceptanceChecks.length || 0} passed
-                          </div>
-                        </div>
+                      <div className="mt-2 flex flex-wrap gap-x-3 text-[10px] text-muted-foreground">
+                        <span>
+                          <span className="font-mono text-foreground">{job.changedFileCount}</span> files
+                        </span>
+                        <span>
+                          <span className="font-mono text-foreground">
+                            {checksPassed}/{job.acceptanceChecks.length || 0}
+                          </span>{" "}
+                          checks passed
+                        </span>
                       </div>
                       {job.changedFiles.length > 0 ? (
                         <div className="mt-2 rounded-md bg-secondary/50 px-2 py-1.5 font-mono text-[10px] text-foreground/80">

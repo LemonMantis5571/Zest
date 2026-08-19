@@ -24,10 +24,20 @@ function QuestionnaireProgress({ className, ...props }: ComponentProps<typeof Qu
   );
 }
 
+/**
+ * `gap-4` so the question is not crowded by its own answers.
+ *
+ * At `gap-3` the title sat closer to the choices than the section label above
+ * it sat to the title, which reads as the question belonging to the label
+ * rather than to the options it introduces. Matching `Root` puts the widest
+ * space where the biggest break in meaning is. `Description` and `Error` pull
+ * themselves back in with `-mt-1`, because both are annotations on their
+ * neighbour rather than peers of it.
+ */
 function QuestionnaireItem({ className, ...props }: ComponentProps<typeof QuestionnairePrimitive.Item>) {
   return (
     <QuestionnairePrimitive.Item
-      className={cn("flex min-w-0 flex-col gap-3 border-0 p-0 outline-none", className)}
+      className={cn("flex min-w-0 flex-col gap-4 border-0 p-0 outline-none", className)}
       {...props}
     />
   );
@@ -105,7 +115,7 @@ function QuestionnaireInput({ className, ...props }: ComponentProps<typeof Quest
 function QuestionnaireError({ className, ...props }: ComponentProps<typeof QuestionnairePrimitive.Error>) {
   return (
     <QuestionnairePrimitive.Error
-      className={cn("text-xs text-destructive", className)}
+      className={cn("-mt-1 text-xs text-destructive", className)}
       {...props}
     />
   );
