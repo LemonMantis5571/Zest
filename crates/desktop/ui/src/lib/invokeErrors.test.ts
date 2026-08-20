@@ -108,3 +108,28 @@ test("legacy recovery requires a provider choice", () => {
     providers: [{ id: "codex", label: "Codex", model: "gpt-5" }],
   });
 });
+
+test("new project chats expose provider recovery without a thread id", () => {
+  const recovery = conversationRecovery(
+    JSON.stringify({
+      code: "provider_unavailable",
+      message: "Anthropic is not ready for this project.",
+      details: {
+        threadId: null,
+        providerId: "anthropic",
+        providerLabel: "Anthropic",
+        configured: true,
+        availableProviders: [{ id: "deepseek", label: "DeepSeek", model: "deepseek-chat" }],
+      },
+    })
+  );
+
+  assert.deepEqual(recovery, {
+    kind: "new_chat_unavailable",
+    threadId: null,
+    providerId: "anthropic",
+    providerLabel: "Anthropic",
+    configured: true,
+    providers: [{ id: "deepseek", label: "DeepSeek", model: "deepseek-chat" }],
+  });
+});

@@ -1,3 +1,5 @@
+import { CircleAlertIcon } from "lucide-react";
+
 import { AuthShell } from "@/components/AuthShell";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
@@ -27,7 +29,11 @@ export function WaitingScreen({ title, body, hint, error, onCancel }: Props) {
       </header>
 
       <div className="flex items-center gap-3 rounded-lg border border-border/70 bg-card/40 px-3.5 py-3 text-[13px] text-muted-foreground">
-        <Spinner className="size-3.5 text-primary" />
+        {error ? (
+          <CircleAlertIcon className="size-3.5 shrink-0 text-amber-400" aria-hidden />
+        ) : (
+          <Spinner className="size-3.5 text-primary" />
+        )}
         <span>{hint}</span>
       </div>
 
@@ -35,7 +41,7 @@ export function WaitingScreen({ title, body, hint, error, onCancel }: Props) {
 
       <footer className="mt-6 flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {error ? "Back to providers" : "Cancel"}
         </Button>
       </footer>
     </AuthShell>

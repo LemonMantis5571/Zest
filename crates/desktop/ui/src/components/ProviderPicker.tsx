@@ -22,6 +22,7 @@ type Props = {
   onOpenFolder: () => void;
   onRefresh: () => Promise<void>;
   continuing: boolean;
+  connecting: boolean;
 };
 
 function shortRoot(root: string): string {
@@ -43,8 +44,10 @@ export function ProviderPicker({
   onOpenFolder,
   onRefresh,
   continuing,
+  connecting,
 }: Props) {
   const [apiKey, setApiKey] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [addingApiProvider, setAddingApiProvider] = useState(false);
@@ -57,6 +60,16 @@ export function ProviderPicker({
     selected?.selectable === true &&
     !selectedNeedsConnect &&
     (selected?.statusKind === "ready" || selected?.statusKind === "unknown");
+
+  async function retryProviderList() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   return (
     <AuthShell>
@@ -76,20 +89,20 @@ export function ProviderPicker({
       <div className="mb-5 flex items-center gap-2 border-b border-border/60 pb-4">
         <div className="min-w-0 flex-1">
           <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Project folder
+            Project folder (optional)
           </div>
           <div
             className="mt-0.5 truncate font-mono text-xs text-foreground/85"
             title={workspacePath ?? undefined}
           >
-            {workspacePath ? shortRoot(workspacePath) : "Current directory"}
+            {workspacePath ? shortRoot(workspacePath) : "No project selected"}
           </div>
         </div>
         <Button
           type="button"
           size="sm"
           variant="outline"
-          disabled={continuing}
+          disabled={continuing || connecting}
           onClick={onOpenFolder}
         >
           <FolderOpenIcon className="size-3.5" />
@@ -114,7 +127,7 @@ export function ProviderPicker({
             size="sm"
             variant="outline"
             className="mt-2.5 w-full"
-            disabled={continuing}
+            disabled={continuing || connecting}
             onClick={onOpenFolder}
           >
             <FolderOpenIcon className="size-3.5" />
@@ -213,7 +226,19 @@ export function ProviderPicker({
       </ul>
 
       {error && !error.workspace ? (
-        <p className="mt-3 text-xs text-destructive">{error.message}</p>
+        <div className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 p-3">
+          <p className="m-0 text-xs leading-relaxed text-destructive">{error.message}</p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="mt-2.5 w-full"
+            disabled={continuing || connecting || refreshing}
+            onClick={() => void retryProviderList()}
+          >
+            {refreshing ? "Checking…" : "Try again"}
+          </Button>
+        </div>
       ) : null}
 
       {selected?.id === "claude" && !selected.configured ? (
@@ -227,7 +252,7 @@ export function ProviderPicker({
             type="button"
             size="sm"
             className="mt-2.5 w-full"
-            disabled={continuing || configuringClaudeCode}
+            disabled={continuing || connecting || configuringClaudeCode}
             onClick={() => {
               setConfiguringClaudeCode(true);
               setClaudeCodeError(null);
@@ -272,7 +297,7 @@ export function ProviderPicker({
           variant="outline"
           size="sm"
           className="mt-3 w-full"
-          disabled={continuing}
+          disabled={continuing || connecting}
           onClick={() => setAddingApiProvider(true)}
         >
           <PlusIcon className="size-3.5" />
@@ -298,7 +323,7 @@ export function ProviderPicker({
             <Button
               type="button"
               size="sm"
-              disabled={!apiKey.trim() || savingKey}
+              disabled={!apiKey.trim() || savingKey || connecting}
               onClick={() => {
                 setSavingKey(true);
                 setKeyError(null);
@@ -321,13 +346,24 @@ export function ProviderPicker({
 
       <footer className="mt-6 flex justify-end gap-2">
         {selected?.canConnect ? (
-          <Button type="button" variant="outline" onClick={onConnect}>
-            {selected.statusKind === "ready" || selectedNeedsConnect
-              ? "Reconnect"
-              : "Connect"}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={continuing || connecting}
+            onClick={onConnect}
+          >
+            {connecting
+              ? "Connecting…"
+              : selected.statusKind === "ready" || selectedNeedsConnect
+                ? "Reconnect"
+                : "Connect"}
           </Button>
         ) : null}
-        <Button type="button" disabled={!ready || continuing} onClick={onContinue}>
+        <Button
+          type="button"
+          disabled={!ready || continuing || connecting}
+          onClick={onContinue}
+        >
           {continuing ? "Starting…" : "Continue"}
         </Button>
       </footer>

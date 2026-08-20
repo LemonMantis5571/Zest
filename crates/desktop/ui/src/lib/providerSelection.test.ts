@@ -27,14 +27,14 @@ function row(
   };
 }
 
-test("a configured direct provider wins over an unconfigured Codex sign-in", () => {
+test("an unavailable remembered provider does not auto-switch to another one", () => {
   const rows = [
     row("codex", "ready", false),
     row("anthropic", "ready", true),
   ];
 
   assert.equal(pickReadyProvider(rows, null, () => false)?.id, "anthropic");
-  assert.equal(pickReadyProvider(rows, "codex", () => false)?.id, "anthropic");
+  assert.equal(pickReadyProvider(rows, "codex", () => false), null);
 });
 
 test("fallback keeps an unknown configured provider actionable", () => {

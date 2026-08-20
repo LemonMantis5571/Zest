@@ -20,8 +20,11 @@ export function pickReadyProvider(
 ): ProviderRow | null {
   const ready = rows.filter((row) => isProviderReady(row, failed));
   if (prefer) {
-    const preferred = ready.find((row) => row.id === prefer);
-    if (preferred) return preferred;
+    // A remembered provider is an explicit user choice. If it is no longer
+    // ready, stop at the picker so the user can repair it or choose another;
+    // silently starting a different provider can send messages to the wrong
+    // account/project.
+    return ready.find((row) => row.id === prefer) ?? null;
   }
   return ready[0] ?? null;
 }

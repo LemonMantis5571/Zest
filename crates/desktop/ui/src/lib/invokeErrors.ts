@@ -23,6 +23,14 @@ export type ConversationRecovery =
       providerLabel: string;
       configured: boolean;
       providers: ConversationProviderChoice[];
+    }
+  | {
+      kind: "new_chat_unavailable";
+      threadId: null;
+      providerId: string;
+      providerLabel: string;
+      configured: boolean;
+      providers: ConversationProviderChoice[];
     };
 
 function parseDesktopError(error: unknown): DesktopErrorPayload | null {
@@ -85,15 +93,16 @@ export function conversationRecovery(error: unknown): ConversationRecovery | nul
   const providerId = typeof details.providerId === "string" ? details.providerId : "";
   const providerLabel =
     typeof details.providerLabel === "string" ? details.providerLabel : providerId;
-  if (parsed.code === "provider_unavailable" && threadId && providerId) {
-    return {
-      kind: "owner_unavailable",
-      threadId,
+  if (parsed.code === "provider_unavailable" && providerId) {
+    const recovery = {
       providerId,
       providerLabel,
       configured: details.configured === true,
       providers,
     };
+    return threadId
+      ? { kind: "owner_unavailable", threadId, ...recovery }
+      : { kind: "new_chat_unavailable", threadId: null, ...recovery };
   }
   return null;
 }

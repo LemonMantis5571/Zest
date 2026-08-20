@@ -106,6 +106,10 @@ export function ProviderSwitchSheet({
               row.selectable &&
               (row.statusKind === "ready" || row.statusKind === "unknown") &&
               !failed;
+            // A failed active API-key provider must remain recoverable from
+            // this sheet. It is the one case where the current row needs an
+            // action instead of a passive "Current" label.
+            const keyConfigurable = row.method === "API key" && (current || row.statusKind === "unconfigured");
             return (
               <li key={row.id}>
                 <div
@@ -123,11 +127,11 @@ export function ProviderSwitchSheet({
                       {statusLabel(row)}
                     </div>
                   </div>
-                  {current ? (
+                  {current && !keyConfigurable ? (
                     <span className="shrink-0 text-[11px] text-muted-foreground">
                       Current
                     </span>
-                  ) : selectable ? (
+                  ) : selectable && !current ? (
                     <Button
                       type="button"
                       size="sm"
@@ -136,7 +140,7 @@ export function ProviderSwitchSheet({
                     >
                       Switch
                     </Button>
-                  ) : row.method === "API key" ? (
+                  ) : keyConfigurable ? (
                     <Button
                       type="button"
                       size="sm"
@@ -148,7 +152,7 @@ export function ProviderSwitchSheet({
                         setKeyError(null);
                       }}
                     >
-                      Set key
+                      {current && row.statusKind === "ready" ? "Replace key" : "Set key"}
                     </Button>
                   ) : row.canConnect ? (
                     <Button

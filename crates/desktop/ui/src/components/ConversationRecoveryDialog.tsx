@@ -38,10 +38,14 @@ export function ConversationRecoveryDialog({
   if (!recovery) return null;
 
   const unknownOwner = recovery.kind === "unknown_owner";
+  const newChat = recovery.kind === "new_chat_unavailable";
+  const ownerUnavailable = recovery.kind === "owner_unavailable";
   const title = unknownOwner ? "Choose a provider" : "Provider unavailable";
   const description = unknownOwner
     ? "This older chat has no saved provider. Choose one once and Zest will remember it for this chat."
-    : `${recovery.providerLabel} is ${recovery.configured ? "not ready" : "not configured"} for this project. The original chat stays unchanged.`;
+    : newChat
+      ? `${recovery.providerLabel} is ${recovery.configured ? "not ready" : "not configured"} for this project. Choose an available provider or configure one before opening the chat.`
+      : `${recovery.providerLabel} is ${recovery.configured ? "not ready" : "not configured"} for this project. The original chat stays unchanged.`;
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-4">
@@ -94,7 +98,7 @@ export function ConversationRecoveryDialog({
           ) : (
             <div className="mb-2 rounded-lg border border-border/60 bg-card/50 px-3 py-2">
               <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                Original provider
+                {newChat ? "Selected provider" : "Original provider"}
               </div>
               <div className="mt-0.5 flex items-center gap-2 text-sm font-medium">
                 <span>{recovery.providerLabel}</span>
@@ -127,7 +131,9 @@ export function ConversationRecoveryDialog({
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-medium">
-                      {unknownOwner ? `Use ${provider.label}` : `Open a copy with ${provider.label}`}
+                      {ownerUnavailable
+                        ? `Open a copy with ${provider.label}`
+                        : `Use ${provider.label}`}
                     </span>
                     {provider.model ? (
                       <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
@@ -144,8 +150,7 @@ export function ConversationRecoveryDialog({
             </p>
           )}
 
-          {(!unknownOwner && !recovery.configured) ||
-          (unknownOwner && recovery.providers.length === 0) ? (
+          {!unknownOwner || recovery.providers.length === 0 ? (
             <>
               <div className="my-3 h-px bg-border/60" />
               <Button
@@ -158,7 +163,9 @@ export function ConversationRecoveryDialog({
                 <Settings2Icon className="size-3.5" aria-hidden="true" />
                 {unknownOwner
                   ? "Open project configuration"
-                  : `Configure ${recovery.providerLabel}`}
+                  : recovery.configured
+                    ? "Choose provider or API key"
+                    : `Configure ${recovery.providerLabel}`}
               </Button>
             </>
           ) : null}
