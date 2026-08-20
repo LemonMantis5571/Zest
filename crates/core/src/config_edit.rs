@@ -35,6 +35,17 @@ pub struct ClaudeCodeProviderInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct CodexCliProviderInput {
+    pub id: String,
+    pub command: String,
+    pub model: String,
+    pub models: Vec<String>,
+    pub efforts: Vec<String>,
+    pub allow_mcp: bool,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExternalAgentInput {
     pub id: String,
     pub mode: ExternalAgentMode,
@@ -330,6 +341,86 @@ pub fn add_claude_code_provider(
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// Add or update a first-class Codex CLI parent provider while preserving
+/// comments and unrelated provider entries in the user's TOML file.
+pub fn add_codex_cli_provider(path: &Path, input: &CodexCliProviderInput) -> Result<(), String> {
+    let id = input.id.trim();
+    let command = input.command.trim();
+    let model = input.model.trim();
+
+    validate_id(id, "provider")?;
+    if command.is_empty() {
+        return Err("Codex CLI command is required".into());
+    }
+    if model.is_empty() {
+        return Err("a Codex CLI model is required".into());
+    }
+    if input.timeout_secs == 0 || input.timeout_secs > 3_600 {
+        return Err("Codex CLI timeout must be between 1 and 3600 seconds".into());
+    }
+
+    let original = read_config(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("cannot parse existing config: {e}"))?;
+    if !doc.contains_key("providers") {
+        doc["providers"] = Item::Table(Table::new());
+    }
+    let providers = doc["providers"]
+        .as_table_mut()
+        .ok_or_else(|| "[providers] is not a table".to_string())?;
+    let entry = providers.entry(id).or_insert(Item::Table(Table::new()));
+    let provider = entry
+        .as_table_mut()
+        .ok_or_else(|| format!("provider `{id}` is not a table"))?;
+    if let Some(kind) = provider.get("kind").and_then(Item::as_str) {
+        if kind != "codex_cli" {
+            return Err(format!("provider `{id}` already has kind `{kind}`"));
+        }
+    }
+
+    provider["kind"] = toml_edit::value("codex_cli");
+    provider["command"] = toml_edit::value(command);
+    provider["model"] = toml_edit::value(model);
+    provider["allow_mcp"] = toml_edit::value(input.allow_mcp);
+    provider["timeout_secs"] = toml_edit::value(input.timeout_secs as i64);
+
+    let mut models = Array::new();
+    for value in input
+        .models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        models.push(Value::from(value));
+    }
+    if models.is_empty() {
+        provider.remove("models");
+    } else {
+        provider["models"] = toml_edit::value(models);
+    }
+
+    let mut efforts = Array::new();
+    for value in input
+        .efforts
+        .iter()
+        .map(|effort| effort.trim())
+        .filter(|effort| !effort.is_empty())
+    {
+        efforts.push(Value::from(value));
+    }
+    if efforts.is_empty() {
+        provider.remove("efforts");
+    } else {
+        provider["efforts"] = toml_edit::value(efforts);
+    }
+
+    let rendered = doc.to_string();
+    Config::parse(&rendered).map_err(|e| e.to_string())?;
+    atomic_write(path, rendered.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 pub fn upsert_external_agent(path: &Path, input: &ExternalAgentInput) -> Result<(), String> {
     let id = input.id.trim();
     let command = input.command.trim();
@@ -532,6 +623,37 @@ mod tests {
                 permission_mode: ClaudeCodePermissionMode::AcceptEdits,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn adds_codex_cli_parent_without_discarding_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zest.toml");
+        std::fs::write(&path, "# keep me\n[default]\nprovider = \"claude\"\n").unwrap();
+
+        add_codex_cli_provider(
+            &path,
+            &CodexCliProviderInput {
+                id: "codex".into(),
+                command: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                models: vec!["gpt-5.6-sol".into()],
+                efforts: vec!["low".into(), "high".into()],
+                allow_mcp: false,
+                timeout_secs: 900,
+            },
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep me"));
+        assert!(raw.contains("[providers.codex]"));
+        assert!(raw.contains("kind = \"codex_cli\""));
+        let config = Config::parse(&raw).unwrap();
+        assert!(matches!(
+            config.providers["codex"],
+            crate::config::ProviderConfig::CodexCli { .. }
         ));
     }
 
