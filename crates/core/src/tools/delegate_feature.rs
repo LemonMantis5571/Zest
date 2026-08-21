@@ -104,8 +104,10 @@ impl FeatureDelegator {
             context,
             depends_on,
             agent,
+            worker_target: None,
             acceptance_checks,
             review_required,
+            reviewer_target: crate::delegation::ReviewerTarget::SameAsWorker,
             created_at: 0,
         };
         card.validate(&self.root, &self.agents)

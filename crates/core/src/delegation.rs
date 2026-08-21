@@ -19,7 +19,8 @@ use crate::error::{HarnessError, Result};
 use crate::fsutil;
 use crate::tools::sensitive::is_sensitive_path;
 
-pub const DELEGATION_FORMAT_VERSION: u32 = 1;
+pub const DELEGATION_FORMAT_VERSION: u32 = 2;
+pub const LEGACY_DELEGATION_FORMAT_VERSION: u32 = 1;
 pub const MAX_FEATURE_TITLE_CHARS: usize = 200;
 pub const MAX_FEATURE_OBJECTIVE_CHARS: usize = 16_000;
 pub const MAX_FEATURE_LANE_CHARS: usize = 120;
@@ -92,6 +93,137 @@ pub struct WorkspaceSnapshot {
     pub captured_at: u64,
 }
 
+/// A provider-neutral worker destination. Credentials are resolved by the
+/// runtime; they are never represented in a delegation record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum DelegationTarget {
+    ExternalAgent {
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    Provider {
+        #[serde(rename = "providerId")]
+        provider_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+}
+
+impl DelegationTarget {
+    pub fn identity(&self) -> &str {
+        match self {
+            Self::ExternalAgent { agent_id } => agent_id,
+            Self::Provider { provider_id, .. } => provider_id,
+        }
+    }
+
+    /// Stable, non-secret identity fingerprint for approval invalidation.
+    pub fn fingerprint(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        self.hash_for_fingerprint(&mut hasher);
+        format!("target-{}", hasher.finalize().to_hex())
+    }
+
+    fn hash_for_fingerprint(&self, state: &mut blake3::Hasher) {
+        match self {
+            Self::ExternalAgent { agent_id } => {
+                state.update(b"external_agent\0");
+                state.update(agent_id.as_bytes());
+            }
+            Self::Provider {
+                provider_id,
+                model,
+                effort,
+            } => {
+                state.update(b"provider\0");
+                state.update(provider_id.as_bytes());
+                state.update(b"\0");
+                state.update(model.as_deref().unwrap_or_default().as_bytes());
+                state.update(b"\0");
+                state.update(effort.as_deref().unwrap_or_default().as_bytes());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ReviewerTarget {
+    #[default]
+    SameAsWorker,
+    Target(DelegationTarget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationOrigin {
+    pub coordinator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetFingerprint {
+    pub worker: String,
+    pub reviewer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_config_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_credential_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_config_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_credential_fingerprint: Option<String>,
+}
+
+/// The exact target state resolved after configuration and credential checks.
+///
+/// The credential fingerprint never contains a credential value. It is a
+/// non-secret availability/reference fingerprint supplied by the desktop
+/// resolver, so deleting or changing a configured credential cannot silently
+/// reuse an older approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTargetMetadata {
+    pub target: DelegationTarget,
+    pub config_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_fingerprint: Option<String>,
+}
+
+impl ResolvedTargetMetadata {
+    pub fn fingerprint(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.target.fingerprint().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.config_fingerprint.as_bytes());
+        hasher.update(b"\0");
+        if let Some(credential) = &self.credential_fingerprint {
+            hasher.update(credential.as_bytes());
+        }
+        format!("resolved-{}", hasher.finalize().to_hex())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+}
+
 /// A bounded, explicit implementation request sent to one external worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,12 +237,30 @@ pub struct FeatureCard {
     pub context: Vec<String>,
     pub depends_on: Vec<String>,
     pub agent: String,
+    /// Normalized v2 worker target. `agent` remains as a source-compatible
+    /// bridge for v1 callers and is ignored when this is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_target: Option<DelegationTarget>,
     pub acceptance_checks: Vec<String>,
     pub review_required: bool,
+    #[serde(default)]
+    pub reviewer_target: ReviewerTarget,
     pub created_at: u64,
 }
 
 impl FeatureCard {
+    pub fn effective_worker_target(&self) -> DelegationTarget {
+        self.worker_target
+            .clone()
+            .unwrap_or_else(|| DelegationTarget::ExternalAgent {
+                agent_id: self.agent.clone(),
+            })
+    }
+
+    pub fn effective_reviewer_target(&self) -> ReviewerTarget {
+        self.reviewer_target.clone()
+    }
+
     pub fn validate(
         &self,
         root: &Path,
@@ -153,18 +303,35 @@ impl FeatureCard {
         for check in &self.acceptance_checks {
             validate_check_command(check)?;
         }
-        if self.agent.trim().is_empty() {
-            return Err(HarnessError::Other(
-                "feature card agent must not be empty".into(),
-            ));
-        }
-        let config = agents.get(&self.agent).ok_or_else(|| {
-            HarnessError::Other(format!("external agent {} is not configured", self.agent))
-        })?;
-        if config.workspace != ExternalWorkspace::Isolated {
-            return Err(HarnessError::Other(
-                "feature cards require an isolated external worker workspace".into(),
-            ));
+        match self.effective_worker_target() {
+            DelegationTarget::ExternalAgent { agent_id } => {
+                if agent_id.trim().is_empty() {
+                    return Err(HarnessError::Other(
+                        "external agent id must not be empty".into(),
+                    ));
+                }
+                let config = agents.get(&agent_id).ok_or_else(|| {
+                    HarnessError::Other(format!("external agent {agent_id} is not configured"))
+                })?;
+                if config.workspace != ExternalWorkspace::Isolated {
+                    return Err(HarnessError::Other(
+                        "feature cards require an isolated external worker workspace".into(),
+                    ));
+                }
+            }
+            DelegationTarget::Provider {
+                provider_id,
+                model,
+                effort,
+            } => {
+                validate_id(&provider_id, "provider")?;
+                if let Some(model) = model {
+                    validate_text(&model, "model", 200)?;
+                }
+                if let Some(effort) = effort {
+                    validate_text(&effort, "effort", 32)?;
+                }
+            }
         }
         if !self.review_required {
             return Err(HarnessError::Other(
@@ -394,6 +561,7 @@ fn bounded_context(root: &Path, paths: &[String]) -> String {
 pub enum DelegationStatus {
     Planned,
     AwaitingApproval,
+    Queued,
     WorkerRunning,
     ReviewRunning,
     ReadyToApply,
@@ -415,6 +583,7 @@ impl DelegationStatus {
             self,
             Self::Planned
                 | Self::AwaitingApproval
+                | Self::Queued
                 | Self::WorkerRunning
                 | Self::ReviewRunning
                 | Self::ChangesRequested
@@ -435,6 +604,14 @@ pub struct DelegationAttempt {
     pub attempt_id: String,
     pub role: AttemptRole,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<DelegationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AttemptUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_target: Option<ResolvedTargetMetadata>,
     pub started_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
@@ -456,6 +633,18 @@ pub struct DelegationJob {
     pub project_root: String,
     pub parent_thread_id: String,
     pub card: FeatureCard,
+    #[serde(default)]
+    pub reviewer_target: ReviewerTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<DelegationOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_fingerprint: Option<TargetFingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_worker_target: Option<ResolvedTargetMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_reviewer_target: Option<ResolvedTargetMetadata>,
     pub status: DelegationStatus,
     pub worker_attempt_id: Option<String>,
     pub reviewer_attempt_id: Option<String>,
@@ -494,6 +683,104 @@ pub fn dependency_blocker(job: &DelegationJob, jobs: &[DelegationJob]) -> Option
 }
 
 impl DelegationJob {
+    pub fn worker_target(&self) -> DelegationTarget {
+        self.card.effective_worker_target()
+    }
+
+    pub fn resolved_reviewer_target(&self) -> DelegationTarget {
+        match &self.reviewer_target {
+            ReviewerTarget::SameAsWorker => self.worker_target(),
+            ReviewerTarget::Target(target) => target.clone(),
+        }
+    }
+
+    pub fn approve(&mut self) -> Result<()> {
+        let worker = ResolvedTargetMetadata {
+            target: self.worker_target(),
+            config_fingerprint: "legacy-target-only".into(),
+            credential_fingerprint: None,
+        };
+        let reviewer = ResolvedTargetMetadata {
+            target: self.resolved_reviewer_target(),
+            config_fingerprint: "legacy-target-only".into(),
+            credential_fingerprint: None,
+        };
+        self.approve_with_resolved_targets(worker, reviewer)
+    }
+
+    pub fn approve_with_resolved_targets(
+        &mut self,
+        worker: ResolvedTargetMetadata,
+        reviewer: ResolvedTargetMetadata,
+    ) -> Result<()> {
+        if self.status != DelegationStatus::AwaitingApproval {
+            return Err(HarnessError::Other(format!(
+                "delegation job {:?} is not awaiting approval",
+                self.status
+            )));
+        }
+        if worker.target.identity() != self.worker_target().identity() {
+            return Err(HarnessError::Other(
+                "resolved worker target does not match the requested worker".into(),
+            ));
+        }
+        if reviewer.target.identity() != self.resolved_reviewer_target().identity() {
+            return Err(HarnessError::Other(
+                "resolved reviewer target does not match the requested reviewer".into(),
+            ));
+        }
+        self.approved_at = Some(now_millis());
+        self.approval_fingerprint = Some(TargetFingerprint {
+            worker: worker.fingerprint(),
+            reviewer: reviewer.fingerprint(),
+            worker_config_fingerprint: Some(worker.config_fingerprint.clone()),
+            worker_credential_fingerprint: worker.credential_fingerprint.clone(),
+            reviewer_config_fingerprint: Some(reviewer.config_fingerprint.clone()),
+            reviewer_credential_fingerprint: reviewer.credential_fingerprint.clone(),
+        });
+        self.resolved_worker_target = Some(worker);
+        self.resolved_reviewer_target = Some(reviewer);
+        self.updated_at = now_millis();
+        Ok(())
+    }
+
+    pub fn is_approved(&self) -> bool {
+        self.approved_at.is_some()
+            && self
+                .approval_fingerprint
+                .as_ref()
+                .is_some_and(|fingerprint| {
+                    let worker = self.resolved_worker_target.as_ref();
+                    let reviewer = self.resolved_reviewer_target.as_ref();
+                    match (worker, reviewer) {
+                        (Some(worker), Some(reviewer)) => {
+                            fingerprint.worker == worker.fingerprint()
+                                && fingerprint.reviewer == reviewer.fingerprint()
+                        }
+                        _ => {
+                            fingerprint.worker == self.worker_target().fingerprint()
+                                && fingerprint.reviewer
+                                    == self.resolved_reviewer_target().fingerprint()
+                        }
+                    }
+                })
+    }
+
+    pub fn is_approved_for(
+        &self,
+        worker: &ResolvedTargetMetadata,
+        reviewer: &ResolvedTargetMetadata,
+    ) -> bool {
+        self.approved_at.is_some()
+            && self
+                .approval_fingerprint
+                .as_ref()
+                .is_some_and(|fingerprint| {
+                    fingerprint.worker == worker.fingerprint()
+                        && fingerprint.reviewer == reviewer.fingerprint()
+                })
+    }
+
     pub fn transition(&mut self, next: DelegationStatus) -> Result<bool> {
         if self.status == next {
             return Ok(false);
@@ -512,25 +799,29 @@ impl DelegationJob {
             (
                 DelegationStatus::Planned,
                 DelegationStatus::AwaitingApproval
-            ) | (
-                DelegationStatus::AwaitingApproval,
-                DelegationStatus::WorkerRunning
-            ) | (
-                DelegationStatus::WorkerRunning,
-                DelegationStatus::ReviewRunning
-            ) | (
-                DelegationStatus::ReviewRunning,
-                DelegationStatus::ReadyToApply
-            ) | (
-                DelegationStatus::ReviewRunning,
-                DelegationStatus::ChangesRequested
-            ) | (
-                DelegationStatus::ChangesRequested,
-                DelegationStatus::AwaitingApproval
-            ) | (
-                DelegationStatus::Blocked,
-                DelegationStatus::AwaitingApproval
-            ) | (DelegationStatus::Failed, DelegationStatus::AwaitingApproval)
+            ) | (DelegationStatus::AwaitingApproval, DelegationStatus::Queued)
+                | (DelegationStatus::Queued, DelegationStatus::WorkerRunning)
+                | (
+                    DelegationStatus::WorkerRunning,
+                    DelegationStatus::ReviewRunning
+                )
+                | (
+                    DelegationStatus::ReviewRunning,
+                    DelegationStatus::ReadyToApply
+                )
+                | (
+                    DelegationStatus::ReviewRunning,
+                    DelegationStatus::ChangesRequested
+                )
+                | (
+                    DelegationStatus::ChangesRequested,
+                    DelegationStatus::AwaitingApproval
+                )
+                | (
+                    DelegationStatus::Blocked,
+                    DelegationStatus::AwaitingApproval
+                )
+                | (DelegationStatus::Failed, DelegationStatus::AwaitingApproval)
                 | (
                     DelegationStatus::ApplyConflict,
                     DelegationStatus::AwaitingApproval
@@ -550,6 +841,17 @@ impl DelegationJob {
                 self.status, next
             )));
         }
+        if next == DelegationStatus::Queued && !self.is_approved() {
+            return Err(HarnessError::Other(
+                "delegation job requires an approval record before queuing".into(),
+            ));
+        }
+        if next == DelegationStatus::AwaitingApproval {
+            self.approved_at = None;
+            self.approval_fingerprint = None;
+            self.resolved_worker_target = None;
+            self.resolved_reviewer_target = None;
+        }
         self.status = next;
         self.updated_at = now_millis();
         Ok(true)
@@ -561,6 +863,37 @@ impl DelegationJob {
     }
 
     pub fn start_attempt(&mut self, role: AttemptRole, agent: &str) -> Result<String> {
+        let target = if role == AttemptRole::Reviewer {
+            self.resolved_reviewer_target()
+        } else {
+            self.worker_target()
+        };
+        self.start_attempt_for_target(role, agent, target)
+    }
+
+    pub fn start_attempt_for_target(
+        &mut self,
+        role: AttemptRole,
+        agent: &str,
+        target: DelegationTarget,
+    ) -> Result<String> {
+        self.start_attempt_with_metadata(
+            role,
+            agent,
+            ResolvedTargetMetadata {
+                target,
+                config_fingerprint: "unresolved".into(),
+                credential_fingerprint: None,
+            },
+        )
+    }
+
+    pub fn start_attempt_with_metadata(
+        &mut self,
+        role: AttemptRole,
+        agent: &str,
+        resolved_target: ResolvedTargetMetadata,
+    ) -> Result<String> {
         if role == AttemptRole::Worker {
             self.attempt = self.attempt.saturating_add(1);
         }
@@ -573,6 +906,10 @@ impl DelegationJob {
             attempt_id: attempt_id.clone(),
             role: role.clone(),
             agent: agent.to_string(),
+            target: Some(resolved_target.target.clone()),
+            target_fingerprint: Some(resolved_target.fingerprint()),
+            usage: None,
+            resolved_target: Some(resolved_target),
             started_at: now_millis(),
             finished_at: None,
         };
@@ -584,6 +921,38 @@ impl DelegationJob {
         self.attempts.push(attempt);
         self.updated_at = now_millis();
         Ok(attempt_id)
+    }
+
+    pub fn set_attempt_usage(&mut self, attempt_id: &str, usage: AttemptUsage) -> Result<()> {
+        let attempt = self
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.attempt_id == attempt_id)
+            .ok_or_else(|| {
+                HarnessError::Other(format!("unknown delegation attempt {attempt_id}"))
+            })?;
+        attempt.usage = Some(usage);
+        self.updated_at = now_millis();
+        Ok(())
+    }
+
+    pub fn set_attempt_resolved_target(
+        &mut self,
+        attempt_id: &str,
+        target: ResolvedTargetMetadata,
+    ) -> Result<()> {
+        let attempt = self
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.attempt_id == attempt_id)
+            .ok_or_else(|| {
+                HarnessError::Other(format!("unknown delegation attempt {attempt_id}"))
+            })?;
+        attempt.target = Some(target.target.clone());
+        attempt.target_fingerprint = Some(target.fingerprint());
+        attempt.resolved_target = Some(target);
+        self.updated_at = now_millis();
+        Ok(())
     }
 
     pub fn finish_attempt(&mut self, attempt_id: &str) {
@@ -829,7 +1198,7 @@ impl DelegationStore {
 
     pub fn load(&self, job_id: &str) -> Result<Option<DelegationJob>> {
         let job_id = validate_id(job_id, "delegation job")?;
-        read_json(&self.job_path(&job_id)?, "delegation job", &job_id)
+        read_job(&self.job_path(&job_id)?, &job_id)
     }
 
     pub fn save(&self, job: &DelegationJob) -> Result<()> {
@@ -840,12 +1209,17 @@ impl DelegationStore {
             ));
         }
         let _guard = state_lock()?;
-        write_json(
-            &self.job_path(&job.job_id)?,
-            "delegation job",
-            &job.job_id,
-            job,
-        )
+        let path = self.job_path(&job.job_id)?;
+        if let Some(current) = read_job(&path, &job.job_id)? {
+            if current.status == DelegationStatus::Cancelled
+                && job.status != DelegationStatus::Cancelled
+            {
+                return Err(HarnessError::Other(
+                    "delegation job was cancelled while this attempt was running".into(),
+                ));
+            }
+        }
+        write_json(&path, "delegation job", &job.job_id, job)
     }
 
     pub fn create(
@@ -886,7 +1260,22 @@ impl DelegationStore {
             job_id: job_id.clone(),
             project_root: self.root.to_string_lossy().into_owned(),
             parent_thread_id: parent_thread_id.to_string(),
-            card,
+            reviewer_target: card.effective_reviewer_target(),
+            origin: Some(DelegationOrigin {
+                coordinator: "zest".into(),
+                chat_id: None,
+                thread_id: Some(parent_thread_id.to_string()),
+            }),
+            approved_at: None,
+            approval_fingerprint: None,
+            resolved_worker_target: None,
+            resolved_reviewer_target: None,
+            card: {
+                if card.worker_target.is_none() {
+                    card.worker_target = Some(card.effective_worker_target());
+                }
+                card
+            },
             status: DelegationStatus::AwaitingApproval,
             worker_attempt_id: None,
             reviewer_attempt_id: None,
@@ -925,7 +1314,7 @@ impl DelegationStore {
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if let Some(job) = read_json(&path, "delegation job", id)? {
+            if let Some(job) = read_job(&path, id)? {
                 jobs.push(job);
             }
         }
@@ -994,6 +1383,81 @@ impl DelegationStore {
         self.save(&job)?;
         Ok(job)
     }
+}
+
+fn read_job(path: &Path, id: &str) -> Result<Option<DelegationJob>> {
+    let Some(mut value) = read_json::<serde_json::Value>(path, "delegation job", id)? else {
+        return Ok(None);
+    };
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if version == u64::from(LEGACY_DELEGATION_FORMAT_VERSION) {
+        let card = value
+            .get_mut("card")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| {
+                HarnessError::Other(format!("delegation job {id} has no feature card"))
+            })?;
+        let agent = card
+            .get("agent")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| HarnessError::Other(format!("legacy delegation job {id} has no agent")))?
+            .to_string();
+        card.insert(
+            "version".into(),
+            serde_json::json!(DELEGATION_FORMAT_VERSION),
+        );
+        card.insert(
+            "workerTarget".into(),
+            serde_json::json!({"kind":"externalAgent", "agentId":agent}),
+        );
+        card.insert(
+            "reviewerTarget".into(),
+            serde_json::json!({"kind":"sameAsWorker"}),
+        );
+        card.insert("reviewRequired".into(), serde_json::json!(true));
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "version".into(),
+                serde_json::json!(DELEGATION_FORMAT_VERSION),
+            );
+            object.insert(
+                "reviewerTarget".into(),
+                serde_json::json!({"kind":"sameAsWorker"}),
+            );
+            object.insert("approvedAt".into(), serde_json::Value::Null);
+            object.insert("approvalFingerprint".into(), serde_json::Value::Null);
+            object.insert("origin".into(), serde_json::json!({"coordinator":"legacy"}));
+            if matches!(
+                object.get("status").and_then(serde_json::Value::as_str),
+                Some("worker_running" | "review_running")
+            ) {
+                object.insert("status".into(), serde_json::json!("blocked"));
+                object.insert(
+                    "error".into(),
+                    serde_json::json!("Legacy running job recovered after restart; explicit approval is required for a fresh attempt."),
+                );
+            }
+        }
+    }
+    let job: DelegationJob = serde_json::from_value(value).map_err(|error| {
+        HarnessError::Other(format!(
+            "delegation job {id} is corrupt at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if job.version != DELEGATION_FORMAT_VERSION {
+        return Err(HarnessError::Other(format!(
+            "unsupported delegation job version {}",
+            job.version
+        )));
+    }
+    if version == u64::from(LEGACY_DELEGATION_FORMAT_VERSION) {
+        write_json(path, "migrated delegation job", id, &job)?;
+    }
+    Ok(Some(job))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, kind: &str, id: &str) -> Result<Option<T>> {
@@ -1258,8 +1722,10 @@ mod tests {
             context: vec![],
             depends_on: vec![],
             agent: "worker".into(),
+            worker_target: None,
             acceptance_checks: vec!["cargo test -p zest-core".into()],
             review_required: true,
+            reviewer_target: ReviewerTarget::SameAsWorker,
             created_at: now_millis(),
         }
     }
@@ -1323,6 +1789,12 @@ mod tests {
             project_root: root.to_string_lossy().into_owned(),
             parent_thread_id: "thread-1".into(),
             card,
+            reviewer_target: ReviewerTarget::SameAsWorker,
+            origin: None,
+            approved_at: None,
+            approval_fingerprint: None,
+            resolved_worker_target: None,
+            resolved_reviewer_target: None,
             status: DelegationStatus::Planned,
             worker_attempt_id: None,
             reviewer_attempt_id: None,
@@ -1344,6 +1816,9 @@ mod tests {
         };
         assert!(job.transition(DelegationStatus::AwaitingApproval).unwrap());
         assert!(!job.transition(DelegationStatus::AwaitingApproval).unwrap());
+        assert!(job.transition(DelegationStatus::WorkerRunning).is_err());
+        job.approve().unwrap();
+        assert!(job.transition(DelegationStatus::Queued).unwrap());
         assert!(job.transition(DelegationStatus::WorkerRunning).unwrap());
         assert!(job.transition(DelegationStatus::ReviewRunning).unwrap());
         assert!(job.transition(DelegationStatus::ReadyToApply).unwrap());
@@ -1402,6 +1877,12 @@ mod tests {
             project_root: root.to_string_lossy().into_owned(),
             parent_thread_id: "thread-1".into(),
             card: card(&root),
+            reviewer_target: ReviewerTarget::SameAsWorker,
+            origin: None,
+            approved_at: None,
+            approval_fingerprint: None,
+            resolved_worker_target: None,
+            resolved_reviewer_target: None,
             status: DelegationStatus::AwaitingApproval,
             worker_attempt_id: None,
             reviewer_attempt_id: None,
@@ -1421,12 +1902,16 @@ mod tests {
             updated_at: now,
             error: None,
         };
+        job.approve().unwrap();
+        job.transition(DelegationStatus::Queued).unwrap();
         job.transition(DelegationStatus::WorkerRunning).unwrap();
         let first = job.start_attempt(AttemptRole::Worker, "worker").unwrap();
         assert_eq!(job.attempt, 1);
         job.transition(DelegationStatus::ReviewRunning).unwrap();
         job.transition(DelegationStatus::ChangesRequested).unwrap();
         job.transition(DelegationStatus::AwaitingApproval).unwrap();
+        job.approve().unwrap();
+        job.transition(DelegationStatus::Queued).unwrap();
         job.transition(DelegationStatus::WorkerRunning).unwrap();
         // Attempt IDs are generated for each worker invocation, and a retry
         // starts from a new queued state after the reviewer loop.
@@ -1446,6 +1931,8 @@ mod tests {
             .unwrap();
         assert_eq!(store.load(&job.job_id).unwrap().unwrap().job_id, job.job_id);
         let mut running = job;
+        running.approve().unwrap();
+        running.transition(DelegationStatus::Queued).unwrap();
         running.transition(DelegationStatus::WorkerRunning).unwrap();
         store.save(&running).unwrap();
         let reconciled = store.reconcile_after_restart().unwrap();
@@ -1453,6 +1940,37 @@ mod tests {
         assert_eq!(
             store.load(&running.job_id).unwrap().unwrap().status,
             DelegationStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn store_create_preserves_distinct_reviewer_target_on_card_and_job() {
+        let root = scratch("distinct-reviewer-target");
+        let store = DelegationStore::open(&root).unwrap();
+        let reviewer = ReviewerTarget::Target(DelegationTarget::Provider {
+            provider_id: "anthropic-reviewer".into(),
+            model: Some("claude-sonnet".into()),
+            effort: Some("high".into()),
+        });
+        let mut feature = card(&root);
+        feature.reviewer_target = reviewer.clone();
+        let job = store
+            .create(
+                "thread-reviewer",
+                feature,
+                capture_workspace_snapshot(&root),
+            )
+            .unwrap();
+
+        assert_eq!(job.card.reviewer_target, reviewer);
+        assert_eq!(job.reviewer_target, reviewer);
+        assert_eq!(
+            job.resolved_reviewer_target(),
+            DelegationTarget::Provider {
+                provider_id: "anthropic-reviewer".into(),
+                model: Some("claude-sonnet".into()),
+                effort: Some("high".into()),
+            }
         );
     }
 
@@ -1504,6 +2022,150 @@ mod tests {
         });
         let job: DelegationJob = serde_json::from_value(value).unwrap();
         assert!(job.error.is_none());
+    }
+
+    #[test]
+    fn provider_targets_round_trip_without_credentials() {
+        let target = DelegationTarget::Provider {
+            provider_id: "deepseek".into(),
+            model: Some("deepseek-chat".into()),
+            effort: Some("high".into()),
+        };
+        let encoded = serde_json::to_string(&target).unwrap();
+        assert!(encoded.contains("deepseek"));
+        assert!(!encoded.contains("key"));
+        assert_eq!(
+            serde_json::from_str::<DelegationTarget>(&encoded).unwrap(),
+            target
+        );
+        assert_eq!(target.fingerprint(), target.fingerprint());
+    }
+
+    #[test]
+    fn provider_target_validation_is_bounded_and_does_not_require_external_config() {
+        let root = scratch("provider-validation");
+        let mut value = card(&root);
+        value.agent.clear();
+        value.worker_target = Some(DelegationTarget::Provider {
+            provider_id: "deepseek".into(),
+            model: Some("deepseek-chat".into()),
+            effort: None,
+        });
+        value.validate(&root, &BTreeMap::new()).unwrap();
+        value.objective = "x".repeat(MAX_FEATURE_OBJECTIVE_CHARS + 1);
+        assert!(value.validate(&root, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn approval_gates_queue_and_retry_clears_approval() {
+        let root = scratch("approval-gate");
+        let store = DelegationStore::open(&root).unwrap();
+        let mut job = store
+            .create(
+                "thread-approval",
+                card(&root),
+                capture_workspace_snapshot(&root),
+            )
+            .unwrap();
+        assert!(!job.is_approved());
+        assert!(job.transition(DelegationStatus::Queued).is_err());
+        job.approve().unwrap();
+        assert!(job.is_approved());
+        job.transition(DelegationStatus::Queued).unwrap();
+        job.transition(DelegationStatus::WorkerRunning).unwrap();
+        job.transition(DelegationStatus::Failed).unwrap();
+        job.transition(DelegationStatus::AwaitingApproval).unwrap();
+        assert!(!job.is_approved());
+    }
+
+    #[test]
+    fn resolved_approval_invalidates_when_target_metadata_changes() {
+        let root = scratch("resolved-approval");
+        let store = DelegationStore::open(&root).unwrap();
+        let mut job = store
+            .create(
+                "thread-resolved-approval",
+                card(&root),
+                capture_workspace_snapshot(&root),
+            )
+            .unwrap();
+        let worker = ResolvedTargetMetadata {
+            target: job.worker_target(),
+            config_fingerprint: "worker-config-a".into(),
+            credential_fingerprint: Some("worker-credential-a".into()),
+        };
+        let reviewer = worker.clone();
+        job.approve_with_resolved_targets(worker.clone(), reviewer.clone())
+            .unwrap();
+        assert!(job.is_approved());
+        assert!(job.is_approved_for(&worker, &reviewer));
+
+        let mut changed_worker = worker;
+        changed_worker.config_fingerprint = "worker-config-b".into();
+        assert!(!job.is_approved_for(&changed_worker, &reviewer));
+    }
+
+    #[test]
+    fn cancelled_job_cannot_be_resurrected_by_a_stale_save() {
+        let root = scratch("cancelled-save");
+        let store = DelegationStore::open(&root).unwrap();
+        let original = store
+            .create(
+                "thread-cancelled-save",
+                card(&root),
+                capture_workspace_snapshot(&root),
+            )
+            .unwrap();
+        let mut cancelled = original.clone();
+        cancelled.transition(DelegationStatus::Cancelled).unwrap();
+        store.save(&cancelled).unwrap();
+
+        let error = store.save(&original).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(
+            store.load(&original.job_id).unwrap().unwrap().status,
+            DelegationStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn v1_load_migrates_target_defaults_and_interrupts_running_job() {
+        let root = scratch("v1-migration");
+        let dir = root.join(".zest").join("delegations");
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = serde_json::json!({
+            "version": 1, "jobId": "legacy-job", "projectRoot": root,
+            "parentThreadId": "thread-legacy",
+            "card": {"version": 1, "cardId": "legacy-card", "title": "x", "objective": "y",
+                "lane": "z", "scope": ["src"], "context": [], "dependsOn": [],
+                "agent": "worker", "acceptanceChecks": [], "reviewRequired": true, "createdAt": 1},
+            "status": "worker_running", "workerAttemptId": null, "reviewerAttemptId": null,
+            "attempt": 1, "attempts": [],
+            "baseWorkspaceSnapshot": {"head": null, "fingerprint": "x", "capturedAt": 1},
+            "artifacts": {"workerDiff":"diff", "workerResult":"result", "reviewResult":"review"},
+            "createdAt": 1, "updatedAt": 1
+        });
+        fs::write(
+            dir.join("legacy-job.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let job = DelegationStore::open(&root)
+            .unwrap()
+            .load("legacy-job")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.version, DELEGATION_FORMAT_VERSION);
+        assert_eq!(
+            job.card.effective_worker_target(),
+            DelegationTarget::ExternalAgent {
+                agent_id: "worker".into()
+            }
+        );
+        assert_eq!(job.reviewer_target, ReviewerTarget::SameAsWorker);
+        assert_eq!(job.status, DelegationStatus::Blocked);
+        assert!(!job.is_approved());
+        assert!(job.error.unwrap().contains("explicit approval"));
     }
 
     #[test]

@@ -30,8 +30,8 @@ component, no accounts or telemetry.
 
 ## Main Systems
 
-- **zest-core** - headless library: provider layer, agent loop, tools, ACP/headless workers,
-  persistence, usage ledger, and approvals.
+- **zest-core** - headless library: provider layer, agent loop, tools, native provider workers,
+  ACP/headless workers, persistence, usage ledger, and approvals.
 - **zest** - terminal front-end. One consumer of the core.
 - **zest-desktop** - Tauri shell: provider picker, Codex Connect, API-key setup, ACP worker setup,
   project/chat history, attachments, approvals/diffs, context meter, and recovery controls.
@@ -41,6 +41,14 @@ component, no accounts or telemetry.
 - **ACP workers** - configured under [agents.<id>]; invoked only through delegate_external and
   kept separate from the Claude Code parent provider.
 - **Usage ledger** - records Zest traffic honestly per provider. External CLI usage is not invented.
+- **Coordinator** - the project-local delegation state machine and scheduler. It owns feature
+  cards, worker/reviewer targets, approval fingerprints, queueing, retry records, artifacts, and
+  apply/review transitions; it is not a second parent agent loop.
+- **Feature card** - the bounded, versioned delegation request containing objective, scope,
+  selected context, dependencies, acceptance checks, worker target, and reviewer target.
+- **Two lanes** - native provider workers run through Zest's provider/runtime boundary; external
+  workers run through an explicitly configured ACP or headless CLI. The lanes share coordinator
+  records and review rules but do not share credential ownership or parent transcript state.
 
 ## Important Constraints
 
@@ -48,6 +56,14 @@ component, no accounts or telemetry.
   prebuilt React webview; the agent loop stays in zest-core.
 - **ACP stays explicit.** Workers must be configured and already signed in. No hidden provider
   switching or automatic delegation.
+- **Parent boundary is provider-owned.** A parent chat stays with its selected provider. Native
+  delegation creates a bounded worker/reviewer runtime; it does not reuse the parent transcript,
+  fall back to another provider/model, or register a provider-owned parent's tools as Zest tools.
+- **Delegation is approval-gated.** A job cannot enter `queued` without approval fingerprints for
+  both worker and reviewer targets. Target changes invalidate approval and require a new approval.
+- **Review is fresh and read-only.** Reviewers receive the worker diff in a fresh isolated
+  workspace. Reviewer edits are discarded; only a validated review report can make a job ready to
+  apply.
 - **Secrets stay out of config.** API keys use the OS credential manager with an environment
   fallback for CI. Worker CLI sessions remain owned by their CLIs.
 - **Usage accounting must be honest.** Mark provider-reported usage separately from unavailable
@@ -58,6 +74,9 @@ component, no accounts or telemetry.
   External worker execution is also approval-gated.
 - **Provider-specific history is immutable.** A chat stays with its selected provider because
   wire history can contain provider-specific thinking signatures and tool shapes.
+- **Usage has two lanes too.** Native provider worker usage is recorded with the provider-owned
+  ledger. External worker usage is an optional per-worker projection and is never merged into the
+  parent's provider spend or represented as an account balance.
 
 ## Preferred Style
 

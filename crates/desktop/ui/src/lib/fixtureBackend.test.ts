@@ -49,6 +49,25 @@ describe("fixture free chats", () => {
 });
 
 describe("fixture delegation lifecycle", () => {
+  it("keeps a newly created job awaiting explicit approval", async () => {
+    const backend = createFixtureBackend();
+    const job = await backend.createDelegationJob({
+      parentThreadId: "thread-fixture",
+      title: "Created job",
+      objective: "Make the requested bounded change.",
+      lane: "product",
+      scope: ["src"],
+      context: [],
+      dependsOn: [],
+      acceptanceChecks: [],
+      worker: { kind: "provider", providerId: "fixture", model: null, effort: null },
+      reviewer: { kind: "sameAsWorker" },
+      chatId: "thread-fixture",
+    });
+    assert.equal(job.status, "awaiting_approval");
+    assert.equal(job.approved, false);
+  });
+
   it("drives a card through worker, reviewer, ready, and apply states", async () => {
     const backend = createFixtureBackend();
     const events: DelegationEvent[] = [];
@@ -58,11 +77,14 @@ describe("fixture delegation lifecycle", () => {
     assert.equal(initial.status, "awaiting_approval");
     assert.equal(initial.changedFileCount, 0);
 
-    const ready = await backend.retryDelegationJob(initial.jobId);
+    const retried = await backend.retryDelegationJob(initial.jobId);
+    assert.equal(retried.status, "awaiting_approval");
+    const ready = await backend.approveDelegationJob(initial.jobId);
     assert.equal(ready.status, "ready_to_apply");
     assert.deepEqual(
       events.map((event) => event.kind),
       [
+        "approval_required",
         "worker_started",
         "worker_completed",
         "reviewer_started",
@@ -90,6 +112,24 @@ describe("fixture delegation lifecycle", () => {
     const cancelled = await backend.cancelDelegationJob(job.jobId);
     assert.equal(cancelled.status, "cancelled");
     assert.equal(events.at(-1)?.kind, "cancelled");
+  });
+
+  it("groups target kinds and keeps unavailable targets actionable", async () => {
+    const backend = createFixtureBackend();
+    const targets = await backend.listDelegationTargets();
+    assert.deepEqual(targets.map((target) => target.target.kind), ["provider", "externalAgent"]);
+    assert.equal(targets[0]?.available, true);
+    assert.equal(targets[1]?.available, false);
+    assert.match(targets[1]?.error ?? "", /Reconnect|choose another target/);
+  });
+
+  it("returns only the bounded handoff summary for draft insertion", async () => {
+    const backend = createFixtureBackend();
+    const [job] = await backend.listDelegationJobs();
+    const handoff = await backend.prepareDelegationHandoff(job.jobId);
+    assert.equal(handoff.jobId, job.jobId);
+    assert.equal(handoff.summary, "No worker summary is available yet.");
+    assert.equal("messages" in handoff, false);
   });
 });
 

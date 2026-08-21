@@ -4,16 +4,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::Semaphore;
 #[cfg(feature = "export-bindings")]
 use ts_rs::TS;
 use zest_core::{
     apply_diff_checked, capture_workspace_snapshot, dependency_blocker, diff_paths,
-    run_delegation_reviewer, run_delegation_worker, validate_diff_scope, AttemptRole, CheckStatus,
-    Config, DelegationJob, DelegationStatus as CoreDelegationStatus, DelegationStore, ReviewReport,
-    ReviewSeverity as CoreReviewSeverity, WorkerResult,
+    resolve_provider_target, run_acceptance_checks, run_delegation_reviewer, run_delegation_worker,
+    run_provider_reviewer, run_provider_worker, validate_diff_scope, AttemptRole, AttemptUsage,
+    CheckStatus, Config, DelegationJob, DelegationOrigin, DelegationStatus as CoreDelegationStatus,
+    DelegationStore, DelegationTarget, ExternalUsageReport, ProviderConfig, ResolvedTargetMetadata,
+    ReviewReport, ReviewSeverity as CoreReviewSeverity, ReviewerTarget, WorkerResult,
 };
 
 const MAX_ACTIVE_WORKER_JOBS: usize = 2;
@@ -28,6 +30,7 @@ const MAX_ACTIVE_WORKER_JOBS: usize = 2;
 pub enum DelegationStatus {
     Planned,
     AwaitingApproval,
+    Queued,
     WorkerRunning,
     ReviewRunning,
     ReadyToApply,
@@ -95,6 +98,268 @@ pub struct AcceptanceCheckView {
     pub output: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "DelegationTarget.ts", rename_all = "camelCase")
+)]
+pub enum DelegationTargetView {
+    ExternalAgent {
+        #[cfg_attr(feature = "export-bindings", ts(rename = "agentId"))]
+        agent_id: String,
+    },
+    Provider {
+        #[cfg_attr(feature = "export-bindings", ts(rename = "providerId"))]
+        provider_id: String,
+        model: Option<String>,
+        effort: Option<String>,
+    },
+}
+
+impl From<&DelegationTarget> for DelegationTargetView {
+    fn from(target: &DelegationTarget) -> Self {
+        match target {
+            DelegationTarget::ExternalAgent { agent_id } => Self::ExternalAgent {
+                agent_id: agent_id.clone(),
+            },
+            DelegationTarget::Provider {
+                provider_id,
+                model,
+                effort,
+            } => Self::Provider {
+                provider_id: provider_id.clone(),
+                model: model.clone(),
+                effort: effort.clone(),
+            },
+        }
+    }
+}
+
+impl From<DelegationTargetView> for DelegationTarget {
+    fn from(target: DelegationTargetView) -> Self {
+        match target {
+            DelegationTargetView::ExternalAgent { agent_id } => Self::ExternalAgent { agent_id },
+            DelegationTargetView::Provider {
+                provider_id,
+                model,
+                effort,
+            } => Self::Provider {
+                provider_id,
+                model,
+                effort,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "ReviewerTarget.ts", rename_all = "camelCase")
+)]
+pub enum ReviewerTargetView {
+    SameAsWorker,
+    Target { target: DelegationTargetView },
+}
+
+impl From<&ReviewerTarget> for ReviewerTargetView {
+    fn from(target: &ReviewerTarget) -> Self {
+        match target {
+            ReviewerTarget::SameAsWorker => Self::SameAsWorker,
+            ReviewerTarget::Target(target) => Self::Target {
+                target: target.into(),
+            },
+        }
+    }
+}
+
+impl From<ReviewerTargetView> for ReviewerTarget {
+    fn from(target: ReviewerTargetView) -> Self {
+        match target {
+            ReviewerTargetView::SameAsWorker => Self::SameAsWorker,
+            ReviewerTargetView::Target { target } => Self::Target(target.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "DelegationAttemptView.ts",
+        rename_all = "camelCase"
+    )
+)]
+pub struct DelegationAttemptView {
+    pub attempt_id: String,
+    pub role: String,
+    pub agent: String,
+    pub target: Option<DelegationTargetView>,
+    pub usage: Option<AttemptUsageView>,
+    pub resolved_target: Option<ResolvedTargetMetadataView>,
+    pub started_at: u64,
+    pub finished_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+pub struct AttemptUsageView {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "ResolvedTargetMetadataView.ts",
+        rename_all = "camelCase"
+    )
+)]
+pub struct ResolvedTargetMetadataView {
+    pub target: DelegationTargetView,
+    pub config_fingerprint: String,
+    pub credential_fingerprint: Option<String>,
+}
+
+impl From<&ResolvedTargetMetadata> for ResolvedTargetMetadataView {
+    fn from(metadata: &ResolvedTargetMetadata) -> Self {
+        Self {
+            target: (&metadata.target).into(),
+            config_fingerprint: metadata.config_fingerprint.clone(),
+            credential_fingerprint: metadata.credential_fingerprint.clone(),
+        }
+    }
+}
+
+impl From<&AttemptUsage> for AttemptUsageView {
+    fn from(usage: &AttemptUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+pub struct DelegationOriginView {
+    pub coordinator: String,
+    pub chat_id: Option<String>,
+    pub thread_id: Option<String>,
+}
+
+impl From<&DelegationOrigin> for DelegationOriginView {
+    fn from(origin: &DelegationOrigin) -> Self {
+        Self {
+            coordinator: origin.coordinator.clone(),
+            chat_id: origin.chat_id.clone(),
+            thread_id: origin.thread_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "DelegationCreateRequest.ts",
+        rename_all = "camelCase"
+    )
+)]
+pub struct CreateDelegationJobRequest {
+    pub parent_thread_id: String,
+    pub title: String,
+    pub objective: String,
+    pub lane: String,
+    pub scope: Vec<String>,
+    #[serde(default)]
+    pub context: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub acceptance_checks: Vec<String>,
+    pub worker: DelegationTargetView,
+    #[serde(default)]
+    pub reviewer: Option<ReviewerTargetView>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "DelegationUpdateRequest.ts",
+        rename_all = "camelCase"
+    )
+)]
+pub struct UpdateDelegationJobRequest {
+    pub job_id: String,
+    pub worker: Option<DelegationTargetView>,
+    pub reviewer: Option<ReviewerTargetView>,
+    pub title: Option<String>,
+    pub objective: Option<String>,
+    pub scope: Option<Vec<String>>,
+    pub context: Option<Vec<String>>,
+    pub acceptance_checks: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(
+        export,
+        export_to = "DelegationTargetOption.ts",
+        rename_all = "camelCase"
+    )
+)]
+pub struct DelegationTargetOption {
+    pub target: DelegationTargetView,
+    pub available: bool,
+    pub label: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-bindings", derive(TS))]
+#[cfg_attr(
+    feature = "export-bindings",
+    ts(export, export_to = "DelegationHandoff.ts", rename_all = "camelCase")
+)]
+pub struct DelegationHandoff {
+    pub job_id: String,
+    pub summary: String,
+    pub changed_files: Vec<String>,
+    pub artifact_names: Vec<String>,
+    pub status: DelegationStatus,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "export-bindings", derive(TS))]
@@ -121,6 +386,13 @@ pub struct DelegationJobView {
     #[cfg_attr(feature = "export-bindings", ts(optional))]
     pub reviewer_attempt_id: Option<String>,
     pub reviewer_agent: String,
+    pub worker_target: DelegationTargetView,
+    pub reviewer_target: ReviewerTargetView,
+    pub resolved_worker_target: Option<ResolvedTargetMetadataView>,
+    pub resolved_reviewer_target: Option<ResolvedTargetMetadataView>,
+    pub approved: bool,
+    pub origin: Option<DelegationOriginView>,
+    pub attempts: Vec<DelegationAttemptView>,
     pub attempt: u32,
     pub status: DelegationStatus,
     pub changed_files: Vec<String>,
@@ -149,6 +421,7 @@ pub struct DelegationJobView {
 pub enum DelegationEvent {
     CardCreated { job: DelegationJobView },
     ApprovalRequired { job: DelegationJobView },
+    Queued { job: DelegationJobView },
     WorkerStarted { job: DelegationJobView },
     WorkerCompleted { job: DelegationJobView },
     ReviewerStarted { job: DelegationJobView },
@@ -166,6 +439,7 @@ pub enum DelegationEvent {
 enum EventKind {
     CardCreated,
     ApprovalRequired,
+    Queued,
     WorkerStarted,
     WorkerCompleted,
     ReviewerStarted,
@@ -184,6 +458,7 @@ impl From<CoreDelegationStatus> for DelegationStatus {
         match status {
             CoreDelegationStatus::Planned => Self::Planned,
             CoreDelegationStatus::AwaitingApproval => Self::AwaitingApproval,
+            CoreDelegationStatus::Queued => Self::Queued,
             CoreDelegationStatus::WorkerRunning => Self::WorkerRunning,
             CoreDelegationStatus::ReviewRunning => Self::ReviewRunning,
             CoreDelegationStatus::ReadyToApply => Self::ReadyToApply,
@@ -228,6 +503,143 @@ fn worker_result_from_store(store: &DelegationStore, job: &DelegationJob) -> Opt
         .read_artifact(&job.job_id, "worker-result.json")
         .ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedDelegationTargets {
+    worker: ResolvedTargetMetadata,
+    reviewer: ResolvedTargetMetadata,
+}
+
+fn fingerprint(value: impl AsRef<[u8]>) -> String {
+    blake3::hash(value.as_ref()).to_hex().to_string()
+}
+
+fn resolve_delegation_target(
+    config: &Config,
+    registry: &zest_core::ProviderRegistry,
+    skipped: &[zest_core::Skipped],
+    target: DelegationTarget,
+) -> Result<ResolvedTargetMetadata, String> {
+    match target {
+        DelegationTarget::Provider {
+            provider_id,
+            model,
+            effort,
+        } => {
+            let resolved = resolve_provider_target(
+                registry,
+                skipped,
+                &provider_id,
+                model.as_deref(),
+                effort.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+            let config_fingerprint = config
+                .providers
+                .get(&provider_id)
+                .map(|entry| fingerprint(format!("provider:{provider_id}:{entry:?}")))
+                .unwrap_or_else(|| fingerprint(format!("provider:{provider_id}:missing")));
+            // This is deliberately only a readiness/reference fingerprint. The
+            // credential value never enters the job record, and keyless local
+            // providers do not get a synthetic credential fingerprint.
+            let credential_reference = match config.providers.get(&provider_id) {
+                Some(ProviderConfig::Anthropic {
+                    credential,
+                    api_key_env,
+                    ..
+                }) => credential.as_deref().or(Some(api_key_env.as_str())),
+                Some(ProviderConfig::OpenaiCompatible {
+                    credential,
+                    api_key_env,
+                    ..
+                }) => credential.as_deref().or(api_key_env.as_deref()),
+                _ => None,
+            };
+            let credential_fingerprint = credential_reference.map(|reference| {
+                fingerprint(format!(
+                    "provider-credential:{provider_id}:{reference}:ready"
+                ))
+            });
+            Ok(ResolvedTargetMetadata {
+                target: DelegationTarget::Provider {
+                    provider_id: resolved.provider_id,
+                    model: Some(resolved.model),
+                    effort: Some(resolved.effort),
+                },
+                config_fingerprint,
+                credential_fingerprint,
+            })
+        }
+        DelegationTarget::ExternalAgent { agent_id } => {
+            let agent = config.agents.get(&agent_id).ok_or_else(|| {
+                format!(
+                    "external worker `{agent_id}` is unavailable. Connect or configure it, or choose another target."
+                )
+            })?;
+            if agent.workspace != zest_core::ExternalWorkspace::Isolated {
+                return Err(format!(
+                    "external worker `{agent_id}` must use an isolated workspace"
+                ));
+            }
+            Ok(ResolvedTargetMetadata {
+                target: DelegationTarget::ExternalAgent {
+                    agent_id: agent_id.clone(),
+                },
+                config_fingerprint: fingerprint(format!("external:{agent_id}:{agent:?}")),
+                credential_fingerprint: None,
+            })
+        }
+    }
+}
+
+fn resolve_job_targets(
+    root: &Path,
+    job: &DelegationJob,
+) -> Result<ResolvedDelegationTargets, String> {
+    let config = Config::find(root).map_err(|error| error.to_string())?;
+    let (registry, skipped) = zest_core::ProviderRegistry::from_config_at(&config, root);
+    let worker = resolve_delegation_target(&config, &registry, &skipped, job.worker_target())?;
+    let reviewer = if matches!(job.reviewer_target, ReviewerTarget::SameAsWorker) {
+        worker.clone()
+    } else {
+        resolve_delegation_target(&config, &registry, &skipped, job.resolved_reviewer_target())?
+    };
+    Ok(ResolvedDelegationTargets { worker, reviewer })
+}
+
+fn attempt_usage_from_external(report: &ExternalUsageReport) -> AttemptUsage {
+    AttemptUsage {
+        input_tokens: report.input_tokens,
+        output_tokens: report.output_tokens,
+        cache_read_tokens: report.cached_read_tokens,
+        cache_write_tokens: report.cached_write_tokens,
+    }
+}
+
+fn validate_authoritative_checks(
+    expected: &[zest_core::AcceptanceCheckResult],
+    report: &ReviewReport,
+) -> Result<(), String> {
+    for expected_check in expected {
+        let Some(actual) = report
+            .checks
+            .iter()
+            .find(|check| check.command == expected_check.command)
+        else {
+            return Err(format!(
+                "reviewer omitted authoritative acceptance check `{}`",
+                expected_check.command
+            ));
+        };
+        if actual.status != expected_check.status || actual.output != expected_check.output {
+            return Err(format!(
+                "reviewer changed authoritative result for `{}`",
+                expected_check.command
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobView {
@@ -283,10 +695,30 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
         scope: job.card.scope.clone(),
         context: job.card.context.clone(),
         depends_on: job.card.depends_on.clone(),
-        agent: job.card.agent.clone(),
+        agent: job.worker_target().identity().to_string(),
         worker_attempt_id: job.worker_attempt_id.clone(),
         reviewer_attempt_id: job.reviewer_attempt_id.clone(),
-        reviewer_agent: job.card.agent.clone(),
+        reviewer_agent: job.resolved_reviewer_target().identity().to_string(),
+        worker_target: (&job.worker_target()).into(),
+        reviewer_target: (&job.reviewer_target).into(),
+        resolved_worker_target: job.resolved_worker_target.as_ref().map(Into::into),
+        resolved_reviewer_target: job.resolved_reviewer_target.as_ref().map(Into::into),
+        approved: job.is_approved(),
+        origin: job.origin.as_ref().map(Into::into),
+        attempts: job
+            .attempts
+            .iter()
+            .map(|attempt| DelegationAttemptView {
+                attempt_id: attempt.attempt_id.clone(),
+                role: format!("{:?}", attempt.role).to_lowercase(),
+                agent: attempt.agent.clone(),
+                target: attempt.target.as_ref().map(Into::into),
+                usage: attempt.usage.as_ref().map(Into::into),
+                resolved_target: attempt.resolved_target.as_ref().map(Into::into),
+                started_at: attempt.started_at,
+                finished_at: attempt.finished_at,
+            })
+            .collect(),
         attempt: job.attempt,
         status: job.status.into(),
         changed_file_count: changed_files.len(),
@@ -303,14 +735,218 @@ pub fn job_view(store: &DelegationStore, job: &DelegationJob) -> DelegationJobVi
 pub struct DelegationCoordinator {
     lanes: Arc<Semaphore>,
     running: Mutex<HashMap<String, Arc<zest_core::CancelToken>>>,
+    ledger: Arc<Mutex<zest_core::Ledger>>,
 }
 
 impl DelegationCoordinator {
     pub fn new() -> Self {
+        Self::with_ledger(Arc::new(Mutex::new(zest_core::Ledger::load())))
+    }
+
+    pub fn with_ledger(ledger: Arc<Mutex<zest_core::Ledger>>) -> Self {
         Self {
             lanes: Arc::new(Semaphore::new(MAX_ACTIVE_WORKER_JOBS)),
             running: Mutex::new(HashMap::new()),
+            ledger,
         }
+    }
+
+    pub fn list_targets(root: &Path) -> Result<Vec<DelegationTargetOption>, String> {
+        let config = Config::find(root).map_err(|error| error.to_string())?;
+        let (registry, skipped) = zest_core::ProviderRegistry::from_config_at(&config, root);
+        let mut targets = Vec::new();
+        for provider_id in config.providers.keys() {
+            let target = DelegationTarget::Provider {
+                provider_id: provider_id.clone(),
+                model: None,
+                effort: None,
+            };
+            let error = resolve_provider_target(&registry, &skipped, provider_id, None, None)
+                .err()
+                .map(|error| error.to_string());
+            targets.push(DelegationTargetOption {
+                label: provider_id.clone(),
+                available: error.is_none(),
+                target: (&target).into(),
+                error,
+            });
+        }
+        for (agent_id, agent) in &config.agents {
+            let target = DelegationTarget::ExternalAgent {
+                agent_id: agent_id.clone(),
+            };
+            let error = if agent.workspace != zest_core::ExternalWorkspace::Isolated {
+                Some("external delegation requires an isolated workspace".into())
+            } else {
+                None
+            };
+            targets.push(DelegationTargetOption {
+                label: agent_id.clone(),
+                available: error.is_none(),
+                target: (&target).into(),
+                error,
+            });
+        }
+        Ok(targets)
+    }
+
+    pub fn create_job(&self, root: &Path, request: CreateDelegationJobRequest) -> ResultView {
+        let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
+        let worker: DelegationTarget = request.worker.into();
+        let reviewer: ReviewerTarget = request.reviewer.map(Into::into).unwrap_or_default();
+        let card = zest_core::FeatureCard {
+            version: zest_core::DELEGATION_FORMAT_VERSION,
+            card_id: String::new(),
+            title: request.title,
+            objective: request.objective,
+            lane: request.lane,
+            scope: request.scope,
+            context: request.context,
+            depends_on: request.depends_on,
+            agent: worker.identity().to_string(),
+            worker_target: Some(worker),
+            acceptance_checks: request.acceptance_checks,
+            review_required: true,
+            reviewer_target: reviewer.clone(),
+            created_at: 0,
+        };
+        let mut job = store
+            .create(
+                &request.parent_thread_id,
+                card,
+                capture_workspace_snapshot(root),
+            )
+            .map_err(|error| error.to_string())?;
+        job.reviewer_target = reviewer;
+        job.origin = Some(DelegationOrigin {
+            coordinator: "desktop_agent_board".into(),
+            chat_id: request.chat_id,
+            thread_id: Some(request.parent_thread_id),
+        });
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(job_view(&store, &job))
+    }
+
+    pub fn approve<R: Runtime + 'static>(
+        self: &Arc<Self>,
+        app: &AppHandle<R>,
+        root: &Path,
+        job_id: &str,
+    ) -> ResultView {
+        let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
+        let mut job = store
+            .load(job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "delegation job was not found".to_string())?;
+        let resolved = match resolve_job_targets(root, &job) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                job.transition(CoreDelegationStatus::Blocked)
+                    .map_err(|e| e.to_string())?;
+                job.set_error(error.clone());
+                store.update(job.clone()).map_err(|e| e.to_string())?;
+                self.emit(app, &store, &job, EventKind::Blocked);
+                return Ok(job_view(&store, &job));
+            }
+        };
+        job.approve_with_resolved_targets(resolved.worker, resolved.reviewer)
+            .map_err(|error| error.to_string())?;
+        job.base_workspace_snapshot = capture_workspace_snapshot(root);
+        job.transition(CoreDelegationStatus::Queued)
+            .map_err(|error| error.to_string())?;
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
+        self.emit(app, &store, &job, EventKind::Queued);
+        self.enqueue(app.clone(), root.to_path_buf(), job.job_id.clone());
+        Ok(job_view(&store, &job))
+    }
+
+    pub fn update_job(&self, root: &Path, request: UpdateDelegationJobRequest) -> ResultView {
+        let store = DelegationStore::open(root).map_err(|error| error.to_string())?;
+        let mut job = store
+            .load(&request.job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "delegation job was not found".to_string())?;
+        if !matches!(
+            job.status,
+            CoreDelegationStatus::AwaitingApproval
+                | CoreDelegationStatus::Blocked
+                | CoreDelegationStatus::ChangesRequested
+        ) {
+            return Err("only jobs awaiting approval can be edited".into());
+        }
+        if let Some(target) = request.worker {
+            job.card.worker_target = Some(target.into());
+        }
+        if let Some(target) = request.reviewer {
+            job.reviewer_target = target.into();
+        }
+        job.card.reviewer_target = job.reviewer_target.clone();
+        if let Some(title) = request.title {
+            job.card.title = title;
+        }
+        if let Some(objective) = request.objective {
+            job.card.objective = objective;
+        }
+        if let Some(scope) = request.scope {
+            job.card.scope = scope;
+        }
+        if let Some(context) = request.context {
+            job.card.context = context;
+        }
+        if let Some(checks) = request.acceptance_checks {
+            job.card.acceptance_checks = checks;
+        }
+        job.card.agent = job.worker_target().identity().to_string();
+        // Any edit invalidates the resolved target/configuration that was
+        // previously approved, even when the job is already AwaitingApproval
+        // and therefore has no status transition to clear it for us.
+        job.approved_at = None;
+        job.approval_fingerprint = None;
+        job.resolved_worker_target = None;
+        job.resolved_reviewer_target = None;
+        if job.status != CoreDelegationStatus::AwaitingApproval {
+            job.transition(CoreDelegationStatus::AwaitingApproval)
+                .map_err(|e| e.to_string())?;
+        }
+        store
+            .update(job.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(job_view(&store, &job))
+    }
+
+    pub fn handoff(&self, root: &Path, job_id: &str) -> Result<DelegationHandoff, String> {
+        let store = DelegationStore::open(root).map_err(|e| e.to_string())?;
+        let job = store
+            .load(job_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "delegation job was not found".to_string())?;
+        let summary = worker_result_from_store(&store, &job)
+            .map(|r| r.summary)
+            .unwrap_or_else(|| {
+                job.error
+                    .clone()
+                    .unwrap_or_else(|| "No worker summary is available yet.".into())
+            });
+        let diff = store
+            .read_artifact(job_id, "worker.diff")
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        Ok(DelegationHandoff {
+            job_id: job.job_id,
+            summary: summary.chars().take(8_000).collect(),
+            changed_files: diff_paths(&diff),
+            artifact_names: vec![
+                "worker.diff".into(),
+                "worker-result.json".into(),
+                "review-result.json".into(),
+            ],
+            status: job.status.into(),
+        })
     }
 
     pub fn enqueue<R: Runtime + 'static>(
@@ -352,7 +988,16 @@ impl DelegationCoordinator {
                 Err(error) => Err(format!("delegation scheduler stopped: {error}")),
             };
             if let Err(error) = result {
-                let _ = coordinator.fail(&app, &root, &job_id, &error, EventKind::Failed);
+                let kind = if error.contains("unavailable")
+                    || error.contains("not configured")
+                    || error.contains("owns its agent loop")
+                    || error.contains("Connect")
+                {
+                    EventKind::Blocked
+                } else {
+                    EventKind::Failed
+                };
+                let _ = coordinator.fail(&app, &root, &job_id, &error, kind);
             }
             if let Ok(mut running) = coordinator.running.lock() {
                 if running
@@ -427,7 +1072,6 @@ impl DelegationCoordinator {
             .update(job.clone())
             .map_err(|error| error.to_string())?;
         self.emit(app, &store, &job, EventKind::ApprovalRequired);
-        self.enqueue(app.clone(), root.to_path_buf(), job.job_id.clone());
         Ok(job_view(&store, &job))
     }
 
@@ -524,7 +1168,7 @@ impl DelegationCoordinator {
     ) {
         let Ok(jobs) = store.list() else { return };
         for candidate in &jobs {
-            if candidate.status != CoreDelegationStatus::AwaitingApproval {
+            if candidate.status != CoreDelegationStatus::Queued || !candidate.is_approved() {
                 continue;
             }
             if let Some(reason) = dependency_blocker(candidate, &jobs) {
@@ -564,7 +1208,7 @@ impl DelegationCoordinator {
             .load(job_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "delegation job disappeared".to_string())?;
-        if job.status != CoreDelegationStatus::AwaitingApproval {
+        if job.status != CoreDelegationStatus::Queued || !job.is_approved() {
             return Ok(());
         }
         let dependencies = store.list().map_err(|error| error.to_string())?;
@@ -591,18 +1235,30 @@ impl DelegationCoordinator {
         }
         let config = Config::find(root).map_err(|error| error.to_string())?;
         let parent_secret_envs = config.provider_key_env_names();
-        let agent =
-            config.agents.get(&job.card.agent).cloned().ok_or_else(|| {
-                format!("external agent {} is no longer configured", job.card.agent)
-            })?;
-        if agent.workspace != zest_core::ExternalWorkspace::Isolated {
-            return Err("feature-card jobs require an isolated worker workspace".into());
+        let resolved_targets = resolve_job_targets(root, &job).map_err(|error| {
+            format!("{error}. Reconnect the provider/worker or choose another target.")
+        })?;
+        if !job.is_approved_for(&resolved_targets.worker, &resolved_targets.reviewer) {
+            job.transition(CoreDelegationStatus::AwaitingApproval)
+                .map_err(|error| error.to_string())?;
+            job.set_error(
+                "The approved provider or worker configuration changed. Review the target and approve a fresh attempt.",
+            );
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(app, &store, &job, EventKind::ApprovalRequired);
+            return Ok(());
         }
         job.transition(CoreDelegationStatus::WorkerRunning)
             .map_err(|error| error.to_string())?;
-        let worker_agent = job.card.agent.clone();
+        let worker_agent = resolved_targets.worker.target.identity().to_string();
         let worker_attempt = job
-            .start_attempt(AttemptRole::Worker, &worker_agent)
+            .start_attempt_with_metadata(
+                AttemptRole::Worker,
+                &worker_agent,
+                resolved_targets.worker.clone(),
+            )
             .map_err(|error| error.to_string())?;
         store
             .update(job.clone())
@@ -642,27 +1298,61 @@ impl DelegationCoordinator {
         } else {
             worker_prompt
         };
-        let worker = run_delegation_worker(
-            root,
-            &agent,
-            &worker_prompt,
-            Some(cancel),
-            &parent_secret_envs,
-        )
-        .await;
+        let worker_target = resolved_targets.worker.target.clone();
+        let worker = match &worker_target {
+            DelegationTarget::ExternalAgent { agent_id } => {
+                let agent = config
+                    .agents
+                    .get(agent_id)
+                    .ok_or_else(|| format!("external worker `{agent_id}` is unavailable"))?;
+                let result = run_delegation_worker(
+                    root,
+                    agent,
+                    &worker_prompt,
+                    Some(cancel),
+                    &parent_secret_envs,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                if let Ok(mut ledger) = self.ledger.lock() {
+                    ledger.record_external(agent_id, result.usage.as_ref());
+                }
+                let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
+                let parsed = WorkerResult::from_external(&result.text, &result.diff)
+                    .ok_or_else(|| "worker returned no usable result".to_string())?;
+                Ok((parsed, result.diff, result.text, attempt_usage))
+            }
+            DelegationTarget::Provider { .. } => {
+                let result = run_provider_worker(
+                    root,
+                    config.clone(),
+                    &worker_target,
+                    &worker_prompt,
+                    Some(self.ledger.clone()),
+                    Some(cancel),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok((
+                    result.result,
+                    result.diff,
+                    result.final_text,
+                    Some(result.usage),
+                ))
+            }
+        };
         if cancel.is_cancelled() {
             return self.cancelled(app, &store, job).await;
         }
-        let worker = worker.map_err(|error| format!("worker failed: {error}"))?;
-        let worker_result = WorkerResult::from_external(&worker.text, &worker.diff)
-            .ok_or_else(|| "worker returned no usable result".to_string())?;
-        if worker.diff.trim().is_empty() {
+        let (worker_result, worker_diff, worker_text, worker_usage) =
+            worker.map_err(|error: String| format!("worker failed: {error}"))?;
+        if worker_diff.trim().is_empty() {
             return Err("worker returned no diff artifact".into());
         }
-        validate_diff_scope(root, &worker.diff, &job.card.scope)
+        validate_diff_scope(root, &worker_diff, &job.card.scope)
             .map_err(|error| format!("worker produced an unsafe or out-of-scope diff: {error}"))?;
         store
-            .write_artifact(job_id, "worker.diff", worker.diff.as_bytes())
+            .write_artifact(job_id, "worker.diff", worker_diff.as_bytes())
             .map_err(|error| error.to_string())?;
         store
             .write_artifact(
@@ -672,38 +1362,85 @@ impl DelegationCoordinator {
             )
             .map_err(|error| error.to_string())?;
         job.finish_attempt(&worker_attempt);
+        if let Some(usage) = worker_usage {
+            job.set_attempt_usage(&worker_attempt, usage)
+                .map_err(|e| e.to_string())?;
+        }
+        let _ = worker_text;
         self.emit(app, &store, &job, EventKind::WorkerCompleted);
         if cancel.is_cancelled() {
             return self.cancelled(app, &store, job).await;
         }
         job.transition(CoreDelegationStatus::ReviewRunning)
             .map_err(|error| error.to_string())?;
-        let reviewer_agent = job.card.agent.clone();
+        let reviewer_target = resolved_targets.reviewer.target.clone();
+        let reviewer_agent = reviewer_target.identity().to_string();
         let reviewer_attempt = job
-            .start_attempt(AttemptRole::Reviewer, &reviewer_agent)
+            .start_attempt_with_metadata(
+                AttemptRole::Reviewer,
+                &reviewer_agent,
+                resolved_targets.reviewer.clone(),
+            )
             .map_err(|error| error.to_string())?;
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
         self.emit(app, &store, &job, EventKind::ReviewerStarted);
-        let review_prompt = job.card.review_prompt(root, &snapshot, &worker_result);
-        let review = run_delegation_reviewer(
+        let checks = run_acceptance_checks(
             root,
-            &agent,
-            &worker.diff,
-            &review_prompt,
+            config.clone(),
+            &worker_diff,
+            &job.card.acceptance_checks,
             Some(cancel),
-            &parent_secret_envs,
         )
         .await
-        .map_err(|error| format!("reviewer failed: {error}"))?;
+        .map_err(|error| format!("acceptance checks failed: {error}"))?;
+        let check_evidence = serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?;
+        let review_prompt = format!("{}\n\n# Authoritative acceptance-check results\n```json\n{}\n```\nReport these exact command/status/output values in your checks array.", job.card.review_prompt(root, &snapshot, &worker_result), check_evidence);
+        let review = match &reviewer_target {
+            DelegationTarget::ExternalAgent { agent_id } => {
+                let agent = config
+                    .agents
+                    .get(agent_id)
+                    .ok_or_else(|| format!("external reviewer `{agent_id}` is unavailable"))?;
+                let result = run_delegation_reviewer(
+                    root,
+                    agent,
+                    &worker_diff,
+                    &review_prompt,
+                    Some(cancel),
+                    &parent_secret_envs,
+                )
+                .await
+                .map_err(|error| format!("reviewer failed: {error}"))?;
+                if let Ok(mut ledger) = self.ledger.lock() {
+                    ledger.record_external(agent_id, result.usage.as_ref());
+                }
+                let attempt_usage = result.usage.as_ref().map(attempt_usage_from_external);
+                (result.text, result.diff, attempt_usage)
+            }
+            DelegationTarget::Provider { .. } => {
+                let result = run_provider_reviewer(
+                    root,
+                    config.clone(),
+                    &reviewer_target,
+                    &worker_diff,
+                    &review_prompt,
+                    Some(self.ledger.clone()),
+                    Some(cancel),
+                )
+                .await
+                .map_err(|error| format!("reviewer failed: {error}"))?;
+                (result.final_text, result.reviewer_diff, Some(result.usage))
+            }
+        };
         if cancel.is_cancelled() {
             return self.cancelled(app, &store, job).await;
         }
-        if !review.diff.trim().is_empty() {
+        if !review.1.trim().is_empty() {
             let discarded = serde_json::json!({
                 "error": "reviewer produced edits; the reviewer diff was discarded",
-                "raw": review.text,
+                "raw": review.0,
             });
             store
                 .write_artifact(
@@ -713,6 +1450,10 @@ impl DelegationCoordinator {
                 )
                 .map_err(|error| error.to_string())?;
             job.finish_attempt(&reviewer_attempt);
+            if let Some(usage) = review.2 {
+                job.set_attempt_usage(&reviewer_attempt, usage)
+                    .map_err(|e| e.to_string())?;
+            }
             job.transition(CoreDelegationStatus::Blocked)
                 .map_err(|error| error.to_string())?;
             job.set_error(
@@ -724,10 +1465,10 @@ impl DelegationCoordinator {
             self.emit(app, &store, &job, EventKind::Blocked);
             return Ok(());
         }
-        let report = match ReviewReport::parse(&review.text, &job.card.acceptance_checks) {
+        let report = match ReviewReport::parse(&review.0, &job.card.acceptance_checks) {
             Ok(report) => report,
             Err(error) => {
-                let malformed = serde_json::json!({"error": error.to_string(), "raw": review.text});
+                let malformed = serde_json::json!({"error": error.to_string(), "raw": review.0});
                 store
                     .write_artifact(
                         job_id,
@@ -737,6 +1478,10 @@ impl DelegationCoordinator {
                     )
                     .map_err(|error| error.to_string())?;
                 job.finish_attempt(&reviewer_attempt);
+                if let Some(usage) = review.2.clone() {
+                    job.set_attempt_usage(&reviewer_attempt, usage)
+                        .map_err(|e| e.to_string())?;
+                }
                 job.transition(CoreDelegationStatus::Blocked)
                     .map_err(|error| error.to_string())?;
                 job.set_error(error.to_string());
@@ -765,6 +1510,33 @@ impl DelegationCoordinator {
             self.emit(app, &store, &job, EventKind::Blocked);
             return Ok(());
         }
+        if let Err(error) = validate_authoritative_checks(&checks, &report) {
+            store
+                .write_artifact(
+                    job_id,
+                    "review-result.json",
+                    &serde_json::to_vec_pretty(&serde_json::json!({
+                        "error": error,
+                        "report": report,
+                        "authoritativeChecks": checks,
+                    }))
+                    .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+            job.finish_attempt(&reviewer_attempt);
+            if let Some(usage) = review.2 {
+                job.set_attempt_usage(&reviewer_attempt, usage)
+                    .map_err(|e| e.to_string())?;
+            }
+            job.transition(CoreDelegationStatus::Blocked)
+                .map_err(|error| error.to_string())?;
+            job.set_error(error);
+            store
+                .update(job.clone())
+                .map_err(|error| error.to_string())?;
+            self.emit(app, &store, &job, EventKind::Blocked);
+            return Ok(());
+        }
         store
             .write_artifact(
                 job_id,
@@ -773,6 +1545,10 @@ impl DelegationCoordinator {
             )
             .map_err(|error| error.to_string())?;
         job.finish_attempt(&reviewer_attempt);
+        if let Some(usage) = review.2 {
+            job.set_attempt_usage(&reviewer_attempt, usage)
+                .map_err(|e| e.to_string())?;
+        }
         store
             .update(job.clone())
             .map_err(|error| error.to_string())?;
@@ -829,8 +1605,12 @@ impl DelegationCoordinator {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "delegation job was not found".to_string())?;
         if !job.status.is_terminal() {
-            job.transition(CoreDelegationStatus::Failed)
-                .map_err(|error| error.to_string())?;
+            let next = if matches!(kind, EventKind::Blocked) {
+                CoreDelegationStatus::Blocked
+            } else {
+                CoreDelegationStatus::Failed
+            };
+            job.transition(next).map_err(|error| error.to_string())?;
             job.finish_active_attempts();
             job.set_error(error);
             store
@@ -867,6 +1647,7 @@ impl DelegationCoordinator {
         let event = match kind {
             EventKind::CardCreated => DelegationEvent::CardCreated { job: view },
             EventKind::ApprovalRequired => DelegationEvent::ApprovalRequired { job: view },
+            EventKind::Queued => DelegationEvent::Queued { job: view },
             EventKind::WorkerStarted => DelegationEvent::WorkerStarted { job: view },
             EventKind::WorkerCompleted => DelegationEvent::WorkerCompleted { job: view },
             EventKind::ReviewerStarted => DelegationEvent::ReviewerStarted { job: view },
@@ -992,8 +1773,10 @@ mod tests {
             context: vec![],
             depends_on: vec![],
             agent: "worker".into(),
+            worker_target: None,
             acceptance_checks: vec![],
             review_required: true,
+            reviewer_target: ReviewerTarget::SameAsWorker,
             created_at: 0,
         };
         let job = store
@@ -1010,8 +1793,12 @@ mod tests {
         let snapshot = job.base_workspace_snapshot.clone();
         let worker_prompt = job.card.prompt(root, &snapshot, "");
         let mut job = job;
+        job.approve().unwrap();
+        job.transition(CoreDelegationStatus::Queued).unwrap();
         job.transition(CoreDelegationStatus::WorkerRunning).unwrap();
-        let worker_attempt = job.start_attempt(AttemptRole::Worker, "worker").unwrap();
+        let worker_attempt = job
+            .start_attempt_for_target(AttemptRole::Worker, "worker", job.worker_target())
+            .unwrap();
         store.update(job.clone()).unwrap();
 
         let worker = run_delegation_worker(root, agent, &worker_prompt, None, &parent_secret_envs)
@@ -1036,7 +1823,13 @@ mod tests {
             .unwrap();
         job.finish_attempt(&worker_attempt);
         job.transition(CoreDelegationStatus::ReviewRunning).unwrap();
-        let reviewer_attempt = job.start_attempt(AttemptRole::Reviewer, "worker").unwrap();
+        let reviewer_attempt = job
+            .start_attempt_for_target(
+                AttemptRole::Reviewer,
+                "worker",
+                job.resolved_reviewer_target(),
+            )
+            .unwrap();
         store.update(job.clone()).unwrap();
 
         let review_prompt = job.card.review_prompt(root, &snapshot, &worker_result);
